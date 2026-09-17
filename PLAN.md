@@ -152,6 +152,37 @@ counterexample state and stop; do not weaken `Step` to make it provable.
 - Order: WP0 → Wave 1 (8 parallel) → review 1 → Wave 2 (3) → review 2 →
   Wave 3 (2) → review 3. Seventeen agent runs in total.
 
+## 4a. What Wave 1 taught us (inputs to Wave 3)
+
+From the ngtcp2 trace harness (`harness/conn_trace.c`, WP8):
+
+- **`drop` and `ok []` look the same from outside.** `ngtcp2_conn_read_pkt`
+  returns 0 for both. The harness-side comparison must treat them as one
+  observation, so `track` must follow a *set* of candidate states rather than
+  one (`Core` gets `trackAll`; the harness keeps the set and reports a mismatch
+  only when it becomes empty).
+- **Effects can precede an error.** ngtcp2 fires `stream_open` and then fails
+  the same STREAM frame with FLOW_CONTROL_ERROR. The spec says nothing about
+  application callbacks, so when the observation is an error only the error
+  code is compared.
+- **Only the error code is visible, never the rule**: `frame_type` is always 0
+  and many rules share PROTOCOL_VIOLATION.
+- **Send side is one-directional**: every frame ngtcp2 emits must satisfy
+  `maySend`; the absence of a frame proves nothing (pacing, congestion window).
+- **Not reachable through this harness**: the handshake and transport parameter
+  validation (WP1, WP11 are theorem-only), second paths and migration,
+  stateless reset, receive-side coalescing, the closing/draining periods after
+  the first fatal error (cheap to add), application close.
+
+From the spec packages:
+
+- `Component.MaySend` is frame-level only; WP3, WP5, WP6 and WP7 each needed
+  packet-type-, packet- or datagram-level send rules and exported them as free
+  functions. Before Wave 3, `Core` gains optional packet- and datagram-level
+  send predicates (default `True`) and the free functions are folded in.
+- A server's general right to refuse a connection (CONNECTION_REFUSED, §5.2.2)
+  belongs to connection acceptance in WP12, not to address validation.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server

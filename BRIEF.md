@@ -49,6 +49,8 @@ worktrees.
 - `MaySend` must never be stricter than the text ("has no effect" is not "must
   not be sent"), and must accept an exact repeat of a frame it accepted earlier:
   frames are idempotent (§12.4) and are retransmitted after loss (§13.3).
+- Scratch files (axiom checks, experiments) go under `out/` inside your own
+  worktree, never in a shared temp directory: other agents run in parallel.
 - Where the text is ambiguous, choose the reading, encode it, and record it in
   the NOTES at the end of the file.
 - Anything that belongs to another package (see the table in `PLAN.md` §2) is
