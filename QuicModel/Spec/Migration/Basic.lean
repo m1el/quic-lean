@@ -302,7 +302,9 @@ def reusedAcrossPeer (s : State) (p : Path) (seq : Nat) : Bool :=
 def rebindKeepsCid (s : State) (p : Path) (seq : Nat) : Bool :=
   s.dcidOn.any (fun e =>
     decide (e.2 = seq) && decide (e.1.loc = p.loc) && decide (e.1.peer ≠ p.peer) &&
-      decide (s.scidOn.get? e.1 = s.scidOn.get? p))
+      (match s.scidOn.get? e.1, s.scidOn.get? p with
+       | some a, some b => decide (a = b)
+       | _, _ => false))
 
 /-! ### Packet arrival -/
 
