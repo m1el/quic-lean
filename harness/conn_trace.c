@@ -129,8 +129,9 @@
  *             retry> code=<n> frame_type=<n> reason=<hex>
  *       what ngtcp2_ccerr_set_liberr makes of a failing return code: the QUIC
  *       error code ngtcp2 would actually close with.  Followed by the
- *       CONNECTION_CLOSE packet from ngtcp2_conn_write_connection_close, as an
- *       ordinary OUT record.  After this the script stops.
+ *       CONNECTION_CLOSE packet from ngtcp2_conn_write_connection_close (as an
+ *       ordinary OUT record; nothing is written for an idle close).  After
+ *       this the script stops.
  *   OUT space=<initial|handshake|app> pn=<n> frames=[<f>;<f>;...]
  *       a packet the connection wrote.  The harness unprotects it with the
  *       stub crypto (mask = first 5 bytes of the sample, tag = last 16 bytes)
@@ -1194,8 +1195,13 @@ static void tr_fatal(harness *h, int rv) {
   ngtcp2_path_storage_zero(&ps);
   n = ngtcp2_conn_write_connection_close(h->conn, &ps.path, &pi, buf,
                                          sizeof(buf), &ccerr, h->ts);
-  TR(h, "RET write_connection_close=%s\n", n < 0 ? rc_name((int)n) : "OK");
-  if (n > 0) dump_out_datagram(h, buf, (size_t)n);
+  if (n < 0) {
+    TR(h, "RET write_connection_close=%s\n", rc_name((int)n));
+  } else {
+    /* n == 0 is normal for an idle close or a drop: nothing goes on the wire. */
+    TR(h, "RET write_connection_close=OK n=%td\n", (ptrdiff_t)n);
+    if (n > 0) dump_out_datagram(h, buf, (size_t)n);
+  }
 }
 
 static void step_recv(harness *h, int space, int64_t pn, const uint8_t *fb,

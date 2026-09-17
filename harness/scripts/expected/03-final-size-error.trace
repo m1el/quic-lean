@@ -13,8 +13,8 @@ TIME now=0 expiry=12500000
 IN  space=app pn=1 frames=[STREAM id=0 off=0 fin=1 data=6162636465]
 RET read_pkt=FINAL_SIZE
 ERR type=transport code=6 frame_type=0 reason=
-RET write_connection_close=OK
+RET write_connection_close=OK n=30
 OUT space=app pn=0 frames=[CONNECTION_CLOSE kind=transport err=6 ftype=0 reason=]
 TIME now=0 expiry=12500000
 SKIP drain
-SUM 2f417cc6e98a02c0
+SUM 3abfc982202fd2de

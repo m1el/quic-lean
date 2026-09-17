@@ -8,8 +8,8 @@ IN  space=app pn=0 frames=[HANDSHAKE_DONE]
 CB  update_key
 RET read_pkt=PROTO
 ERR type=transport code=10 frame_type=0 reason=
-RET write_connection_close=OK
+RET write_connection_close=OK n=30
 OUT space=app pn=0 frames=[CONNECTION_CLOSE kind=transport err=10 ftype=0 reason=]
 TIME now=0 expiry=30000000000
 SKIP drain
-SUM 4955e2a89dfc5085
+SUM ff1f2d4d9ffb900d

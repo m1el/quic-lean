@@ -8,8 +8,8 @@ IN  space=app pn=0 frames=[NEW_CONNECTION_ID seq=1 rpt=0 cid=c1c1c1c1c1c1c1c1 to
 CB  update_key
 RET read_pkt=CONNECTION_ID_LIMIT
 ERR type=transport code=9 frame_type=0 reason=
-RET write_connection_close=OK
+RET write_connection_close=OK n=30
 OUT space=app pn=0 frames=[CONNECTION_CLOSE kind=transport err=9 ftype=0 reason=]
 TIME now=0 expiry=30000000000
 SKIP drain
-SUM 448e94901bf8f610
+SUM 5597d6bd113e21ca
