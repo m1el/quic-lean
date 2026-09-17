@@ -268,19 +268,28 @@ def paramEntry : P (Nat × ByteArray) := do
   let v ← P.take len
   return (id, v)
 
-/-- Decode a whole `Transport Parameters` sequence.  The `pos < pos'` guard is
-    dead code — `paramEntry` always consumes at least two bytes, see
-    `paramEntry_progress` — but it keeps the recursion structurally total. -/
+/-- Decode a whole `Transport Parameters` sequence, with `fuel` an upper bound
+    on the bytes left to read.  The recursion is structural in `fuel` so that
+    the decoder reduces in the kernel (`decide` works on it).  The `pos < pos'`
+    guard is dead code — `paramEntry` always consumes at least two bytes, see
+    `paramEntry_progress` — and so is `fuel = 0` with bytes still to read, since
+    every entry consumes at least one byte. -/
+def decodeRawAux : Nat → ByteArray → Nat → Except Err Raw
+  | 0, _, _ => .ok []
+  | fuel + 1, buf, pos =>
+    if pos < buf.size then
+      match paramEntry.run buf pos with
+      | .error e => .error e
+      | .ok (kv, pos') =>
+        if pos < pos' then (decodeRawAux fuel buf pos').map (kv :: ·)
+        else .error .truncated
+    else .ok []
+
 def decodeRaw (buf : ByteArray) (pos : Nat := 0) : Except Err Raw :=
-  if _hlt : pos < buf.size then
-    match paramEntry.run buf pos with
-    | .error e => .error e
-    | .ok (kv, pos') =>
-      if _hp : pos < pos' then (decodeRaw buf pos').map (kv :: ·)
-      else .error .truncated
-  else .ok []
-termination_by buf.size - pos
-decreasing_by omega
+  decodeRawAux (buf.size - pos) buf pos
+
+/-- The name the work package uses for `decodeRaw`. -/
+abbrev decodeTransportParams (b : ByteArray) : Except Err Raw := decodeRaw b
 
 def encodeRawEntry (e : Nat × ByteArray) : ByteArray :=
   encodeVarint e.1 ++ (encodeVarint e.2.size ++ e.2)
@@ -365,32 +374,50 @@ theorem one_le_size_encodeRawEntry (e : Nat × ByteArray) : 1 ≤ (encodeRawEntr
   simp only [encodeRawEntry, ByteArray.size_append]
   omega
 
-theorem decodeRaw_encodeRaw_at (raw : Raw) (h : RawWF raw) (pre : ByteArray) :
-    decodeRaw (pre ++ encodeRaw raw) pre.size = .ok raw := by
-  induction raw generalizing pre with
+theorem size_encodeRaw_cons (e : Nat × ByteArray) (es : Raw) :
+    (encodeRaw (e :: es)).size = (encodeRawEntry e).size + (encodeRaw es).size := by
+  simp [encodeRaw, ByteArray.size_append]
+
+theorem decodeRawAux_encodeRaw (raw : Raw) (h : RawWF raw) :
+    ∀ (fuel : Nat) (pre : ByteArray), (encodeRaw raw).size ≤ fuel →
+      decodeRawAux fuel (pre ++ encodeRaw raw) pre.size = .ok raw := by
+  induction raw with
   | nil =>
-    rw [decodeRaw]
-    have hsz : (pre ++ encodeRaw ([] : Raw)).size = pre.size := by
-      simp [encodeRaw]
-    simp only [hsz, Nat.lt_irrefl, ↓reduceDIte]
+    intro fuel pre _
+    have hsz : (pre ++ encodeRaw ([] : Raw)).size = pre.size := by simp [encodeRaw]
+    cases fuel with
+    | zero => rfl
+    | succ f => simp only [decodeRawAux, hsz, Nat.lt_irrefl, ↓reduceIte]
   | cons e es ih =>
+    intro fuel pre hf
     have he := h e (by simp)
     have hes : RawWF es := fun x hx => h x (by simp [hx])
-    have hbuf : pre ++ encodeRaw (e :: es) = pre ++ encodeRawEntry e ++ encodeRaw es := by
-      simp [encodeRaw, ByteArray.append_assoc]
-    have hpar := parses_paramEntry he.1 he.2 pre (encodeRaw es)
     have h1 : 1 ≤ (encodeRawEntry e).size := one_le_size_encodeRawEntry e
-    have hlt : pre.size < (pre ++ encodeRaw (e :: es)).size := by
-      rw [hbuf]; simp only [ByteArray.size_append]; omega
-    rw [decodeRaw]
-    simp only [hlt, ↓reduceDIte]
-    rw [hbuf, hpar]
-    have hprog : pre.size < pre.size + (encodeRawEntry e).size := by omega
-    simp only [hprog, ↓reduceDIte]
-    have hih := ih hes (pre ++ encodeRawEntry e)
-    simp only [ByteArray.size_append, ByteArray.append_assoc] at hih ⊢
-    rw [hih]
-    rfl
+    have hsize := size_encodeRaw_cons e es
+    cases fuel with
+    | zero => exact absurd hf (by rw [hsize]; omega)
+    | succ f =>
+      have hbuf : pre ++ encodeRaw (e :: es) = pre ++ encodeRawEntry e ++ encodeRaw es := by
+        simp [encodeRaw, ByteArray.append_assoc]
+      have hpar := parses_paramEntry he.1 he.2 pre (encodeRaw es)
+      have hlt : pre.size < (pre ++ encodeRaw (e :: es)).size := by
+        rw [hbuf]; simp only [ByteArray.size_append]; omega
+      rw [decodeRawAux]
+      simp only [hlt, ↓reduceIte]
+      rw [hbuf, hpar]
+      have hprog : pre.size < pre.size + (encodeRawEntry e).size := by omega
+      simp only [hprog, ↓reduceIte]
+      have hih := ih hes f (pre ++ encodeRawEntry e) (by rw [hsize] at hf; omega)
+      simp only [ByteArray.size_append, ByteArray.append_assoc] at hih ⊢
+      rw [hih]
+      rfl
+
+theorem decodeRaw_encodeRaw_at (raw : Raw) (h : RawWF raw) (pre : ByteArray) :
+    decodeRaw (pre ++ encodeRaw raw) pre.size = .ok raw := by
+  unfold decodeRaw
+  refine decodeRawAux_encodeRaw raw h _ pre ?_
+  simp only [ByteArray.size_append]
+  omega
 
 /-- **Wire round trip.**  A representable sequence of transport parameters
     decodes back to itself. -/
@@ -509,6 +536,12 @@ def toEntries (tp : TransportParams) : List (ParamId × ByteArray) :=
   ((.activeConnectionIdLimit, vi tp.activeConnectionIdLimit) ::
    optEntry .initialSourceConnectionId tp.initialSourceConnectionId ++
    optEntry .retrySourceConnectionId tp.retrySourceConnectionId))))
+
+/-- Each parameter appears at most once in an encoded record. -/
+theorem nodup_toEntries (tp : TransportParams) : ((toEntries tp).map Prod.fst).Nodup := by
+  obtain ⟨odc, idle, srt, mups, imd, b5, b6, b7, s8, s9, ade, mad, dam, pa, acl, iscid, rscid⟩ := tp
+  cases odc <;> cases srt <;> cases pa <;> cases iscid <;> cases rscid <;> cases dam <;>
+    simp [toEntries, optEntry]
 
 /-- Forget the parameter names: what actually goes on the wire. -/
 def rawOf : List (ParamId × ByteArray) → Raw
