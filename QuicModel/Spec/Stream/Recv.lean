@@ -47,12 +47,6 @@ def mayStopSending : Phase → Bool
   | .resetRecvd | .resetRead => false
   | _ => true
 
-/-- §4.5, line 1520: generating a FINAL_SIZE_ERROR "is not mandatory, because
-    requiring that an endpoint generate these errors also means that the
-    endpoint needs to maintain the final size state for closed streams".  Those
-    are exactly the two terminal states. -/
-def closed : Phase → Bool := terminal
-
 end Phase
 
 /-! ### Received data
@@ -252,13 +246,16 @@ inductive Step : State → Event → Out → Prop
       Step s (.recvStream offset len fin) (.error .finalSizeError)
   /-- §4.5, line 1521: "Generating these errors is not mandatory, because
       requiring that an endpoint generate these errors also means that the
-      endpoint needs to maintain the final size state for closed streams."  In
-      the two terminal states, then, the frame may simply be ignored. -/
+      endpoint needs to maintain the final size state for closed streams."
+      Both sentences of §4.5 are SHOULDs and neither is restricted to a closed
+      stream, so *in any state* the frame may instead be ignored: it has no
+      effect at all, so no data at or beyond the final size is ever accounted
+      for and the final size itself cannot move.  Raising the error is the
+      recommended behaviour (`Recommended`) and the first outcome. -/
   | streamFinalSizeIgnored {s offset len fin}
       (h1 : decide (maxOffset < offset + len) = false)
       (h2 : decide (s.maxData < offset + len) = false)
-      (h3 : finalSizeViolation s (offset + len) fin = true)
-      (h4 : s.phase.closed = true) :
+      (h3 : finalSizeViolation s (offset + len) fin = true) :
       Step s (.recvStream offset len fin) (.ok s [])
   /-- §3.2, lines 1062–1075: the frame is accepted; the data is buffered, a FIN
       fixes the final size ("Size Known") and completing the stream reaches
@@ -298,10 +295,12 @@ inductive Step : State → Event → Out → Prop
       (h1 : decide (maxOffset < fs) = false) (h2 : decide (s.maxData < fs) = false)
       (h3 : resetFinalSizeViolation s fs = true) :
       Step s (.recvResetStream code fs) (.error .finalSizeError)
-  /-- §4.5, line 1521, as for STREAM frames. -/
+  /-- §4.5, line 1521, as for STREAM frames: in any state the endpoint may
+      decline to police the final size, and then the whole frame is discarded —
+      neither the final size nor the reset takes effect (see NOTES). -/
   | resetFinalSizeIgnored {s code fs}
       (h1 : decide (maxOffset < fs) = false) (h2 : decide (s.maxData < fs) = false)
-      (h3 : resetFinalSizeViolation s fs = true) (h4 : s.phase.closed = true) :
+      (h3 : resetFinalSizeViolation s fs = true) :
       Step s (.recvResetStream code fs) (.ok s [])
   /-- §3.2, line 1081: "Receiving a RESET_STREAM frame in the 'Recv' or 'Size
       Known' states causes the stream to enter the 'Reset Recvd' state." -/
@@ -386,7 +385,7 @@ def outcomes (s : State) : Event → List Out
         [.error .frameEncodingError, .error .flowControlError]
       else if decide (s.maxData < offset + len) then [.error .flowControlError]
       else if finalSizeViolation s (offset + len) fin then
-        .error .finalSizeError :: (if s.phase.closed then [.ok s []] else [])
+        [.error .finalSizeError, .ok s []]
       else
         .ok (accept s offset len fin) (effectsOf s (accept s offset len fin)) ::
           (if s.phase.isResetRecvd && (accept s offset len fin).complete then
@@ -398,7 +397,7 @@ def outcomes (s : State) : Event → List Out
         [.error .frameEncodingError, .error .flowControlError]
       else if decide (s.maxData < fs) then [.error .flowControlError]
       else if resetFinalSizeViolation s fs then
-        .error .finalSizeError :: (if s.phase.closed then [.ok s []] else [])
+        [.error .finalSizeError, .ok s []]
       else if s.phase.beforeAllData then
         [.ok { s with phase := .resetRecvd, highest := fs, finalSize := some fs }
              [.streamReset code fs]]
@@ -453,14 +452,10 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
           have c2' : decide (s.maxData < offset + len) = false := Bool.eq_false_iff.mpr c2
           split at h
           · rename_i c3
-            simp only [List.mem_cons] at h
-            rcases h with h | h
-            · subst h; exact .streamFinalSize c1' c2' c3
-            · split at h
-              · rename_i c4
-                simp only [List.mem_singleton] at h; subst h
-                exact .streamFinalSizeIgnored c1' c2' c3 c4
-              · simp at h
+            simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+            rcases h with h | h <;> subst h
+            · exact .streamFinalSize c1' c2' c3
+            · exact .streamFinalSizeIgnored c1' c2' c3
           · rename_i c3
             have c3' : finalSizeViolation s (offset + len) fin = false := Bool.eq_false_iff.mpr c3
             simp only [List.mem_cons] at h
@@ -489,14 +484,10 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
           have c2' : decide (s.maxData < fs) = false := Bool.eq_false_iff.mpr c2
           split at h
           · rename_i c3
-            simp only [List.mem_cons] at h
-            rcases h with h | h
-            · subst h; exact .resetFinalSize c1' c2' c3
-            · split at h
-              · rename_i c4
-                simp only [List.mem_singleton] at h; subst h
-                exact .resetFinalSizeIgnored c1' c2' c3 c4
-              · simp at h
+            simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+            rcases h with h | h <;> subst h
+            · exact .resetFinalSize c1' c2' c3
+            · exact .resetFinalSizeIgnored c1' c2' c3
           · rename_i c3
             have c3' : resetFinalSizeViolation s fs = false := Bool.eq_false_iff.mpr c3
             split at h
@@ -561,14 +552,14 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | streamTooLarge₂ h => simp [outcomes, h]
     | streamFlowControl h1 h2 => simp [outcomes, h1, h2]
     | streamFinalSize h1 h2 h3 => simp [outcomes, h1, h2, h3]
-    | streamFinalSizeIgnored h1 h2 h3 h4 => simp [outcomes, h1, h2, h3, h4]
+    | streamFinalSizeIgnored h1 h2 h3 => simp [outcomes, h1, h2, h3]
     | streamOk h1 h2 h3 => simp [outcomes, h1, h2, h3]
     | streamResetComplete h1 h2 h3 h4 => simp [outcomes, h1, h2, h3, h4]
     | resetTooLarge₁ h => simp [outcomes, h]
     | resetTooLarge₂ h => simp [outcomes, h]
     | resetFlowControl h1 h2 => simp [outcomes, h1, h2]
     | resetFinalSize h1 h2 h3 => simp [outcomes, h1, h2, h3]
-    | resetFinalSizeIgnored h1 h2 h3 h4 => simp [outcomes, h1, h2, h3, h4]
+    | resetFinalSizeIgnored h1 h2 h3 => simp [outcomes, h1, h2, h3]
     | resetOk h1 h2 h3 h4 => simp [outcomes, h1, h2, h3, h4]
     | resetSuppressed h1 h2 h3 h4 => simp [outcomes, h1, h2, h3, h4]
     | @resetAfterData code fs h1 h2 h3 h4 =>
@@ -779,6 +770,103 @@ def component : Component where
   maySend_iff := maySend_iff
 
 /-! ## 8. Named theorems -/
+
+/-! ### The recommendation of §4.5
+
+§4.5, line 1516: "If a RESET_STREAM or STREAM frame is received indicating a
+change in the final size for the stream, an endpoint SHOULD respond with a
+FINAL_SIZE_ERROR error"; line 1519: "A receiver SHOULD treat receipt of data at
+or beyond the final size as a FINAL_SIZE_ERROR error, even after a stream is
+closed"; line 1521: "Generating these errors is not mandatory, because requiring
+that an endpoint generate these errors also means that the endpoint needs to
+maintain the final size state for closed streams."
+
+Both are SHOULDs and neither is restricted to a closed stream, so `Step` permits
+either behaviour in every state and no conforming implementation is rejected for
+declining the advice.  `Recommended` records which outcome the text asks for:
+carrying on as if nothing were wrong is not recommended when the final size is
+violated. -/
+def Recommended (s : State) : Event → Out → Prop
+  | .recvStream offset len fin, .ok _ _ => finalSizeViolation s (offset + len) fin = false
+  | .recvResetStream _ fs, .ok _ _ => resetFinalSizeViolation s fs = false
+  | _, _ => True
+
+/-- The reference implementation takes the advice: FINAL_SIZE_ERROR is the first
+    outcome, so `component.step` raises it. -/
+theorem step_recommended (s : State) (e : Event) : Recommended s e (component.step s e) := by
+  cases e with
+  | recvStream offset len fin =>
+    by_cases c3 : finalSizeViolation s (offset + len) fin = true
+    · by_cases c1 : decide (maxOffset < offset + len) = true
+      · have h : component.step s (.recvStream offset len fin) = .error .frameEncodingError := by
+          simp [Component.step, component, outcomes, c1]
+        rw [h]; trivial
+      · by_cases c2 : decide (s.maxData < offset + len) = true
+        · have h : component.step s (.recvStream offset len fin) = .error .flowControlError := by
+            simp [Component.step, component, outcomes, c1, c2]
+          rw [h]; trivial
+        · have h : component.step s (.recvStream offset len fin) = .error .finalSizeError := by
+            simp [Component.step, component, outcomes, c1, c2, c3]
+          rw [h]; trivial
+    · cases hh : component.step s (.recvStream offset len fin) with
+      | error c => trivial
+      | drop => trivial
+      | ok s' fx => exact Bool.eq_false_iff.mpr c3
+  | recvResetStream code fs =>
+    by_cases c3 : resetFinalSizeViolation s fs = true
+    · by_cases c1 : decide (maxOffset < fs) = true
+      · have h : component.step s (.recvResetStream code fs) = .error .frameEncodingError := by
+          simp [Component.step, component, outcomes, c1]
+        rw [h]; trivial
+      · by_cases c2 : decide (s.maxData < fs) = true
+        · have h : component.step s (.recvResetStream code fs) = .error .flowControlError := by
+            simp [Component.step, component, outcomes, c1, c2]
+          rw [h]; trivial
+        · have h : component.step s (.recvResetStream code fs) = .error .finalSizeError := by
+            simp [Component.step, component, outcomes, c1, c2, c3]
+          rw [h]; trivial
+    · cases hh : component.step s (.recvResetStream code fs) with
+      | error c => trivial
+      | drop => trivial
+      | ok s' fx => exact Bool.eq_false_iff.mpr c3
+  | recvStreamDataBlocked _ => trivial
+  | appRead _ => trivial
+  | appReadReset => trivial
+  | appAbortRead _ => trivial
+  | sentMaxStreamData _ => trivial
+  | sentStopSending _ => trivial
+
+/-- Declining the advice is the only thing `Step` adds: whenever a permitted
+    outcome is not the recommended one, FINAL_SIZE_ERROR was permitted too. -/
+theorem error_permitted_of_not_recommended {s : State} {e : Event} {o : Out}
+    (h : Step s e o) (hr : ¬ Recommended s e o) : Step s e (.error .finalSizeError) := by
+  cases h with
+  | streamOk h1 h2 h3 => exact absurd h3 (by simpa [Recommended] using hr)
+  | streamResetComplete h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
+  | streamFinalSizeIgnored h1 h2 h3 => exact .streamFinalSize h1 h2 h3
+  | resetOk h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
+  | resetAfterData h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
+  | resetSuppressed h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
+  | resetFinalSizeIgnored h1 h2 h3 => exact .resetFinalSize h1 h2 h3
+  | blocked => exact absurd trivial hr
+  | read _ => exact absurd trivial hr
+  | readRefused _ => exact absurd trivial hr
+  | readReset _ => exact absurd trivial hr
+  | readResetRefused _ => exact absurd trivial hr
+  | abortRead _ => exact absurd trivial hr
+  | abortReadLate _ => exact absurd trivial hr
+  | sendMaxStreamData _ => exact absurd trivial hr
+  | sendMaxStreamDataForbidden _ => exact absurd trivial hr
+  | sendStopSending _ => exact absurd trivial hr
+  | sendStopSendingForbidden _ => exact absurd trivial hr
+  | streamTooLarge₁ _ => exact absurd trivial hr
+  | streamTooLarge₂ _ => exact absurd trivial hr
+  | streamFlowControl _ _ => exact absurd trivial hr
+  | streamFinalSize _ _ _ => exact absurd trivial hr
+  | resetTooLarge₁ _ => exact absurd trivial hr
+  | resetTooLarge₂ _ => exact absurd trivial hr
+  | resetFlowControl _ _ => exact absurd trivial hr
+  | resetFinalSize _ _ _ => exact absurd trivial hr
 
 /-- **(a) The final size is immutable** (§4.5, line 1516: "Once a final size for
     a stream is known, it cannot change"). -/
@@ -1017,9 +1105,35 @@ example : component.step rSize (.recvResetStream 1 9) = .error .finalSizeError :
 example : component.step rSize (.recvStream 10 1 false) = .error .finalSizeError := by decide
 -- … and a FIN below data already received.
 example : component.step rSize (.recvStream 0 1 true) = .error .finalSizeError := by decide
--- §4.5, line 1521: after the stream is closed, ignoring it is permitted too.
+-- … including when no final size is known yet and the FIN is below data already
+-- received (the reading of NOTES): the error, or ignoring the frame, in the
+-- live "Recv" state.
+private def rGap : State := { r0 with highest := 10, ranges := [(0, 10)] }
+example : component.step rGap (.recvStream 0 5 true) = .error .finalSizeError := by decide
+example : component.accepts rGap (.recvStream 0 5 true) (.ok rGap []) = true := by decide
+
+-- §4.5, line 1521: "Generating these errors is not mandatory", in any state —
+-- ignoring the frame is permitted, and then it has no effect whatever, so the
+-- final size cannot move and nothing beyond it is accounted for.
+example : component.accepts rSize (.recvStream 0 9 true) (.ok rSize []) = true := by decide
+example : component.accepts rSize (.recvResetStream 1 9) (.ok rSize []) = true := by decide
+example : component.accepts rSize (.recvStream 10 1 false) (.ok rSize []) = true := by decide
 example : component.accepts { rData with phase := .dataRead, read := 10 }
     (.recvStream 10 1 false) (.ok { rData with phase := .dataRead, read := 10 } []) = true := by
+  decide
+-- … but it is not what §4.5 recommends, and the recommended outcome is always
+-- available.
+example : ¬ Recommended rSize (.recvStream 0 9 true) (.ok rSize []) := by
+  show ¬ (finalSizeViolation rSize (0 + 9) true = false)
+  decide
+example : component.accepts rSize (.recvStream 0 9 true) (.error .finalSizeError) = true := by
+  decide
+
+-- §3.3, line 1123 with §13.3: an exact repeat of a STOP_SENDING we already sent
+-- is still permitted (a lost packet is retransmitted unchanged).
+example :
+    component.maySend ((component.step rSize (.sentStopSending 9)).next rSize)
+      (.stopSending 1 9) = true := by
   decide
 
 -- §19.8, line 7686: an offset beyond 2^62-1 is FRAME_ENCODING_ERROR or
@@ -1088,7 +1202,7 @@ receiving half of §3.3 and §3.5, and the stream-level parts of §4.1/§4.4/§4
 | §4.5 (1496) | the receiver MUST use the final size for connection-level accounting | `highest` is set to the final size on RESET_STREAM; the connection controller is WP9 |
 | §4.5 (1516) | a changed final size SHOULD be FINAL_SIZE_ERROR | `finalSizeViolation`, `resetFinalSizeViolation`, `finalSize_immutable` |
 | §4.5 (1519) | data at or beyond the final size SHOULD be FINAL_SIZE_ERROR, even after close | `finalSizeViolation` |
-| §4.5 (1521) | generating these errors is not mandatory | `Step.streamFinalSizeIgnored`, `Step.resetFinalSizeIgnored` (terminal states only) |
+| §4.5 (1521) | generating these errors is not mandatory | `Step.streamFinalSizeIgnored`, `Step.resetFinalSizeIgnored` (every state); `Recommended`, `step_recommended` |
 | §19.8 (7686) | offset+length > 2^62-1 MUST be FRAME_ENCODING_ERROR or FLOW_CONTROL_ERROR | `Step.streamTooLarge₁/₂`, `Step.resetTooLarge₁/₂` |
 | §19.4/19.5/19.8/19.10/19.13 | wrong-direction frames MUST be STREAM_STATE_ERROR | `Spec/Stream.lean` (the composite knows the direction) |
 
@@ -1108,17 +1222,28 @@ NOTES
 * **`.drop` for refused application calls**, as in `Spec/Stream/Send.lean`:
   reading data that has not arrived, or taking a reset signal that was never
   delivered, changes nothing.
-* **FINAL_SIZE_ERROR is a SHOULD.**  §4.5 says "SHOULD respond with a
-  FINAL_SIZE_ERROR" and then that "generating these errors is not mandatory,
-  because requiring that an endpoint generate these errors also means that the
-  endpoint needs to maintain the final size state for closed streams".  The
-  reading encoded here is that the excuse is exactly the one the text gives —
-  not keeping state for a *closed* stream — so the error is the only outcome
-  while the stream is live, and ignoring the frame is permitted in addition in
-  the two terminal states.  An implementation that never generates the error
-  would be rejected by `accepts` in the live states; that is a deliberate
-  reading, recorded here because it is the most likely source of differential
-  mismatches.
+* **FINAL_SIZE_ERROR is a SHOULD, everywhere.**  §4.5's two sentences —
+  "an endpoint SHOULD respond with a FINAL_SIZE_ERROR error" (line 1516) and
+  "A receiver SHOULD treat receipt of data at or beyond the final size as a
+  FINAL_SIZE_ERROR error, even after a stream is closed" (line 1519) — are both
+  SHOULDs, and neither is restricted to a closed stream; line 1521's remark
+  about the state commitment for closed streams is the *motivation* for the
+  permission, not a condition on it.  So `Step` permits declining in **every**
+  receive state (`Step.streamFinalSizeIgnored`, `Step.resetFinalSizeIgnored`),
+  the error stays the first element of `outcomes` so `component.step` raises it,
+  and the advice itself lives in `Recommended` (`step_recommended`,
+  `error_permitted_of_not_recommended`).
+* **What "ignored" does**: nothing at all — the outcome is `.ok s []`.  The
+  frame is discarded, so no byte at or beyond the final size enters `ranges` or
+  `highest`, the final size cannot move (theorem `finalSize_immutable` needs no
+  extra hypothesis), and `Inv` is preserved trivially.
+* **An ignored, conflicting RESET_STREAM has no effect at all**: neither its
+  Final Size nor the reset itself.  The alternative — applying the reset while
+  keeping the old final size — would invent a third behaviour that the text
+  never describes, and an endpoint that declines to police the final size does so
+  (per §4.5's own rationale) because it no longer keeps the stream's state, so it
+  has nothing to apply the reset to.  Discarding the whole frame is the simplest
+  faithful reading, and it is the one that keeps the final size immutable.
 * **A FIN below the highest offset received** is treated as a FINAL_SIZE_ERROR
   (`finalSizeViolation`'s first disjunct).  The text only says "receipt of data
   at or beyond the final size"; receiving the final size *after* the data is the

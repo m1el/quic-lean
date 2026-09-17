@@ -801,8 +801,22 @@ example : component.maySend { s0 with phase := .resetRecvd } (.stream 0 0 false 
 example : component.maySend { s0 with phase := .resetSent, written := 9 } (.stream 0 0 false ⟨#[1]⟩) = false := by
   decide
 example : component.maySend { s0 with phase := .resetSent } (.streamDataBlocked 0 100) = false := by decide
--- … while RESET_STREAM may be repeated from "Reset Sent".
-example : component.maySend { s0 with phase := .resetSent, finalSize := some 0 } (.resetStream 0 1 0) = true := by
+-- … while RESET_STREAM may be repeated from "Reset Sent": an exact repeat of
+-- the frame just sent (same error code, same final size) is permitted, which is
+-- what retransmitting a lost packet needs (§13.3 is otherwise out of scope).
+private def sReset : State := (component.step s0 (.sentResetStream 7 0)).next s0
+example : sReset.phase = .resetSent := by decide
+example : component.maySend sReset (.resetStream 0 7 0) = true := by decide
+-- A STREAM frame, by contrast, may never be retransmitted after the reset
+-- (§3.3, line 1114).
+example : component.maySend { sReset with written := 9 } (.stream 0 0 false ⟨#[1]⟩) = false := by
+  decide
+-- An exact repeat of a STREAM frame already sent is permitted while the sending
+-- part still carries data — here a retransmission of the FIN in "Data Sent".
+example :
+    component.maySend { s0 with phase := .dataSent, written := 5, finWritten := true,
+                                sent := 5, finalSize := some 5 }
+      (.stream 0 0 true ⟨#[1, 2, 3, 4, 5]⟩) = true := by
   decide
 
 -- A frame for a different stream is not this component's business.
@@ -888,6 +902,17 @@ NOTES
   `stopSending_obliges_reset` below states the consequence that is checkable:
   after a STOP_SENDING in "Ready"/"Send" the endpoint is always permitted to
   send the RESET_STREAM.
+* **Retransmission (§13.3) is out of scope, but repeats are not forbidden.**
+  `maySendStream` constrains only (offset, length, fin) against `written`, the
+  peer's credit and the final size, so re-sending a range already sent is
+  permitted in "Ready", "Send" and "Data Sent" — which is what retransmitting a
+  lost packet amounts to in this model.  After a RESET_STREAM has been sent it is
+  not: §3.3, line 1114 says "A sender MUST NOT send a STREAM or
+  STREAM_DATA_BLOCKED frame for a stream in the 'Reset Sent' state", and §3.5,
+  line 1263 says that if outstanding data is declared lost the endpoint "SHOULD
+  send a RESET_STREAM frame instead of retransmitting the data".  RESET_STREAM
+  itself may be repeated from "Reset Sent" (that state is not terminal), with the
+  same final size, since `maySendReset` pins it to the one already fixed.
 * **STREAM_DATA_BLOCKED reports the current credit.**  §19.13's Maximum Stream
   Data field is "the offset of the stream at which the blocking occurred", which
   is read here as exactly the limit the peer last advertised, so `maySendBlocked`
