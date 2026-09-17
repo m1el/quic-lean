@@ -535,7 +535,9 @@ example : component.maySendPacket { srvAt5 with tx := ⟨p01, 1⟩ } ⟨.oneRtt,
 
 -- A datagram may carry only packets that are themselves permitted.
 example : component.maySendDatagram { srv with tx := ⟨p01, 1⟩ }
-    ⟨1200, [⟨.oneRtt, [.pathChallenge ByteArray.empty]⟩, ⟨.oneRtt, [.ping]⟩]⟩ = false := by decide
+    { size := 1200,
+      packets := [⟨.oneRtt, [.pathChallenge ByteArray.empty]⟩, ⟨.oneRtt, [.ping]⟩] } = false := by
+  decide
 
 -- Set tracking, for the differential harness: seeing "nothing visible" after a
 -- probing packet from a new address is impossible, because §9, line 3312
