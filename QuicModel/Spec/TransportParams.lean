@@ -449,13 +449,17 @@ Assigned text: lines 2506–2695 (§7.4, §7.4.1, §7.4.2) and 6875–7154 (§18
 | §18.2 (6926) | integer parameters use the varint encoding; absent parameters default to 0 | `varintValue?`, the field defaults of `TransportParams` |
 | §18.2 (6940) | original_destination_connection_id is only sent by a server | `Valid`, first conjunct |
 | §18.2 (6944) | max_idle_timeout; disabled when both omit it or send 0 | field; the timer itself is WP6 Termination |
-| §18.2 (6959) | stateless_reset_token is 16 bytes, MUST NOT be sent by a client | `setParam` (length) and `Valid` (role) |
+| §18.2 (6959) | stateless_reset_token is 16 bytes, MUST NOT be sent by a client, MAY be sent by a server | `setParam` (length) and `Valid` (role) |
+| §18.2 (6962) | a server that omits stateless_reset_token cannot stateless-reset the negotiated CID | out of scope: WP6 Termination |
 | §18.2 (6952) | max_udp_payload_size default 65527, values below 1200 invalid | default field, `Valid` |
 | §18.2 (6971–7016) | initial_max_data, the three per-stream limits, the two stream limits | fields; their effect is WP2/WP9 |
 | §18.2 (7018) | ack_delay_exponent default 3, values above 20 invalid | default field, `Valid` |
 | §18.2 (7024) | max_ack_delay default 25 ms, values ≥ 2^14 invalid | default field, `Valid` |
+| §18.2 (7026) | max_ack_delay SHOULD include expected alarm delays | advice to the sender; not modelled (SHOULD that recommends) |
+| §7.4.1 (2571) | a client need not store a parameter it cannot process | permissive; `knownEntries` already drops unknown ones |
 | §18.2 (7040) | disable_active_migration is a zero-length value; the receiver MUST NOT use a new local address | `setParam` (length); the migration ban is WP10 |
 | §18.2 (7051) | preferred_address is only sent by a server | `Valid`, first conjunct |
+| §18.2 (7054) | a server MAY send an all-zero address and port for one family | permissive; the codec accepts any 4- and 16-byte address |
 | §18.2 (7062) | Figure 22 layout | `preferredAddressP` / `encodePreferredAddress` |
 | §18.2 (7093) | a server choosing a zero-length CID MUST NOT provide a preferred address | `Valid`, last conjunct |
 | §18.2 (7094) | a server MUST NOT include a zero-length CID in preferred_address; a client MUST treat violation as TRANSPORT_PARAMETER_ERROR | `Valid`, second-to-last conjunct |
