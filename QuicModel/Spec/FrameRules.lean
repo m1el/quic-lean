@@ -15,21 +15,21 @@ import QuicModel.Spec.Core
 -/
 namespace Quic.Spec.FrameRules
 
-/-! ## 0. Table 3 (§12.4, lines 4771–4816)
+/-! ## 0. Table 3 (§12.4, lines 4824–4862)
 
 Four total functions on `Frame`, one per column of Table 3 that carries
 normative content: "Pkts", and the N / C / P / F characters of "Spec".
 They are total by construction: Lean's exhaustiveness check is the proof that
 every frame type has a row. -/
 
-/-- §12.4, line 4838: "ih: Only a CONNECTION_CLOSE frame of type 0x1c can
+/-- §12.4, line 4897: "ih: Only a CONNECTION_CLOSE frame of type 0x1c can
     appear in Initial or Handshake packets."  In `Frame`, `frameType = none` is
     the application variant 0x1d and `some _` is the transport variant 0x1c. -/
 def ccPkts : Option Nat → List PacketType
   | some _ => [.initial, .handshake, .zeroRtt, .oneRtt]              -- 0x1c: ih01
   | none => [.zeroRtt, .oneRtt]                                      -- 0x1d: __01
 
-/-- Table 3, "Pkts" column, line 4826: "The "Pkts" column in Table 3 lists the
+/-- Table 3, "Pkts" column, line 4886: "The "Pkts" column in Table 3 lists the
     types of packets that each frame type could appear in".  `I` = Initial,
     `H` = Handshake, `0` = 0-RTT, `1` = 1-RTT.  Retry and Version Negotiation
     packets carry no frames at all (§12.4, line 4731), so they appear in no
@@ -59,7 +59,7 @@ def pkts : Frame → List PacketType
 /-- May a frame of this shape appear in a packet of this type? -/
 def allowedIn (f : Frame) (pt : PacketType) : Bool := decide (pt ∈ pkts f)
 
-/-- Table 3, "Spec" column, character `N`, line 4845: "Packets containing only
+/-- Table 3, "Spec" column, character `N`, line 4909: "Packets containing only
     frames with this marking are not ack-eliciting".  So a *frame* is
     ack-eliciting exactly when it is not marked `N`: PADDING (NP), ACK (NC) and
     CONNECTION_CLOSE (N) are the marked ones. -/
@@ -67,14 +67,14 @@ def ackEliciting : Frame → Bool
   | .padding _ | .ack .. | .connectionClose .. => false
   | _ => true
 
-/-- Table 3, "Spec" column, character `C`, line 4848: "Packets containing only
+/-- Table 3, "Spec" column, character `C`, line 4912: "Packets containing only
     frames with this marking do not count toward bytes in flight for congestion
     control purposes".  ACK is the only row marked `C`. -/
 def inFlight : Frame → Bool
   | .ack .. => false
   | _ => true
 
-/-- Table 3, "Spec" column, character `P`, line 4852: "Packets containing only
+/-- Table 3, "Spec" column, character `P`, line 4916: "Packets containing only
     frames with this marking can be used to probe new network paths during
     connection migration".  §9.1: "PATH_CHALLENGE, PATH_RESPONSE,
     NEW_CONNECTION_ID, and PADDING frames are "probing frames", and all other
@@ -83,7 +83,7 @@ def probing : Frame → Bool
   | .padding _ | .newConnectionId .. | .pathChallenge _ | .pathResponse _ => true
   | _ => false
 
-/-- Table 3, "Spec" column, character `F`, line 4856: "The content of frames
+/-- Table 3, "Spec" column, character `F`, line 4920: "The content of frames
     with this marking are flow controlled".  STREAM is the only row marked `F`.
     (RFC 9221 §5: DATAGRAM frames are explicitly *not* flow controlled.) -/
 def flowControlled : Frame → Bool
@@ -100,7 +100,7 @@ payload of a packet. -/
 def packetAckEliciting (fs : List Frame) : Bool := fs.any ackEliciting
 
 /-- A packet counts toward bytes in flight unless every frame in it is
-    marked `C`.  §13.2.7, line 5299: "Packets containing PADDING frames are
+    marked `C`.  §13.2.7, line 5307: "Packets containing PADDING frames are
     considered to be in flight for congestion control purposes" — consistent
     with PADDING not carrying the `C` marking. -/
 def packetInFlight (fs : List Frame) : Bool := fs.any inFlight
@@ -116,10 +116,10 @@ to §19. -/
 
 /-- The only role permitted to send this frame, if the frame is restricted.
 
-* §19.7, line 7596: "Clients MUST NOT send NEW_TOKEN frames.  A server MUST
+* §19.7, line 7597: "Clients MUST NOT send NEW_TOKEN frames.  A server MUST
   treat receipt of a NEW_TOKEN frame as a connection error of type
   PROTOCOL_VIOLATION."
-* §19.20, line 8206: "A HANDSHAKE_DONE frame can only be sent by the server.
+* §19.20, line 8207: "A HANDSHAKE_DONE frame can only be sent by the server.
   … A server MUST treat receipt of a HANDSHAKE_DONE frame as a connection
   error of type PROTOCOL_VIOLATION." -/
 def senderOf : Frame → Option Role
@@ -127,7 +127,7 @@ def senderOf : Frame → Option Role
   | .handshakeDone => some .server
   | _ => none
 
-/-- §12.5, line 4977: "Note that it is not possible to send the following
+/-- §12.5, line 4976: "Note that it is not possible to send the following
     frames in 0-RTT packets for various reasons: ACK, CRYPTO, HANDSHAKE_DONE,
     NEW_TOKEN, PATH_RESPONSE, and RETIRE_CONNECTION_ID." -/
 def forbiddenIn0Rtt : Frame → Bool
@@ -138,14 +138,14 @@ def forbiddenIn0Rtt : Frame → Bool
 /-- The MUST-level reasons for a receiver in role `receiver` to reject frame
     `f` arriving in a packet of type `pt`.
 
-* §12.4, line 4841: "An endpoint MUST treat receipt of a frame in a packet type
+* §12.4, line 4902: "An endpoint MUST treat receipt of a frame in a packet type
   that is not permitted as a connection error of type PROTOCOL_VIOLATION."
 * §19.7 / §19.20: a frame only our own role is allowed to send cannot have been
   legitimately sent by the peer. -/
 def mustReject (receiver : Role) (pt : PacketType) (f : Frame) : Bool :=
   !allowedIn f pt || decide (senderOf f = some receiver)
 
-/-- §12.5, line 4980: "A server MAY treat receipt of these frames in 0-RTT
+/-- §12.5, line 4978: "A server MAY treat receipt of these frames in 0-RTT
     packets as a connection error of type PROTOCOL_VIOLATION."  Of the six
     frames listed there, only RETIRE_CONNECTION_ID is permitted in 0-RTT by
     Table 3, so only it reaches this discretionary rule. -/
@@ -186,7 +186,7 @@ abbrev Out := Outcome State Effect
 /-! ## 2. The specification -/
 
 inductive Step : State → Event → Out → Prop
-  /-- §12.4, line 4841: "An endpoint MUST treat receipt of a frame in a packet
+  /-- §12.4, line 4902: "An endpoint MUST treat receipt of a frame in a packet
       type that is not permitted as a connection error of type
       PROTOCOL_VIOLATION." (together with §19.7 and §19.20). -/
   | frameForbidden {s pt f} (h : mustReject s.role pt f = true) :
@@ -194,23 +194,23 @@ inductive Step : State → Event → Out → Prop
   /-- An otherwise legal frame is delivered to its owning component. -/
   | frameOk {s pt f} (h : mustReject s.role pt f = false) :
       Step s (.recvFrame pt f) (.ok s [.deliver f])
-  /-- §12.5, line 4980: "A server MAY treat receipt of these frames in 0-RTT
+  /-- §12.5, line 4978: "A server MAY treat receipt of these frames in 0-RTT
       packets as a connection error of type PROTOCOL_VIOLATION." -/
   | frameZeroRttMay {s pt f} (h : mustReject s.role pt f = false)
       (h2 : mayReject pt f = true) :
       Step s (.recvFrame pt f) (.error .protocolViolation)
-  /-- §12.4, line 4741: "The payload of a packet that contains frames MUST
+  /-- §12.4, line 4740: "The payload of a packet that contains frames MUST
       contain at least one frame … An endpoint MUST treat receipt of a packet
       containing no frames as a connection error of type
       PROTOCOL_VIOLATION." -/
   | packetEmpty {s pt} : Step s (.recvPacketFrames pt []) (.error .protocolViolation)
-  /-- §12.4, line 4841, applied to a whole payload. -/
+  /-- §12.4, line 4902, applied to a whole payload. -/
   | packetForbidden {s pt fs} (h0 : fs ≠ []) (h : fs.any (mustReject s.role pt) = true) :
       Step s (.recvPacketFrames pt fs) (.error .protocolViolation)
   /-- Every frame is legal: all of them are delivered, in order. -/
   | packetOk {s pt fs} (h0 : fs ≠ []) (h : fs.any (mustReject s.role pt) = false) :
       Step s (.recvPacketFrames pt fs) (.ok s (fs.map .deliver))
-  /-- §12.5, line 4980, applied to a whole payload. -/
+  /-- §12.5, line 4978, applied to a whole payload. -/
   | packetZeroRttMay {s pt fs} (h0 : fs ≠ []) (h : fs.any (mustReject s.role pt) = false)
       (h2 : fs.any (mayReject pt) = true) :
       Step s (.recvPacketFrames pt fs) (.error .protocolViolation)
@@ -325,10 +325,10 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
 
 /-- What we may put into the packet we are assembling:
 
-* §12.4, line 4841 / Table 3: only frames the packet type permits;
-* §19.7, line 7596: "Clients MUST NOT send NEW_TOKEN frames";
-  §19.20, line 8206: "A HANDSHAKE_DONE frame can only be sent by the server";
-* §12.5, line 4977: none of ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN,
+* §12.4, line 4902 / Table 3: only frames the packet type permits;
+* §19.7, line 7597: "Clients MUST NOT send NEW_TOKEN frames";
+  §19.20, line 8207: "A HANDSHAKE_DONE frame can only be sent by the server";
+* §12.5, line 4976: none of ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN,
   PATH_RESPONSE, RETIRE_CONNECTION_ID in a 0-RTT packet. -/
 def MaySend (s : State) (f : Frame) : Prop :=
   allowedIn f s.assembling = true
@@ -374,7 +374,7 @@ def component : Component where
 
 /-! ## 8. Named theorems -/
 
-/-- §12.4, line 4840: "Note that all frames can appear in 1-RTT packets." -/
+/-- §12.4, line 4901: "Note that all frames can appear in 1-RTT packets." -/
 theorem allowedIn_oneRtt (f : Frame) : allowedIn f .oneRtt = true := by
   cases f <;> simp [allowedIn, pkts]
 
@@ -389,7 +389,7 @@ theorem allowedIn_versionNegotiation (f : Frame) : allowedIn f .versionNegotiati
 /-! ### (a) The legality table agrees with the prose of §12.5
 
 §12.5 speaks of packet number *spaces*; Table 3 of packet *types*.  0-RTT and
-1-RTT packets share the application data space (§12.3, line 4664), so a frame
+1-RTT packets share the application data space (§12.3, line 4670), so a frame
 may appear in a space when it may appear in some packet type of that space. -/
 
 /-- A frame may appear in packet number space `sp`. -/
@@ -417,7 +417,7 @@ def coreFrame : Frame → Bool
   | .padding _ | .ping | .crypto .. | .connectionClose .. | .ack .. => true
   | _ => false
 
-/-- §12.5, line 4956: "PADDING, PING, and CRYPTO frames MAY appear in any
+/-- §12.5, line 4961: "PADDING, PING, and CRYPTO frames MAY appear in any
     packet number space." -/
 theorem padding_any_space (n : Nat) (sp : PnSpace) : allowedInSpace (.padding n) sp = true := by
   cases sp <;> simp [allowedInSpace, allowedIn, pkts]
@@ -429,31 +429,31 @@ theorem crypto_any_space (off : Nat) (d : ByteArray) (sp : PnSpace) :
     allowedInSpace (.crypto off d) sp = true := by
   cases sp <;> simp [allowedInSpace, allowedIn, pkts]
 
-/-- §12.5, line 4959: "CONNECTION_CLOSE frames signaling errors at the QUIC
+/-- §12.5, line 4964: "CONNECTION_CLOSE frames signaling errors at the QUIC
     layer (type 0x1c) MAY appear in any packet number space." -/
 theorem connectionClose_transport_any_space (e ft : Nat) (r : ByteArray) (sp : PnSpace) :
     allowedInSpace (.connectionClose e (some ft) r) sp = true := by
   cases sp <;> simp [allowedInSpace, allowedIn, pkts, ccPkts]
 
-/-- §12.5, line 4961: "CONNECTION_CLOSE frames signaling application errors
+/-- §12.5, line 4966: "CONNECTION_CLOSE frames signaling application errors
     (type 0x1d) MUST only appear in the application data packet number
     space." -/
 theorem connectionClose_application_appData (e : Nat) (r : ByteArray) (sp : PnSpace) :
     allowedInSpace (.connectionClose e none r) sp = true ↔ sp = .appData := by
   cases sp <;> simp [allowedInSpace, allowedIn, pkts, ccPkts]
 
-/-- §12.5, line 4964: "ACK frames MAY appear in any packet number space". -/
+/-- §12.5, line 4969: "ACK frames MAY appear in any packet number space". -/
 theorem ack_any_space (la d fi : Nat) (rs : Array AckRange) (ec : Option Ecn) (sp : PnSpace) :
     allowedInSpace (.ack la d fi rs ec) sp = true := by
   cases sp <;> simp [allowedInSpace, allowedIn, pkts]
 
-/-- §12.5, line 4966: "However, as noted below, 0-RTT packets cannot contain
+/-- §12.5, line 4971: "However, as noted below, 0-RTT packets cannot contain
     ACK frames." -/
 theorem ack_not_in_zeroRtt (la d fi : Nat) (rs : Array AckRange) (ec : Option Ecn) :
     allowedIn (.ack la d fi rs ec) .zeroRtt = false := by
   simp [allowedIn, pkts]
 
-/-- §12.5, line 4968: "All other frame types MUST only be sent in the
+/-- §12.5, line 4973: "All other frame types MUST only be sent in the
     application data packet number space." -/
 theorem other_frames_appData_only (f : Frame) (h : coreFrame f = false) (sp : PnSpace) :
     allowedInSpace f sp = true ↔ sp = .appData := by
@@ -461,7 +461,7 @@ theorem other_frames_appData_only (f : Frame) (h : coreFrame f = false) (sp : Pn
     cases f <;> simp_all [coreFrame, pkts]
   rcases hp with hp | hp <;> cases sp <;> simp [allowedInSpace, allowedIn, hp]
 
-/-- §12.5, line 4977 as a send-side rule: none of the six frames listed there
+/-- §12.5, line 4976 as a send-side rule: none of the six frames listed there
     may go into a 0-RTT packet. -/
 theorem no_forbidden_frame_in_zeroRtt {s : State} {f : Frame}
     (h : forbiddenIn0Rtt f = true) (hz : s.assembling = .zeroRtt) : ¬ MaySend s f := by
@@ -480,7 +480,7 @@ theorem not_ackEliciting_iff (f : Frame) :
   cases f <;> simp [ackEliciting]
 
 /-- Consequently a packet is ack-eliciting exactly when it holds a frame that
-    is none of those three (§13.2, line 5044: "only ack-eliciting packets cause
+    is none of those three (§13.2, line 5048: "only ack-eliciting packets cause
     an ACK frame to be sent within the maximum ack delay"). -/
 theorem packetAckEliciting_iff (fs : List Frame) :
     packetAckEliciting fs = true ↔ ∃ f ∈ fs, ackEliciting f = true := by
@@ -488,7 +488,7 @@ theorem packetAckEliciting_iff (fs : List Frame) :
 
 /-! ### Receive-side soundness -/
 
-/-- §12.4, line 4743: a packet containing no frames is a connection error of
+/-- §12.4, line 4742: a packet containing no frames is a connection error of
     type PROTOCOL_VIOLATION, and nothing else is permitted for it. -/
 theorem empty_packet_is_violation (s : State) (pt : PacketType) (o : Out) :
     Step s (.recvPacketFrames pt []) o ↔ o = .error .protocolViolation := by
@@ -524,7 +524,7 @@ theorem maySend_not_mustReject {s : State} {f : Frame} (h : MaySend s f) :
 private def cli : State := { role := .client, assembling := .oneRtt }
 private def srv : State := { role := .server, assembling := .oneRtt }
 
--- §12.4, line 4743: a packet with no frames is a PROTOCOL_VIOLATION.
+-- §12.4, line 4742: a packet with no frames is a PROTOCOL_VIOLATION.
 example : component.step srv (.recvPacketFrames .initial []) = .error .protocolViolation := by decide
 
 -- §12.5: a STREAM frame in an Initial packet is a PROTOCOL_VIOLATION …
@@ -534,27 +534,27 @@ example : component.step srv (.recvFrame .initial (.stream 0 0 false ByteArray.e
 example : component.step srv (.recvFrame .initial (.crypto 0 ByteArray.empty))
     = .ok srv [.deliver (.crypto 0 ByteArray.empty)] := by decide
 
--- §19.7, line 7596: a server that receives NEW_TOKEN must close with
+-- §19.7, line 7597: a server that receives NEW_TOKEN must close with
 -- PROTOCOL_VIOLATION; a client that receives one must not.
 example : component.step srv (.recvFrame .oneRtt (.newToken ByteArray.empty))
     = .error .protocolViolation := by decide
 example : component.step cli (.recvFrame .oneRtt (.newToken ByteArray.empty))
     = .ok cli [.deliver (.newToken ByteArray.empty)] := by decide
 
--- §19.20, line 8206: same for HANDSHAKE_DONE.
+-- §19.20, line 8207: same for HANDSHAKE_DONE.
 example : component.step srv (.recvFrame .oneRtt .handshakeDone) = .error .protocolViolation := by
   decide
 example : component.step cli (.recvFrame .oneRtt .handshakeDone) = .ok cli [.deliver .handshakeDone] := by
   decide
 
--- §12.5, line 4980: RETIRE_CONNECTION_ID in a 0-RTT packet — Table 3 permits
+-- §12.5, line 4978: RETIRE_CONNECTION_ID in a 0-RTT packet — Table 3 permits
 -- it (__01) but §12.5 lets the server reject it.  Both outcomes are accepted.
 example : component.accepts srv (.recvFrame .zeroRtt (.retireConnectionId 0))
     (.ok srv [.deliver (.retireConnectionId 0)]) = true := by decide
 example : component.accepts srv (.recvFrame .zeroRtt (.retireConnectionId 0))
     (.error .protocolViolation) = true := by decide
 
--- §12.4, line 4838: CONNECTION_CLOSE 0x1d (application) is not permitted in a
+-- §12.4, line 4897: CONNECTION_CLOSE 0x1d (application) is not permitted in a
 -- Handshake packet, 0x1c is.
 example : component.step cli (.recvFrame .handshake (.connectionClose 0 none ByteArray.empty))
     = .error .protocolViolation := by decide
@@ -591,40 +591,40 @@ Assigned range: lines 4634–4988.  §13.1/§13.2 (lines 5018–5324) are covere
 
 | Text (line) | Sentence | Encoded as |
 |---|---|---|
-| §12.3 (4676) | "Subsequent packets sent in the same packet number space MUST increase the packet number by at least one." | `Ack.maySendPacketNumber` |
-| §12.3 (4681) | "A QUIC endpoint MUST NOT reuse a packet number within the same packet number space in one connection." | `Ack.maySendPacketNumber` |
-| §12.3 (4683) | packet number reaches 2^62-1 ⇒ MUST close without CONNECTION_CLOSE | `Ack.maySendPacketNumber` bounds the number; the close itself is out of scope: WP6 Termination |
-| §12.3 (4694) | "A receiver MUST discard a newly unprotected packet unless it is certain that it has not processed another packet with the same packet number from the same packet number space." | `Ack.Step.duplicate` |
-| §12.3 (4697) | "Duplicate suppression MUST happen after removing packet protection" | out of scope: packet protection (WP11 / QUIC-TLS); the `Ack` events are by construction post-decryption |
-| §12.4 (4741) | "The payload of a packet that contains frames MUST contain at least one frame" | `Step.packetEmpty`, `empty_packet_is_violation` |
-| §12.4 (4743) | "An endpoint MUST treat receipt of a packet containing no frames as a connection error of type PROTOCOL_VIOLATION." | `Step.packetEmpty` |
-| §12.4 (4771–4816) | Table 3 | `pkts`, `allowedIn`, `ackEliciting`, `inFlight`, `probing`, `flowControlled` |
-| §12.4 (4838) | "ih: Only a CONNECTION_CLOSE frame of type 0x1c can appear in Initial or Handshake packets." | `pkts` (`connectionClose _ (some _) _` vs `none`) |
-| §12.4 (4840) | "Note that all frames can appear in 1-RTT packets." | `allowedIn_oneRtt` |
-| §12.4 (4841) | "An endpoint MUST treat receipt of a frame in a packet type that is not permitted as a connection error of type PROTOCOL_VIOLATION." | `Step.frameForbidden`, `Step.packetForbidden` |
-| §12.4 (4845–4857) | N / C / P / F markings | `ackEliciting`, `inFlight`, `probing`, `flowControlled` and the `packet*` liftings |
-| §12.4 (4863) | "An endpoint MUST treat the receipt of a frame of unknown type as a connection error of type FRAME_ENCODING_ERROR." | out of scope here: the decoder (`Frame.decodeFrame`, `Err.unknownFrameType`) already rejects unknown types, so no `Frame` value reaches this component |
-| §12.4 (4866) | "All frames are idempotent in this version of QUIC." | not a testable MUST; the per-frame components are idempotent by construction |
-| §12.4 (4872) | "a frame type MUST use the shortest possible encoding" | out of scope here: `Frame.frameBody` / `Err.nonMinimalFrameType` |
-| §12.4 (4880) | MAY treat a non-minimal frame type as PROTOCOL_VIOLATION | out of scope here: decoder, see above |
-| §12.5 (4956) | "PADDING, PING, and CRYPTO frames MAY appear in any packet number space." | `padding_any_space`, `ping_any_space`, `crypto_any_space` |
-| §12.5 (4959) | CONNECTION_CLOSE 0x1c MAY appear in any packet number space | `connectionClose_transport_any_space` |
-| §12.5 (4961) | CONNECTION_CLOSE 0x1d "MUST only appear in the application data packet number space" | `connectionClose_application_appData` |
-| §12.5 (4964) | "ACK frames MAY appear in any packet number space, but can only acknowledge packets that appeared in that packet number space." | `ack_any_space`; the second half is `Ack.MaySend` / `Ack.maySend_ack_sound` |
-| §12.5 (4966) | "0-RTT packets cannot contain ACK frames" | `ack_not_in_zeroRtt` |
-| §12.5 (4968) | "All other frame types MUST only be sent in the application data packet number space." | `other_frames_appData_only` |
-| §12.5 (4977) | ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, PATH_RESPONSE, RETIRE_CONNECTION_ID cannot be sent in 0-RTT | `forbiddenIn0Rtt`, `no_forbidden_frame_in_zeroRtt` |
-| §12.5 (4980) | "A server MAY treat receipt of these frames in 0-RTT packets as a connection error of type PROTOCOL_VIOLATION." | `Step.frameZeroRttMay`, `Step.packetZeroRttMay` |
-| §19.7 (7596) | "Clients MUST NOT send NEW_TOKEN frames.  A server MUST treat receipt of a NEW_TOKEN frame as a connection error of type PROTOCOL_VIOLATION." | `senderOf`, `mustReject`, `MaySend` |
-| §19.20 (8206) | "A HANDSHAKE_DONE frame can only be sent by the server. … A server MUST treat receipt of a HANDSHAKE_DONE frame as a connection error of type PROTOCOL_VIOLATION." | `senderOf`, `mustReject`, `MaySend` |
-| §19.20 (8207) | "Servers MUST NOT send a HANDSHAKE_DONE frame before completing the handshake." | out of scope: needs handshake state (WP11) |
+| §12.3 (4685) | "Subsequent packets sent in the same packet number space MUST increase the packet number by at least one." | `Ack.maySendPacketNumber` |
+| §12.3 (4692) | "A QUIC endpoint MUST NOT reuse a packet number within the same packet number space in one connection." | `Ack.maySendPacketNumber` |
+| §12.3 (4693) | packet number reaches 2^62-1 ⇒ MUST close without CONNECTION_CLOSE | `Ack.maySendPacketNumber` bounds the number; the close itself is out of scope: WP6 Termination |
+| §12.3 (4709) | "A receiver MUST discard a newly unprotected packet unless it is certain that it has not processed another packet with the same packet number from the same packet number space." | `Ack.Step.duplicate` |
+| §12.3 (4711) | "Duplicate suppression MUST happen after removing packet protection" | out of scope: packet protection (WP11 / QUIC-TLS); the `Ack` events are by construction post-decryption |
+| §12.4 (4740) | "The payload of a packet that contains frames MUST contain at least one frame" | `Step.packetEmpty`, `empty_packet_is_violation` |
+| §12.4 (4742) | "An endpoint MUST treat receipt of a packet containing no frames as a connection error of type PROTOCOL_VIOLATION." | `Step.packetEmpty` |
+| §12.4 (4824–4862) | Table 3 | `pkts`, `allowedIn`, `ackEliciting`, `inFlight`, `probing`, `flowControlled` |
+| §12.4 (4897) | "ih: Only a CONNECTION_CLOSE frame of type 0x1c can appear in Initial or Handshake packets." | `pkts` (`connectionClose _ (some _) _` vs `none`) |
+| §12.4 (4901) | "Note that all frames can appear in 1-RTT packets." | `allowedIn_oneRtt` |
+| §12.4 (4902) | "An endpoint MUST treat receipt of a frame in a packet type that is not permitted as a connection error of type PROTOCOL_VIOLATION." | `Step.frameForbidden`, `Step.packetForbidden` |
+| §12.4 (4909–4921) | N / C / P / F markings | `ackEliciting`, `inFlight`, `probing`, `flowControlled` and the `packet*` liftings |
+| §12.4 (4933) | "An endpoint MUST treat the receipt of a frame of unknown type as a connection error of type FRAME_ENCODING_ERROR." | out of scope here: the decoder (`Frame.decodeFrame`, `Err.unknownFrameType`) already rejects unknown types, so no `Frame` value reaches this component |
+| §12.4 (4936) | "All frames are idempotent in this version of QUIC." | not a testable MUST; the per-frame components are idempotent by construction |
+| §12.4 (4942) | "a frame type MUST use the shortest possible encoding" | out of scope here: `Frame.frameBody` / `Err.nonMinimalFrameType` |
+| §12.4 (4950) | MAY treat a non-minimal frame type as PROTOCOL_VIOLATION | out of scope here: decoder, see above |
+| §12.5 (4961) | "PADDING, PING, and CRYPTO frames MAY appear in any packet number space." | `padding_any_space`, `ping_any_space`, `crypto_any_space` |
+| §12.5 (4964) | CONNECTION_CLOSE 0x1c MAY appear in any packet number space | `connectionClose_transport_any_space` |
+| §12.5 (4966) | CONNECTION_CLOSE 0x1d "MUST only appear in the application data packet number space" | `connectionClose_application_appData` |
+| §12.5 (4969) | "ACK frames MAY appear in any packet number space, but can only acknowledge packets that appeared in that packet number space." | `ack_any_space`; the second half is `Ack.MaySend` / `Ack.maySend_ack_sound` |
+| §12.5 (4971) | "0-RTT packets cannot contain ACK frames" | `ack_not_in_zeroRtt` |
+| §12.5 (4973) | "All other frame types MUST only be sent in the application data packet number space." | `other_frames_appData_only` |
+| §12.5 (4976) | ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, PATH_RESPONSE, RETIRE_CONNECTION_ID cannot be sent in 0-RTT | `forbiddenIn0Rtt`, `no_forbidden_frame_in_zeroRtt` |
+| §12.5 (4978) | "A server MAY treat receipt of these frames in 0-RTT packets as a connection error of type PROTOCOL_VIOLATION." | `Step.frameZeroRttMay`, `Step.packetZeroRttMay` |
+| §19.7 (7597) | "Clients MUST NOT send NEW_TOKEN frames.  A server MUST treat receipt of a NEW_TOKEN frame as a connection error of type PROTOCOL_VIOLATION." | `senderOf`, `mustReject`, `MaySend` |
+| §19.20 (8207) | "A HANDSHAKE_DONE frame can only be sent by the server. … A server MUST treat receipt of a HANDSHAKE_DONE frame as a connection error of type PROTOCOL_VIOLATION." | `senderOf`, `mustReject`, `MaySend` |
+| §19.20 (8208) | "Servers MUST NOT send a HANDSHAKE_DONE frame before completing the handshake." | out of scope: needs handshake state (WP11) |
 
 NOTES
 
 1. **Table 3 vs §12.5 for RETIRE_CONNECTION_ID.**  Table 3 gives
    RETIRE_CONNECTION_ID the "Pkts" value `__01`, i.e. 0-RTT is permitted, while
-   the note at line 4977 says it is "not possible to send" it in a 0-RTT packet
-   and line 4980 makes rejecting it a `MAY`.  Reading chosen: Table 3 governs
+   the note at line 4976 says it is "not possible to send" it in a 0-RTT packet
+   and line 4978 makes rejecting it a `MAY`.  Reading chosen: Table 3 governs
    the MUST (`mustReject` does not fire), the note governs the send side
    (`MaySend` is false) and supplies the discretionary receive error
    (`mayReject`).  RETIRE_CONNECTION_ID is the only frame where the two
