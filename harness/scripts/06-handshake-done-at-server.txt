@@ -1,0 +1,7 @@
+# A server receives HANDSHAKE_DONE, which only a server may send.
+# Expected: PROTOCOL_VIOLATION (0xa).
+role server
+
+# HANDSHAKE_DONE (type 0x1e)
+recv app 0 1e
+drain

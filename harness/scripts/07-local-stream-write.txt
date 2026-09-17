@@ -1,0 +1,13 @@
+# Client role, application send side: open two bidi streams, write on both,
+# then reset one and stop-sending on the other.
+# Expected: STREAM frames on the wire, then RESET_STREAM and STOP_SENDING.
+role client
+
+open bidi
+write last 16 0
+open bidi
+write last 8 1
+drain
+shutdown_write 0 7
+shutdown_read 4 9
+drain

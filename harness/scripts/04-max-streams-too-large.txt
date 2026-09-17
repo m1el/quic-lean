@@ -1,0 +1,7 @@
+# MAX_STREAMS with a value above 2^60.
+# Expected: FRAME_ENCODING_ERROR (0x7).
+role server
+
+# MAX_STREAMS bidi (type 0x12) with 8-byte varint 0x1000000000000001 = 2^60 + 1
+recv app 0 12d000000000000001
+drain

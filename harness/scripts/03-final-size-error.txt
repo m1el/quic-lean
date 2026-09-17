@@ -1,0 +1,9 @@
+# The final size of a stream changes after it was established by a FIN.
+# Expected: FINAL_SIZE_ERROR (0x6).
+role server
+
+# STREAM id=0 off=0 len=3 "abc" fin  (type 0x0b = LEN|FIN) -> final size 3
+recv app 0 0b0003616263
+# STREAM id=0 off=0 len=5 "abcde" fin -> final size 5, contradicts 3
+recv app 1 0b00056162636465
+drain

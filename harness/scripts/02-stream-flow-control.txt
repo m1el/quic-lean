@@ -1,0 +1,8 @@
+# Stream data past the advertised stream credit.
+# initial_max_stream_data_bidi_remote is 1024, so offset 1024 + 1 byte is one
+# byte too many.  Expected: FLOW_CONTROL_ERROR (0x3).
+role server
+
+# STREAM id=0 off=1024 len=1 "a"  (type 0x0e = OFF|LEN)
+recv app 0 0e0044000161
+drain
