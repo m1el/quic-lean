@@ -8,3 +8,5 @@ import QuicModel.Tests
 import QuicModel.Theorems
 import QuicModel.Spec.Core
 import QuicModel.Spec.Template
+import QuicModel.Spec.DatagramSize
+import QuicModel.Spec.VersionNegotiation
