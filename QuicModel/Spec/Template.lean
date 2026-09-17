@@ -167,18 +167,17 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
 `True` for every frame this component does not govern. -/
 
 def MaySend (s : State) : Frame → Prop
-  -- §4.6 / §19.11: never advertise more than 2^60, and never reduce the
-  -- limit already advertised.
-  | .maxStreams dir v =>
-    v ≤ maxStreamsLimit ∧ (match dir with | .bidi => s.localMaxBidi | .uni => s.localMaxUni) ≤ v
+  -- §19.11: never advertise more than 2^60.  A *smaller* value than one
+  -- already advertised may be sent: §4.6, line 1552 says only that it "has no
+  -- effect" (and §4.1, line 1365: "it is not an error to advertise a smaller
+  -- limit").  "Has no effect" is not "must not be sent".
+  | .maxStreams _ v => v ≤ maxStreamsLimit
   -- §19.14: the frame reports the limit we are actually blocked at.
   | .streamsBlocked dir v => v = s.peerMax dir
   | _ => True
 
 def maySend (s : State) : Frame → Bool
-  | .maxStreams dir v =>
-    decide (v ≤ maxStreamsLimit) &&
-      decide ((match dir with | .bidi => s.localMaxBidi | .uni => s.localMaxUni) ≤ v)
+  | .maxStreams _ v => decide (v ≤ maxStreamsLimit)
   | .streamsBlocked dir v => decide (v = s.peerMax dir)
   | _ => true
 
@@ -250,7 +249,8 @@ example : component.accepts s0 (.recvStreamsBlocked .bidi (2 ^ 60 + 1)) (.ok s0 
 -- following an implementation we cannot see inside
 example : component.track s0 (.recvMaxStreams .bidi 7) (.ok [.streamsAvailable .bidi 7]) =
     some { s0 with peerMaxBidi := 7 } := by decide
-example : component.maySend s0 (.maxStreams .bidi 9) = false := by decide  -- would lower our limit
+example : component.maySend s0 (.maxStreams .bidi 9) = true := by decide   -- lower than advertised: no effect, not forbidden
+example : component.maySend s0 (.maxStreams .bidi (2 ^ 60 + 1)) = false := by decide
 -- set tracking, for APIs whose observations do not determine the state:
 -- seeing only "some error" keeps the state; seeing something the spec forbids empties the set
 example : component.trackSet [s0] (.recvStreamsBlocked .bidi (2 ^ 60 + 1))
@@ -270,8 +270,10 @@ NOTES
 - "MUST be ignored" is encoded as `.ok s []`, not `.drop`: the frame is
   processed and has no effect, the packet is still acknowledged.  `.drop` is
   reserved for discarding a whole packet or datagram.
-- §4.6 says an endpoint "MUST NOT" lower a limit it advertised only implicitly
-  (limits are cumulative); `MaySend` makes that explicit.
+- An earlier version of this template forbade sending a MAX_STREAMS lower than
+  one already advertised.  The text does not (§4.6 line 1552, §4.1 line 1365),
+  and WP9 caught it: a reminder that "has no effect" must not become
+  "MaySend = false".  `StreamTable` supersedes this file.
 -/
 
 end Quic.Spec.Template
