@@ -1,0 +1,11 @@
+# Stream data arriving in order on a client-initiated bidi stream.
+# Expected: stream_open, two recv_stream_data callbacks (the second with fin),
+# no error; after the ACK timer fires the server acknowledges.
+role server
+
+# STREAM id=0 off=0 len=3 "abc"          (type 0x0a = LEN)
+recv app 0 0a0003616263
+# STREAM id=0 off=3 len=3 "def" fin      (type 0x0f = OFF|LEN|FIN)
+recv app 1 0f000303646566
+time 30000
+drain

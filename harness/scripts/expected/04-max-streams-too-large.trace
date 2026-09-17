@@ -1,0 +1,15 @@
+CONN role=server scid=a0a1a2a3a4a5a6a7 dcid=b0b1b2b3b4b5b6b7
+CB  recv_rx_key level=handshake
+CB  recv_tx_key level=handshake
+CB  recv_rx_key level=1rtt
+CB  recv_tx_key level=1rtt
+TIME now=0 expiry=30000000000
+IN  space=app pn=0 frames=[MAX_STREAMS dir=bidi v=1152921504606846977]
+CB  update_key
+RET read_pkt=FRAME_ENCODING
+ERR type=transport code=7 frame_type=0 reason=
+RET write_connection_close=OK
+OUT space=app pn=0 frames=[CONNECTION_CLOSE kind=transport err=7 ftype=0 reason=]
+TIME now=0 expiry=30000000000
+SKIP drain
+SUM 96117861c0bb84b8

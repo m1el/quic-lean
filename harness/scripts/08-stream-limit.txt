@@ -1,0 +1,14 @@
+# initial_max_streams_bidi is 4, so the fifth locally initiated bidi stream
+# must be refused with STREAM_ID_BLOCKED; a MAX_STREAMS from the peer then
+# unblocks it (extend_max_local_streams_bidi fires).
+role client
+
+open bidi
+open bidi
+open bidi
+open bidi
+open bidi
+# MAX_STREAMS bidi = 8   (type 0x12, varint 8)
+recv app 0 1208
+open bidi
+drain

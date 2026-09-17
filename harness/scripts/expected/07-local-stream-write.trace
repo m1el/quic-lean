@@ -1,0 +1,27 @@
+CONN role=client scid=a0a1a2a3a4a5a6a7 dcid=b0b1b2b3b4b5b6b7
+CB  recv_rx_key level=handshake
+CB  recv_tx_key level=handshake
+CB  recv_rx_key level=1rtt
+CB  recv_tx_key level=1rtt
+TIME now=0 expiry=300000000
+RET open_bidi_stream=OK id=0
+TIME now=0 expiry=300000000
+CB  update_key
+CB  get_new_connection_id2 cidlen=8 -> cid=0200000000000000
+CB  get_new_connection_id2 cidlen=8 -> cid=0300000000000000
+CB  get_new_connection_id2 cidlen=8 -> cid=0400000000000000
+OUT space=app pn=0 frames=[NEW_CONNECTION_ID seq=3 rpt=0 cid=0400000000000000 token=00000000000000000000000000000000;NEW_CONNECTION_ID seq=2 rpt=0 cid=0300000000000000 token=00000000000000000000000000000000;NEW_CONNECTION_ID seq=1 rpt=0 cid=0200000000000000 token=00000000000000000000000000000000;STREAM id=0 off=0 fin=0 data=6162636465666768696a6b6c6d6e6f70]
+TIME now=0 expiry=325000000
+RET open_bidi_stream=OK id=4
+TIME now=0 expiry=325000000
+OUT space=app pn=1 frames=[STREAM id=4 off=0 fin=1 data=6162636465666768]
+TIME now=0 expiry=325000000
+TIME now=0 expiry=325000000
+RET shutdown_stream_write=OK
+TIME now=0 expiry=325000000
+RET shutdown_stream_read=OK
+TIME now=0 expiry=325000000
+CB  stream_stop_sending id=4 app_error_code=9
+OUT space=app pn=2 frames=[RESET_STREAM id=0 err=7 final=16;STOP_SENDING id=4 err=9]
+TIME now=0 expiry=325000000
+SUM 8b1e3ea39064981a

@@ -1,0 +1,8 @@
+# More connection IDs than active_connection_id_limit (4) allows.
+# seq 0 is the CID the connection started with, so seq 1..3 fill the limit and
+# seq 4 is one too many.  Expected: CONNECTION_ID_LIMIT_ERROR (0x9).
+role server
+
+# NEW_CONNECTION_ID seq=1..4, retire_prior_to=0, 8-byte CID, 16-byte token
+recv app 0 18010008c1c1c1c1c1c1c1c11111111111111111111111111111111118020008c2c2c2c2c2c2c2c22222222222222222222222222222222218030008c3c3c3c3c3c3c3c33333333333333333333333333333333318040008c4c4c4c4c4c4c4c444444444444444444444444444444444
+drain
