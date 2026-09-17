@@ -101,8 +101,8 @@ def canIssue (s : State) (cid : Cid) (token : ResetToken) (rpt : Nat) : Bool :=
   -- §19.15, line 7993: "The Retire Prior To field MUST be less than or equal to
   -- the Sequence Number field."
   decide (rpt ≤ s.nextSeq) &&
-  -- §19.15, line 7998: smaller values have no effect; we never send one.
-  decide (s.sentRetirePriorTo ≤ rpt) &&
+  -- §19.15, line 7998 puts no condition here: a Retire Prior To smaller than
+  -- one already sent is permitted, it simply "has no effect" at the receiver.
   -- §5.1, line 1644: "the same connection ID MUST NOT be issued more than once
   -- on the same connection".
   !s.issued.any (fun e => decide (e.cid = cid)) &&
@@ -114,13 +114,28 @@ def canIssue (s : State) (cid : Cid) (token : ResetToken) (rpt : Nat) : Bool :=
   decide (s.peerActiveAfter rpt ≤ s.peerLimit)
 
 /-- Issuing: §5.1.1, line 1703, "The sequence number on each newly issued
-    connection ID MUST increase by 1". -/
+    connection ID MUST increase by 1".  `sentRetirePriorTo` tracks the *largest*
+    Retire Prior To sent, since §19.15 line 7998 makes a smaller one a no-op at
+    the receiver rather than a retraction. -/
 def applyIssue (s : State) (cid : Cid) (token : ResetToken) (rpt : Nat) :
     State × List Effect :=
   ({ s with nextSeq := s.nextSeq + 1,
             issued := s.issued ++ [⟨s.nextSeq, cid, token⟩],
-            sentRetirePriorTo := rpt },
+            sentRetirePriorTo := Nat.max s.sentRetirePriorTo rpt },
    [.sendNewCid s.nextSeq rpt cid token])
+
+/-- §12.4, line 4936: "All frames are idempotent in this version of QUIC."  A
+    NEW_CONNECTION_ID lost in flight is retransmitted unchanged, so a frame that
+    exactly repeats one of our issued entries is always sendable, whatever
+    Retire Prior To value (§19.15 line 7993: at most the sequence number) it
+    carries. -/
+def isReNewCid (s : State) (seq rpt : Nat) (cid : Cid) (token : ResetToken) : Bool :=
+  -- The frame being retransmitted was itself legal, so the §19.15 conditions
+  -- that do not depend on how much has happened since still hold of it.
+  !s.zeroLen && cidLenOk cid && tokenLenOk token && decide (rpt ≤ seq) &&
+    (match entryOf? s.issued seq with
+     | some e => decide (e.cid = cid ∧ e.token = token)
+     | none => false)
 
 /-! ## 2. The specification -/
 
@@ -244,19 +259,21 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
 This component owns NEW_CONNECTION_ID (§19.15); RETIRE_CONNECTION_ID belongs to
 the other half, so it is unconstrained here. -/
 
-/-- A NEW_CONNECTION_ID may be sent exactly when it is the frame `canIssue`
+/-- A NEW_CONNECTION_ID may be sent either as a new issue — the frame `canIssue`
     describes: the next sequence number, a fresh connection ID of legal length,
-    a Retire Prior To that is at most the sequence number and never smaller than
-    one already sent, and a result that keeps the peer inside its
-    `active_connection_id_limit`. -/
+    a Retire Prior To at most the sequence number, and a result that keeps the
+    peer inside its `active_connection_id_limit` — or as a retransmission of one
+    already issued (§12.4, line 4936). -/
 def MaySend (s : State) : Frame → Prop
   | .newConnectionId seq rpt cid token =>
-    seq = s.nextSeq ∧ canIssue s cid.data.toList token.data.toList rpt = true
+    (seq = s.nextSeq ∧ canIssue s cid.data.toList token.data.toList rpt = true)
+      ∨ isReNewCid s seq rpt cid.data.toList token.data.toList = true
   | _ => True
 
 def maySend (s : State) : Frame → Bool
   | .newConnectionId seq rpt cid token =>
-    decide (seq = s.nextSeq) && canIssue s cid.data.toList token.data.toList rpt
+    (decide (seq = s.nextSeq) && canIssue s cid.data.toList token.data.toList rpt)
+      || isReNewCid s seq rpt cid.data.toList token.data.toList
   | _ => true
 
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
@@ -336,8 +353,9 @@ theorem retired_never_active {s₀ s : State} (h : component.Reachable s₀ s)
     {n : Nat} (hn : n ∈ s₀.retired) : ∀ e ∈ s.active, e.seq ≠ n :=
   not_active_of_retired (retired_mono_reachable h n hn)
 
-/-- (d) The Retire Prior To value we have sent never decreases; `canIssue`
-    refuses a smaller one. -/
+/-- (d) The largest Retire Prior To we have sent never decreases.  Sending a
+    smaller one is permitted (§19.15, line 7998: it "has no effect"), it just
+    does not move this number. -/
 theorem sent_rpt_mono {s s' : State} {e : Event} {fx : List Effect}
     (h : Step s e (.ok s' fx)) : s.sentRetirePriorTo ≤ s'.sentRetirePriorTo := by
   cases h with
@@ -346,9 +364,7 @@ theorem sent_rpt_mono {s s' : State} {e : Event} {fx : List Effect}
     split
     · exact Nat.le_refl _
     · exact Nat.le_refl _
-  | @issueOk cid token rpt hc =>
-    simp only [canIssue, Bool.and_eq_true, decide_eq_true_eq] at hc
-    exact hc.1.1.2
+  | issueOk _ => exact Nat.le_max_left _ _
 
 theorem sent_rpt_mono_reachable {s₀ s : State} (h : component.Reachable s₀ s) :
     s₀.sentRetirePriorTo ≤ s.sentRetirePriorTo :=
@@ -440,6 +456,25 @@ example : component.maySend s0 (.newConnectionId 2 0 (bytes [2]) (bytes (tok 2))
 -- §19.15, line 7993: Retire Prior To must not exceed the sequence number.
 example : component.maySend s0 (.newConnectionId 1 2 (bytes [2]) (bytes (tok 2))) = false := by
   decide
+-- §12.4, line 4936: "All frames are idempotent in this version of QUIC" — after
+-- the connection ID above has been issued, the same frame may be retransmitted,
+-- although its sequence number is no longer the next one and its connection ID
+-- is no longer fresh.
+private def s0after : State := { s0 with nextSeq := 2, issued := s0.issued ++ [⟨1, [2], tok 2⟩] }
+example : component.maySend s0after (.newConnectionId 1 0 (bytes [2]) (bytes (tok 2))) = true := by
+  decide
+-- A different stateless reset token under that sequence number is not a
+-- retransmission (§19.15, line 7985 is the peer's side of the same rule).
+example : component.maySend s0after (.newConnectionId 1 0 (bytes [2]) (bytes (tok 9))) = false := by
+  decide
+
+-- §19.15, line 7998: a Retire Prior To smaller than one already sent is
+-- permitted; it simply has no effect at the receiver.
+private def s0rpt : State := { s0 with sentRetirePriorTo := 1 }
+example : component.step s0rpt (.issueCid [2] (tok 2) 0) =
+    .ok { s0rpt with nextSeq := 2, issued := s0.issued ++ [⟨1, [2], tok 2⟩] }
+      [.sendNewCid 1 0 [2] (tok 2)] := by decide
+
 -- Frames this component does not govern are unconstrained.
 example : component.maySend s0 (.retireConnectionId 0) = true := by decide
 

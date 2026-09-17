@@ -313,21 +313,26 @@ the other half, so it is unconstrained here. -/
 /-- §19.16, line 8046: the sequence number must be one the peer sent us
     ("greater than any previously sent to the peer" as seen from the receiver);
     §5.1.2, line 1781: sending the frame "indicates that the connection ID will
-    not be used again", so we do not retire the same one twice;
+    not be used again", so a first retirement needs a connection ID still in
+    use; §12.4, line 4936, "All frames are idempotent in this version of QUIC":
+    a RETIRE_CONNECTION_ID lost in flight is retransmitted unchanged, so a
+    sequence number we have already retired stays sendable;
     §19.16, line 8055: "An endpoint cannot send this frame if it was provided
     with a zero-length connection ID by its peer." -/
 def MaySend (s : State) : Frame → Prop
   | .retireConnectionId n =>
-    s.peerZeroLen = false ∧ n ∈ seqs s.entries ∧ n ∉ s.retired
+    s.peerZeroLen = false ∧
+      ((n ∈ seqs s.entries ∧ n ∉ s.retired) ∨ n ∈ s.retired)
   | _ => True
 
 def maySend (s : State) : Frame → Bool
   | .retireConnectionId n =>
-    decide (s.peerZeroLen = false) && decide (n ∈ seqs s.entries) && decide (n ∉ s.retired)
+    decide (s.peerZeroLen = false) &&
+      ((decide (n ∈ seqs s.entries) && decide (n ∉ s.retired)) || decide (n ∈ s.retired))
   | _ => true
 
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
-  cases f <;> simp [maySend, MaySend, and_assoc]
+  cases f <;> simp [maySend, MaySend]
 
 /-! ## 7. The component -/
 
@@ -490,7 +495,10 @@ example : component.step { s0 with entries := [], peerZeroLen := true }
 -- §19.16 send side.
 example : component.maySend s0 (.retireConnectionId 1) = true := by decide
 example : component.maySend s0 (.retireConnectionId 9) = false := by decide       -- never issued
-example : component.maySend { s0 with retired := [1] } (.retireConnectionId 1) = false := by decide
+-- §12.4, line 4936: "All frames are idempotent in this version of QUIC" — the
+-- RETIRE_CONNECTION_ID for sequence number 1 may be retransmitted after loss,
+-- although sequence number 1 is by then already retired.
+example : component.maySend { s0 with retired := [1] } (.retireConnectionId 1) = true := by decide
 example : component.maySend { s0 with peerZeroLen := true } (.retireConnectionId 1) = false := by
   decide
 
@@ -537,6 +545,7 @@ issued to us.
 | §19.16 (8046) | sequence number greater than any sent → PROTOCOL_VIOLATION | `Local.Step.retireUnknown` |
 | §19.16 (8050) | MUST NOT retire the packet's own DCID; peer MAY treat as PROTOCOL_VIOLATION | `Local.Step.retireSelf`; the send-side MUST NOT needs the packet being assembled, which is WP12 |
 | §19.16 (8055) | cannot send when the peer's CID is zero-length; receiving one when we issue zero-length CIDs → PROTOCOL_VIOLATION | `MaySend` here, `Local.Step.retireZeroLen` there |
+| §12.4 (4936) | "All frames are idempotent in this version of QUIC" | send side: the retransmission disjunct of `MaySend` here and `Local.isReNewCid`; receive side: `entriesAfter` (a repeated NEW_CONNECTION_ID is a no-op) and `Local.applyRetire` (a repeated RETIRE_CONNECTION_ID is a no-op) |
 
 NOTES on this half are collected in `QuicModel/Spec/ConnIds.lean`.
 -/

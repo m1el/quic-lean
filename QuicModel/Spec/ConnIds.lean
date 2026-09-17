@@ -38,7 +38,7 @@ first situation.  §19.16 lines 8055–8058 are the same pair the other way roun
 
 example (s : Local.State) (h : s.zeroLen = true) (cid token : ByteArray) (seq rpt : Nat) :
     Local.maySend s (.newConnectionId seq rpt cid token) = false := by
-  simp [Local.maySend, Local.canIssue, h]
+  simp [Local.maySend, Local.canIssue, Local.isReNewCid, h]
 
 example (s : Remote.State) (h : s.peerZeroLen = true) (n : Nat) :
     Remote.maySend s (.retireConnectionId n) = false := by
@@ -128,13 +128,18 @@ end Counterexample
    newly provided connection ID", so retirement effects are emitted in entry
    order and the newly added connection ID, being appended, comes last.
 
-7. **Retire Prior To never decreasing on the send side.**  §19.15 line 7998 only
-   says that a smaller Retire Prior To "has no effect"; it does not forbid
-   sending one.  `Local.canIssue` nevertheless requires
-   `sentRetirePriorTo ≤ rpt`.  This is the strictest reading and is the one the
-   work package asked for, but it is a place where `MaySend` is stricter than
-   the text: an implementation that re-sends an older Retire Prior To value
-   after a loss would be rejected.  Flagged for WP13's triage.
+7. **Retire Prior To is not required to increase on the send side.**  §19.15
+   lines 7998–8001 say only that once a sender indicates a Retire Prior To
+   value, "smaller values sent in subsequent NEW_CONNECTION_ID frames have no
+   effect", and that "a receiver MUST ignore any Retire Prior To fields that do
+   not increase the largest received Retire Prior To value".  That is a rule
+   about the receiver, not a prohibition on the sender, so `Local.canIssue`
+   places no condition on `rpt` beyond §19.15 line 7993's `rpt ≤ seq`, and
+   `MaySend` does not restrict it: an endpoint may send an older value.
+   `Local.State.sentRetirePriorTo` therefore tracks the *largest* value sent
+   (`applyIssue` uses `Nat.max`), which is what the SHOULD NOT of §5.1.2 line
+   1831 in `Local.Recommended` refers to and what keeps `Local.sent_rpt_mono`
+   true.
 
 8. **`issueCid` and `recvRetireCid`'s `dcidSeq`.**  "Issue a connection ID" is
    modelled as an event rather than only as `MaySend`, so that the sequence
@@ -153,6 +158,20 @@ end Counterexample
    `active_connection_id_limit` (§18.2, WP1) is not enforced; the number of
    unacknowledged RETIRE_CONNECTION_ID frames (§5.1.2 line 1823) needs loss
    recovery state, which is RFC 9002 and out of scope.
+
+10. **Retransmission and `MaySend`.**  §12.4 line 4936, "All frames are
+    idempotent in this version of QUIC", means a NEW_CONNECTION_ID or
+    RETIRE_CONNECTION_ID lost in flight is re-sent unchanged, at a point where
+    the state has moved on.  Both `MaySend`s therefore have a second disjunct
+    for an exact repeat: `Local.isReNewCid` accepts a frame whose sequence
+    number, connection ID and stateless reset token match an entry we issued,
+    carrying any `rpt ≤ seq`; `Remote.MaySend` accepts a RETIRE_CONNECTION_ID
+    for a sequence number already retired.  That disjunct still carries the
+    conditions that held of the original frame and cannot have changed since —
+    not zero-length, legal field lengths — so it never admits a frame the text
+    forbids outright.  `MaySend` consequently cannot tell a retransmission from
+    a gratuitous duplicate; deciding whether the frame is really in flight needs
+    loss recovery state (RFC 9002), which is out of scope.
 -/
 
 end Quic.Spec.ConnIds
