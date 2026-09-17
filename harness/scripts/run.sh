@@ -6,6 +6,8 @@ cd "$(dirname "$0")/../.."
 : "${ASAN_OPTIONS:=detect_leaks=0}"
 export ASAN_OPTIONS
 rc=0
+tmp=out/scripts-actual
+mkdir -p "$tmp"
 for f in harness/scripts/*.txt; do
   b=$(basename "$f" .txt)
   out=harness/scripts/expected/$b.trace
@@ -13,12 +15,12 @@ for f in harness/scripts/*.txt; do
     ./out/conn_trace --script "$f" > "$out" 2>&1
     echo "recorded $b"
   else
-    ./out/conn_trace --script "$f" > "/tmp/$b.trace" 2>&1
-    if diff -u "$out" "/tmp/$b.trace" > /dev/null; then
+    ./out/conn_trace --script "$f" > "$tmp/$b.trace" 2>&1
+    if diff -u "$out" "$tmp/$b.trace" > /dev/null; then
       echo "ok   $b"
     else
       echo "FAIL $b"
-      diff -u "$out" "/tmp/$b.trace" || true
+      diff -u "$out" "$tmp/$b.trace" || true
       rc=1
     fi
   fi
