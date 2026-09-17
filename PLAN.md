@@ -8,65 +8,64 @@ loss recovery and congestion control (RFC 9002), §21 security considerations,
 
 ## 1. The shape every component takes
 
-Each component `X` lives in `QuicModel/Spec/X.lean` (or a directory) and exports
-the same six things. Agents must not deviate from this; the composition layer
-and the harness rely on it.
+Defined in `QuicModel/Spec/Core.lean` as the structure `Component`; a complete
+worked example is `QuicModel/Spec/Template.lean`. Every work package produces
+one `Component` value (or several) and must follow the template's file order.
 
 ```lean
-structure X.State                      -- plain data, DecidableEq
-inductive X.Event                      -- inputs: frame received, app call, TLS event, timer
-inductive X.Effect                     -- outputs: app event, frame to queue, timer to arm
+structure Component where
+  State Event Effect : Type                    -- plain data, DecidableEq
+  Step     : State → Event → Outcome State Effect → Prop   -- THE SPEC
+  outcomes : State → Event → List (Outcome State Effect)   -- executable: all permitted outcomes
+  outcomes_iff : o ∈ outcomes s e ↔ Step s e o
+  outcomes_ne  : outcomes s e ≠ []             -- the spec always permits something
+  Inv      : State → Prop
+  step_inv : Inv s → Step s e (.ok s' fx) → Inv s'
+  MaySend  : State → Frame → Prop              -- send side; True for frames not governed
+  maySend  : State → Frame → Bool
+  maySend_iff : maySend s f = true ↔ MaySend s f
 
-/-- One outcome of handling an event. -/
-inductive Outcome (σ ε : Type)
-  | ok (s : σ) (effects : List ε)
-  | error (code : TransportError) (reason : String)   -- connection error, §11
-  | drop                                              -- "MUST discard / ignore"
-
-/-- THE SPEC.  Every outcome the text permits.  Loose where the text is loose:
-    one constructor per alternative ("STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR",
-    "MAY ignore", "MAY treat as PROTOCOL_VIOLATION"). -/
-inductive X.Step : X.State → X.Event → Outcome X.State X.Effect → Prop
-
-/-- THE REFERENCE IMPLEMENTATION.  Total, structural, no partial/while/get!.
-    Picks one permitted outcome. -/
-def X.step : X.State → X.Event → Outcome X.State X.Effect
-
-/-- THE CHECKER.  Decides whether an outcome observed elsewhere (ngtcp2) is
-    permitted.  This is what the differential harness calls. -/
-def X.accepts : X.State → X.Event → Outcome X.State X.Effect → Bool
-
-theorem X.step_sound   : X.Step s e (X.step s e)
-theorem X.accepts_iff  : X.accepts s e o = true ↔ X.Step s e o
-
-/-- What the endpoint is permitted to send in state `s` (send side is a
-    predicate only: the spec never says what to send next). -/
-def X.MaySend  : X.State → Frame → Prop
-def X.maySend  : X.State → Frame → Bool          -- with maySend_iff
-
-/-- State invariant and its preservation; plus the component's named
-    safety theorems (listed per work package below). -/
-def X.Inv : X.State → Prop
-theorem X.step_inv : X.Inv s → X.Step s e (.ok s' fx) → X.Inv s'
+inductive Outcome σ ε | ok (s : σ) (effects : List ε) | error (code : TransportError) | drop
 ```
+
+`Core` derives from this, once and for all components:
+
+- `C.step` — the reference implementation: the first (preferred) permitted outcome;
+  `step_sound : C.Step s e (C.step s e)`.
+- `C.accepts s e o : Bool` with `accepts_iff` — is an outcome permitted?
+- `C.track s e obs : Option State` — follow an implementation whose state is not
+  visible, from what it observably did (`Obs` = effects, error code, or drop);
+  `track_sound`, `track_complete`. This is what the ngtcp2 harness calls.
+- `C.Reachable`, `inv_of_reachable`.
+
+Why a list of outcomes: receive-side looseness in QUIC is always a finite choice
+(one of two error codes; ignore or reject), so enumerating it gives the
+reference function, the checker and the tracker from one definition and one
+proof (`outcomes_iff`).
 
 Rules that go with it:
 
 - **Normative keywords.** `Step` encodes MUST / MUST NOT. SHOULD and MAY that
-  *permit* behaviour add constructors to `Step`. SHOULD that *recommend*
-  behaviour goes in a separate `X.Recommended` predicate so that a conforming
-  implementation is never rejected for ignoring advice.
-- **Traceability.** Every `Step` constructor and every error site carries a doc
-  comment `§x.y, line N: "quoted sentence"`. Each file ends with a coverage
-  table: every MUST/MUST NOT in the assigned line range → constructor or theorem
-  name, or `out of scope: reason`.
-- **Proof-friendliness.** State is finite maps as association lists or
-  `Std.HashMap`-free sorted lists (pick one in WP0 and keep it); numbers are
-  `Nat` with explicit `≤ maxVarint` side conditions; time is `Nat` microseconds
-  passed in on events, never read.
-- **Determinism is not required of `Step`, totality is required of `step`.**
+  *permit* behaviour add constructors to `Step` (and entries to `outcomes`).
+  SHOULD that *recommends* goes in a separate `Recommended` predicate so that a
+  conforming implementation is never rejected for ignoring advice.
+- **Traceability.** Every `Step` constructor carries a doc comment
+  `§x.y, line N: "quoted sentence"`. Each file ends with a coverage table: every
+  MUST/MUST NOT in the assigned line range → constructor or theorem name, or
+  `out of scope: reason`, plus NOTES on every ambiguity and the reading chosen.
+- **Proof-friendliness.** Total functions only: no `partial`, `while`, `get!`,
+  `Id.run` loops. Keep `outcomes` a flat `match`/`if` so `outcomes_iff` is a case
+  split plus `simp`. Finite maps are `Spec.Map` (association lists). Numbers are
+  `Nat` with explicit bounds. Time is `Spec.Time` (µs) carried on events, never
+  read. Stream IDs are `Spec.StreamId`.
+- **Observability.** If two permitted outcomes have the same `Obs` but different
+  next states, `track` cannot follow; add an effect that distinguishes them, or
+  show the states coincide.
 - **Nothing abstract leaks.** TLS, tokens, stateless-reset token derivation and
-  the Retry integrity tag are opaque parameters/events (like `Protection`).
+  the Retry integrity tag are opaque parameters or events (like `Protection`).
+- **Builds.** Always run Lean under a timeout (`timeout 300 lake build …`); a
+  check that takes more than a minute means a tactic is searching — replace
+  `simp_all`/`decide` on big terms with explicit steps.
 
 What validates `Step` itself, since `step_sound` only shows `step ⊆ Step`:
 (1) the coverage table, reviewed against the text by a second agent that did
@@ -83,7 +82,7 @@ merged.
 
 | WP | Content | Text | Output |
 |---|---|---|---|
-| 0 Core | `TransportError` (§20.1), `Role`, `StreamId` with initiator/direction (§2.1), `PnSpace`, `PacketType`, `Outcome`, map type, the `Spec` typeclass bundling the six exports, one worked toy component as the template | 677–732, 4634–4726, 8249–8372 | `Spec/Core.lean`, `Spec/Template.lean` |
+| 0 Core (done) | `TransportError` (§20.1), `Role`, `StreamId` (§2.1), `PnSpace`, `PacketType`, `Time`, `Map`, `Outcome`/`Obs`, the `Component` structure with derived `step`/`accepts`/`track`, and a worked template | 677–732, 4634–4726, 8249–8372 | `Spec/Core.lean`, `Spec/Template.lean` |
 
 ### Wave 1 (eight agents in parallel; need WP0)
 
@@ -126,8 +125,8 @@ strictly or loosely than written. Findings go back to the owning agent.
    outside `Tests`.
 2. `#print axioms` on each headline theorem shows only `propext`,
    `Classical.choice`, `Quot.sound`.
-3. `step_sound`, `accepts_iff`, `maySend_iff`, `step_inv` and the named theorems
-   are proved.
+3. A `Component` value is defined (so `outcomes_iff`, `outcomes_ne`, `step_inv`,
+   `maySend_iff` are proved) and the package's named theorems are proved.
 4. Coverage table complete for the assigned line range.
 5. At least five `example`s replaying scenarios the text itself describes
    (e.g. the stream state diagrams, the handshake flows of §7.1).

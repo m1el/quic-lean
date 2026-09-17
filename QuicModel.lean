@@ -6,3 +6,5 @@ import QuicModel.RoundTrip
 import QuicModel.Dump
 import QuicModel.Tests
 import QuicModel.Theorems
+import QuicModel.Spec.Core
+import QuicModel.Spec.Template
