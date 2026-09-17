@@ -54,6 +54,16 @@ worktrees.
 - Rules about whole packets or datagrams go in the optional `MaySendPacket` /
   `MaySendDatagram` fields of `Component` (over `Spec.OutPacket` /
   `Spec.OutDatagram`), not in free-standing functions.
+- A MAY or a permission ("can safely ignore") is an *additional* permitted
+  outcome, never the only one: keep the alternative the text also allows. The
+  Wave 1 reviews found this collapse to be the commonest defect.
+- Every SHOULD in your range gets one of two treatments, and the coverage table
+  says which: a clause of `Recommended` when it constrains an outcome or a frame
+  the component models; otherwise the row reads `advice, not checkable here:
+  <why>`. "Not modelled" with no reason is not acceptable.
+- Line numbers in citations must be the line where the quoted sentence starts.
+  Before your final commit, check every citation mechanically (grep the quoted
+  words at the cited line).
 - Scratch files (axiom checks, experiments) go under `out/` inside your own
   worktree, never in a shared temp directory: other agents run in parallel.
 - Where the text is ambiguous, choose the reading, encode it, and record it in

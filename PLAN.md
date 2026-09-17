@@ -235,6 +235,21 @@ HIGH and MEDIUM findings, all accepted unless noted:
 | `Spec.OutDatagram` lacked destination and probe flag | `Core` | done |
 | AV-4 CONNECTION_REFUSED (§5.2.2); T-4 second half, §11.1 "MAY discard an invalid Initial even where an error is mandated"; VN-2 "MUST drop under all other circumstances"; T-3 closing-state amplification rules (§10.2.1 lines 3993, 4008); conflicting `.drop` readings between PathValidation and Termination | WP12 | recorded: composition must take the *union* for connection-level refusals and let Termination's phase gate every other component |
 
+## 4d. Review of Wave 1, batch A (`reviews/wave1-a.md`): disposition
+
+All four HIGH findings are the model being stricter than the text; none admits
+forbidden behaviour. All accepted.
+
+| Finding | Owner | Status |
+|---|---|---|
+| W4-1 `peerActiveAfter` ignores Retire Prior To already sent; W4-2, W4-3 missing MAYs; W4-4 coverage rows | WP4 fix run | queued |
+| W2-1 RESET_STREAM: FINAL_SIZE_ERROR must also be permitted when both rules fire (ngtcp2 checks final size first); W2-2 MAX_STREAM_DATA after FIN is a SHOULD; W2-3 STREAM_DATA_BLOCKED has no bounds or errors; W2-4 "can safely ignore" made mandatory; W2-5..8 | WP2 fix run | queued |
+| W2-6 §13.3 "content of a RESET_STREAM MUST NOT change when sent again" | WP2 fix run (send rule of the stream) and WP14 coverage | queued |
+| W3-1 minimum-packet-number drop (§12.3) not permitted; W3-4 `MaySendPacket` for empty packets and frame/packet-type legality; W3-5/6 coverage | WP3 fix run (already running on the audit's ACK defects; W3-3 is the same defect) | sent as addendum |
+| W1-1 duplicate parameters: first-copy-wins also conforms; W1-2 dropped SHOULDs; citation drift | WP1 fix run | queued |
+| Ruling on `Recommended` vs "advice only" | BRIEF.md | done |
+| Composition notes: `assembling` duplicated in FrameRules and Ack (both needed); `Send.written` means the harness must synthesise `appWrite`; grow-only state vs pruning implementations | WP12 / WP13 | recorded |
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
