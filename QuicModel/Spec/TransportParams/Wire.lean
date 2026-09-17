@@ -548,4 +548,80 @@ theorem interpret_toRaw (tp : TransportParams) (hwf : tp.WF) : interpret (toRaw 
     simp_all [toEntries, optEntry, applyEntries, setParam, defaults,
       varintValue?_encodeVarint, decodePreferredAddress_encode]
 
+/-! ### The encoding is representable -/
+
+theorem thousand_le_maxVarint : 1000 ≤ maxVarint := by decide
+
+theorem le_maxVarint_of_le {n : Nat} (h : n ≤ 1000) : n ≤ maxVarint :=
+  Nat.le_trans h thousand_le_maxVarint
+
+theorem size_vi_le (v : Nat) : (vi v).size ≤ maxVarint := by
+  refine le_maxVarint_of_le ?_
+  rw [size_encodeVarint]
+  unfold varintLen
+  repeat' split
+  all_goals omega
+
+theorem code_le_maxVarint (p : ParamId) : p.code ≤ maxVarint := by
+  cases p <;> exact le_maxVarint_of_le (by decide)
+
+theorem size_encodePreferredAddress (pa : PreferredAddress) :
+    (encodePreferredAddress pa).size =
+      pa.ipv4.size + 2 + (pa.ipv6.size + (2 + (1 + (pa.cid.size + pa.token.size)))) := by
+  simp only [encodePreferredAddress, ByteArray.size_append, size_bytes, beBytes]
+  simp
+  omega
+
+theorem rawWF_rawOf (l : List (ParamId × ByteArray)) (h : ∀ e ∈ l, e.2.size ≤ maxVarint) :
+    RawWF (rawOf l) := by
+  induction l with
+  | nil => intro e he; simp [rawOf] at he
+  | cons a l ih =>
+    obtain ⟨p, v⟩ := a
+    intro e he
+    simp only [rawOf, List.mem_cons] at he
+    rcases he with rfl | he
+    · exact ⟨code_le_maxVarint p, h (p, v) (by simp)⟩
+    · exact ih (fun x hx => h x (by simp [hx])) e he
+
+theorem size_encodePreferredAddress_le (pa : PreferredAddress) (h : pa.WF) :
+    (encodePreferredAddress pa).size ≤ maxVarint := by
+  obtain ⟨h4, -, h6, -, hc, ht⟩ := h
+  rw [size_encodePreferredAddress, h4, h6, ht]
+  exact le_maxVarint_of_le (by omega)
+
+theorem rawWF_toRaw (tp : TransportParams) (hwf : tp.WF) : RawWF (toRaw tp) := by
+  obtain ⟨-, -, -, -, -, -, -, -, -, -, -, ho, hi, hr, ht, hp⟩ := hwf
+  have hpa : ∀ pa, tp.preferredAddress = some pa → (encodePreferredAddress pa).size ≤ maxVarint :=
+    fun pa h => size_encodePreferredAddress_le pa (hp pa h)
+  clear hp
+  refine rawWF_rawOf _ ?_
+  obtain ⟨odc, idle, srt, mups, imd, b5, b6, b7, s8, s9, ade, mad, dam, pa, acl, iscid, rscid⟩ := tp
+  intro e he
+  have hv := size_vi_le
+  have hmv := thousand_le_maxVarint
+  cases odc <;> cases srt <;> cases pa <;> cases iscid <;> cases rscid <;> cases dam <;>
+    simp_all [toEntries, optEntry] <;>
+    first
+      | omega
+      | (rcases he with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
+           rfl | rfl | rfl | rfl | rfl <;> simp_all <;> omega)
+
+/-! ## The receive-side codec -/
+
+/-- §18: decode the extension's bytes, ignore unknown identifiers, interpret the
+    rest.  `none` is "malformed": a truncated or over-long sequence, or a
+    parameter value that does not match its definition. -/
+def decodeParams (b : ByteArray) : Option TransportParams :=
+  match decodeRaw b with
+  | .ok raw => interpret raw
+  | .error _ => none
+
+/-- **Round trip (a).**  Every representable parameter record encodes to bytes
+    that decode back to it. -/
+theorem decodeParams_encodeParams (tp : TransportParams) (hwf : tp.WF) :
+    decodeParams (encodeParams tp) = some tp := by
+  simp only [decodeParams, encodeParams, decodeRaw_encodeRaw _ (rawWF_toRaw tp hwf),
+    interpret_toRaw tp hwf]
+
 end Quic.Spec.TransportParams
