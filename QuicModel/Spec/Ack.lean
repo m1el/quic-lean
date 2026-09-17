@@ -776,8 +776,9 @@ theorem appData_ack_in_oneRtt {s : State} {largest delay first : Nat} {ranges : 
 /-- The SHOULDs and MAYs of §13.2 that only *recommend* a moment to send an ACK
     frame.  They are deliberately outside `Step` and `MaySend`: an endpoint that
     ignores them still conforms.  `sendAckNow` is the decision to emit an ACK
-    frame for this space right now. -/
-structure Recommended (s : State) (sendAckNow : Bool) : Prop where
+    frame for this space right now; `sendingPacket` says a packet is going out
+    anyway. -/
+structure Recommended (s : State) (sendingPacket sendAckNow : Bool) : Prop where
   /-- §13.2.2, line 5163: "A receiver SHOULD send an ACK frame after receiving
       at least two ack-eliciting packets." -/
   twoAckEliciting : 2 ≤ s.ackElicitingSinceAck → sendAckNow = true
@@ -788,12 +789,16 @@ structure Recommended (s : State) (sendAckNow : Bool) : Prop where
       than the highest-numbered ack-eliciting packet that has been received and
       there are missing packets between that packet and this packet." -/
   immediate : s.ackImmediately = true → sendAckNow = true
-  /-- §13.2.1, line 5125: "An endpoint SHOULD send an ACK frame with other
-      frames when there are new ack-eliciting packets to acknowledge."  The
-      following sentence is the MAY that balances it: "When only
-      non-ack-eliciting packets need to be acknowledged, an endpoint MAY wait
-      until an ack-eliciting packet has been received". -/
-  withOtherFrames : s.ackElicitingPending = true → sendAckNow = true
+  /-- §13.2, line 5052: "When sending a packet for any reason, an endpoint
+      SHOULD attempt to include an ACK frame if one has not been sent
+      recently."  §13.2.1, line 5125: "An endpoint SHOULD send an ACK frame
+      with other frames when there are new ack-eliciting packets to
+      acknowledge."  The next sentence is the MAY that balances it — "When
+      only non-ack-eliciting packets need to be acknowledged, an endpoint MAY
+      wait until an ack-eliciting packet has been received to include an ACK
+      frame with outgoing frames" — which is why this clause fires only when
+      an ack-eliciting packet is pending. -/
+  withOtherFrames : sendingPacket = true → s.ackElicitingPending = true → sendAckNow = true
 
 /-- §13.2.3, line 5223: "A receiver SHOULD include an ACK Range containing the
     largest received packet number in every ACK frame." -/

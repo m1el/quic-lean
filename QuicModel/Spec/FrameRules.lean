@@ -630,7 +630,10 @@ NOTES
    (`mayReject`).  RETIRE_CONNECTION_ID is the only frame where the two
    columns disagree; for the other five frames of the note, Table 3 already
    excludes 0-RTT, so `mustReject` fires and `mayReject` is redundant — hence
-   the `allowedIn f .zeroRtt` conjunct in `mayReject`.
+   the `allowedIn f .zeroRtt` conjunct in `mayReject`.  The sentence grants the
+   discretion to "a server"; `mayReject` does not test the role, because only a
+   server ever receives a 0-RTT packet (§17.2.3), so the branch is unreachable
+   for a client.
 
 2. **`C` marking and CONNECTION_CLOSE.**  Table 3 marks only ACK with `C`, so
    `inFlight (.connectionClose …) = true` here, i.e. a packet carrying only
