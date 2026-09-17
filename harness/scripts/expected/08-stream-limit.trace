@@ -14,7 +14,7 @@ RET open_bidi_stream=OK id=12
 TIME now=0 expiry=300000000
 RET open_bidi_stream=STREAM_ID_BLOCKED
 TIME now=0 expiry=300000000
-IN  space=app pn=0 frames=[MAX_STREAMS dir=bidi v=8]
+IN  space=app pn=0 len=31 frames=[MAX_STREAMS dir=bidi v=8]
 CB  update_key
 CB  extend_max_local_streams_bidi max_streams=8
 RET read_pkt=OK
@@ -24,6 +24,6 @@ TIME now=0 expiry=12500000
 CB  get_new_connection_id2 cidlen=8 -> cid=0200000000000000
 CB  get_new_connection_id2 cidlen=8 -> cid=0300000000000000
 CB  get_new_connection_id2 cidlen=8 -> cid=0400000000000000
-OUT space=app pn=0 frames=[NEW_CONNECTION_ID seq=3 rpt=0 cid=0400000000000000 token=00000000000000000000000000000000;NEW_CONNECTION_ID seq=2 rpt=0 cid=0300000000000000 token=00000000000000000000000000000000;NEW_CONNECTION_ID seq=1 rpt=0 cid=0200000000000000 token=00000000000000000000000000000000]
+OUT space=app pn=0 len=110 frames=[NEW_CONNECTION_ID seq=3 rpt=0 cid=0400000000000000 token=00000000000000000000000000000000;NEW_CONNECTION_ID seq=2 rpt=0 cid=0300000000000000 token=00000000000000000000000000000000;NEW_CONNECTION_ID seq=1 rpt=0 cid=0200000000000000 token=00000000000000000000000000000000]
 TIME now=0 expiry=12500000
-SUM 806c44ad9e8f00f1
+SUM 4354450cb6306e6b

@@ -4,17 +4,17 @@ CB  recv_tx_key level=handshake
 CB  recv_rx_key level=1rtt
 CB  recv_tx_key level=1rtt
 TIME now=0 expiry=30000000000
-IN  space=app pn=0 frames=[STREAM id=0 off=0 fin=1 data=616263]
+IN  space=app pn=0 len=35 frames=[STREAM id=0 off=0 fin=1 data=616263]
 CB  update_key
 CB  stream_open id=0
 CB  recv_stream_data id=0 off=0 len=3 fin=1 early=0
 RET read_pkt=OK
 TIME now=0 expiry=12500000
-IN  space=app pn=1 frames=[STREAM id=0 off=0 fin=1 data=6162636465]
+IN  space=app pn=1 len=37 frames=[STREAM id=0 off=0 fin=1 data=6162636465]
 RET read_pkt=FINAL_SIZE
 ERR type=transport code=6 frame_type=0 reason=
 RET write_connection_close=OK n=30
-OUT space=app pn=0 frames=[CONNECTION_CLOSE kind=transport err=6 ftype=0 reason=]
+OUT space=app pn=0 len=30 frames=[CONNECTION_CLOSE kind=transport err=6 ftype=0 reason=]
 TIME now=0 expiry=12500000
 SKIP drain
-SUM 3abfc982202fd2de
+SUM 798878a9d9b6eb09

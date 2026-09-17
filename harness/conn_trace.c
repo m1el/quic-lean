@@ -65,6 +65,7 @@
  *                             exactly as pkt_diff.c's roundtrip mode does).
  *                             An empty payload becomes a single PING.
  *                             The packet is fed to ngtcp2_conn_read_pkt.
+ *                             An Initial is padded to 1200 bytes.
  *   time <us>                 advance the clock by <us> microseconds and call
  *                             ngtcp2_conn_handle_expiry.
  *   open bidi|uni             ngtcp2_conn_open_{bidi,uni}_stream.
@@ -86,7 +87,7 @@
  *
  *   CONN role=<server|client> scid=<hex> dcid=<hex>
  *       once, first line.
- *   IN  space=<initial|handshake|app> pn=<n> frames=[<f>;<f>;...]
+ *   IN  space=<initial|handshake|app> pn=<n> len=<bytes> frames=[<f>;<f>;...]
  *       a packet handed to ngtcp2_conn_read_pkt; <f> is the canonical frame
  *       rendering of diff_common.h's dump_frame (= QuicModel/Dump.lean).
  *       The frames shown are the packet's actual plaintext, so PADDING that
@@ -132,11 +133,12 @@
  *       CONNECTION_CLOSE packet from ngtcp2_conn_write_connection_close (as an
  *       ordinary OUT record; nothing is written for an idle close).  After
  *       this the script stops.
- *   OUT space=<initial|handshake|app> pn=<n> frames=[<f>;<f>;...]
+ *   OUT space=<initial|handshake|app> pn=<n> len=<bytes> frames=[<f>;<f>;...]
  *       a packet the connection wrote.  The harness unprotects it with the
  *       stub crypto (mask = first 5 bytes of the sample, tag = last 16 bytes)
- *       and dumps its frames with the same canonical rendering.  A coalesced
- *       datagram produces one OUT record per packet.
+ *       and dumps its frames with the same canonical rendering.  `len` is the
+ *       protected packet length, so the datagram-size rules of Sec. 14 are
+ *       visible.  A coalesced datagram produces one OUT record per packet.
  *   TIME now=<us> expiry=<us|none>
  *       after every step.
  *   SUM <16 hex digits>
@@ -1155,7 +1157,8 @@ static void dump_out_datagram(harness *h, const uint8_t *pkt, size_t pktlen) {
       TR(h, "OUT parse=short_payload\n");
       return;
     }
-    TR(h, "OUT space=%s pn=%" PRId64 " frames=[", space_name(space), pn);
+    TR(h, "OUT space=%s pn=%" PRId64 " len=%zu frames=[", space_name(space), pn,
+       pktend);
     dump_frames_joined(&h->tr, p + pnoff + pnlen,
                        pktend - pnoff - pnlen - TAGLEN);
     TR(h, "]\n");
@@ -1218,7 +1221,8 @@ static void step_recv(harness *h, int space, int64_t pn, const uint8_t *fb,
     tr_time(h);
     return;
   }
-  TR(h, "IN  space=%s pn=%" PRId64 " frames=[", space_name(space), pn);
+  TR(h, "IN  space=%s pn=%" PRId64 " len=%zu frames=[", space_name(space), pn,
+     (size_t)pktlen);
   dump_frames_joined(&h->tr, g_build_plain, g_build_plainlen);
   TR(h, "]\n");
 
@@ -1252,23 +1256,35 @@ static void step_open(harness *h, int uni) {
   tr_time(h);
 }
 
+/* ngtcp2_conn_writev_stream keeps a pointer into the caller's buffer until the
+   data is acknowledged, for retransmission ("the caller must keep the portion
+   of data covered by *pdatalen in tact until acked_stream_data_offset ... or
+   the stream is closed").  A stack buffer here is a stack-use-after-return.
+   The filler is the same for every stream and offset, so one buffer with a
+   fixed content serves all of them. */
+static uint8_t g_write_data[1024];
+
+static void init_write_data(void) {
+  size_t i;
+  for (i = 0; i < sizeof(g_write_data); ++i)
+    g_write_data[i] = (uint8_t)('a' + (i % 26));
+}
+
 static void step_write(harness *h, int64_t sid, size_t n, int fin) {
-  uint8_t data[1024];
   uint8_t buf[PKTBUF];
   ngtcp2_pkt_info pi;
   ngtcp2_path_storage ps;
   ngtcp2_vec vec;
-  size_t off = 0, i;
+  size_t off = 0;
   int iter;
 
-  if (n > sizeof(data)) n = sizeof(data);
-  for (i = 0; i < n; ++i) data[i] = (uint8_t)('a' + (i % 26));
+  if (n > sizeof(g_write_data)) n = sizeof(g_write_data);
 
   for (iter = 0; iter < 16; ++iter) {
     ngtcp2_ssize ndatalen = 0, spktlen;
     uint32_t flags = fin ? NGTCP2_WRITE_STREAM_FLAG_FIN
                          : NGTCP2_WRITE_STREAM_FLAG_NONE;
-    vec.base = data + off;
+    vec.base = g_write_data + off;
     vec.len = n - off;
     memset(&pi, 0, sizeof(pi));
     ngtcp2_path_storage_zero(&ps);
@@ -1376,6 +1392,7 @@ static void harness_start(harness *h, int server) {
   h->last_stream = -1;
   h->out_max_pn[0] = h->out_max_pn[1] = h->out_max_pn[2] = -1;
   g_rand_state = 0x12345678u;
+  init_write_data();
   sb_reserve(&h->tr, 4096);
   h->tr.p[0] = 0;
   TR(h, "CONN role=%s scid=", server ? "server" : "client");

@@ -4,12 +4,12 @@ CB  recv_tx_key level=handshake
 CB  recv_rx_key level=1rtt
 CB  recv_tx_key level=1rtt
 TIME now=0 expiry=30000000000
-IN  space=app pn=0 frames=[NEW_CONNECTION_ID seq=1 rpt=0 cid=c1c1c1c1c1c1c1c1 token=11111111111111111111111111111111;NEW_CONNECTION_ID seq=2 rpt=0 cid=c2c2c2c2c2c2c2c2 token=22222222222222222222222222222222;NEW_CONNECTION_ID seq=3 rpt=0 cid=c3c3c3c3c3c3c3c3 token=33333333333333333333333333333333;NEW_CONNECTION_ID seq=4 rpt=0 cid=c4c4c4c4c4c4c4c4 token=44444444444444444444444444444444]
+IN  space=app pn=0 len=141 frames=[NEW_CONNECTION_ID seq=1 rpt=0 cid=c1c1c1c1c1c1c1c1 token=11111111111111111111111111111111;NEW_CONNECTION_ID seq=2 rpt=0 cid=c2c2c2c2c2c2c2c2 token=22222222222222222222222222222222;NEW_CONNECTION_ID seq=3 rpt=0 cid=c3c3c3c3c3c3c3c3 token=33333333333333333333333333333333;NEW_CONNECTION_ID seq=4 rpt=0 cid=c4c4c4c4c4c4c4c4 token=44444444444444444444444444444444]
 CB  update_key
 RET read_pkt=CONNECTION_ID_LIMIT
 ERR type=transport code=9 frame_type=0 reason=
 RET write_connection_close=OK n=30
-OUT space=app pn=0 frames=[CONNECTION_CLOSE kind=transport err=9 ftype=0 reason=]
+OUT space=app pn=0 len=30 frames=[CONNECTION_CLOSE kind=transport err=9 ftype=0 reason=]
 TIME now=0 expiry=30000000000
 SKIP drain
-SUM 5597d6bd113e21ca
+SUM 628acc2410371965
