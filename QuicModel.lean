@@ -10,3 +10,5 @@ import QuicModel.Spec.Core
 import QuicModel.Spec.Template
 import QuicModel.Spec.DatagramSize
 import QuicModel.Spec.VersionNegotiation
+import QuicModel.Spec.AddressValidation
+import QuicModel.Spec.PathValidation
