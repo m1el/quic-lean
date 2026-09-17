@@ -135,13 +135,13 @@ inductive Step : State → Event → Out → Prop
   -- ### Local actions
   /-- §4.6, line 1553: "Endpoints MUST NOT exceed the limit set by their peer."
       Opening is sequential, so the new stream's index is the high-water mark. -/
-  | openLocal {s dir} (h : s.openedLocal.get dir < s.maxStreamsPeer.get dir) :
+  | openLocal {s dir} (h : s.opened.get s.role dir < s.maxStreamsPeer.get dir) :
       Step s (.appOpenStream dir)
-        (.ok { s with openedLocal := s.openedLocal.set dir (s.openedLocal.get dir + 1) }
+        (.ok { s with opened := s.opened.set s.role dir (s.opened.get s.role dir + 1) }
              [.streamOpened (s.nextLocal dir)])
   /-- §4.6, line 1569: an endpoint that cannot open a stream "SHOULD send a
       STREAMS_BLOCKED frame"; the stream itself is not created. -/
-  | openLocalBlocked {s dir} (h : s.maxStreamsPeer.get dir ≤ s.openedLocal.get dir) :
+  | openLocalBlocked {s dir} (h : s.maxStreamsPeer.get dir ≤ s.opened.get s.role dir) :
       Step s (.appOpenStream dir) .drop
   /-- §4.1, line 1357: "Once a receiver advertises a limit for the connection or
       a stream, it is not an error to advertise a smaller limit, but the smaller
@@ -199,8 +199,8 @@ def outcomes (s : State) : Event → List Out
       if maxStreamsLimit < v then [.error .streamLimitError, .error .frameEncodingError]
       else [.ok s []]
   | .appOpenStream dir =>
-      if s.openedLocal.get dir < s.maxStreamsPeer.get dir then
-        [.ok { s with openedLocal := s.openedLocal.set dir (s.openedLocal.get dir + 1) }
+      if s.opened.get s.role dir < s.maxStreamsPeer.get dir then
+        [.ok { s with opened := s.opened.set s.role dir (s.opened.get s.role dir + 1) }
              [.streamOpened (s.nextLocal dir)]]
       else [.drop]
   | .sentMaxData v =>

@@ -64,12 +64,42 @@ def set (c : Counts) : StreamDir → Nat → Counts
 
 end Counts
 
+/-- The four stream-type counters of §2.1, Table 1, indexed by the initiator of
+    the stream and its directionality. -/
+structure Opened where
+  byClient : Counts
+  byServer : Counts
+  deriving DecidableEq, Repr
+
+namespace Opened
+
+def get (o : Opened) : Role → StreamDir → Nat
+  | .client, d => o.byClient.get d
+  | .server, d => o.byServer.get d
+
+def set (o : Opened) : Role → StreamDir → Nat → Opened
+  | .client, d, v => { o with byClient := o.byClient.set d v }
+  | .server, d, v => { o with byServer := o.byServer.set d v }
+
+@[simp] theorem get_set (o : Opened) (r r' : Role) (d d' : StreamDir) (v : Nat) :
+    (o.set r d v).get r' d' = if r = r' ∧ d = d' then v else o.get r' d' := by
+  cases r <;> cases r' <;> cases d <;> cases d' <;>
+    simp [get, set, Counts.get, Counts.set]
+
+end Opened
+
+/-- Two stream IDs of different initiators: one of them is the peer's. -/
+theorem eq_peer_of_ne {r r' : Role} (h : ¬ r = r') : r = r'.peer := by
+  cases r <;> cases r' <;> simp_all [Role.peer]
+
+theorem role_ne_peer (r : Role) : ¬ r = r.peer := by cases r <;> simp [Role.peer]
+
 /-- All the streams of one connection at one endpoint.
 
 `streams` holds the state of every stream that has taken a step; a stream that
 exists but has no entry is at its initial state (`freshStream`), which is what
 `get` returns.  Whether a stream *exists* is decided by the high-water marks
-`openedLocal` / `openedRemote`, not by the table: §2.1, line 712 opens every
+`opened`, not by the table: §2.1, line 712 opens every
 lower-numbered stream of a type implicitly, and §2.1, line 687 forbids reusing a
 stream ID, so "exists" is exactly "its index is below the high-water mark for
 its type" — see the NOTES in `Spec/StreamTable.lean`. -/
@@ -82,10 +112,9 @@ structure State where
   theirs : Limits
   /-- Per-stream state, for streams that have taken a step. -/
   streams : Map StreamId Stream.State
-  /-- §2.1, line 712: how many streams of each type *we* have opened. -/
-  openedLocal : Counts
-  /-- … and how many the peer has opened. -/
-  openedRemote : Counts
+  /-- §2.1, line 712: the high-water mark of each of the four stream types —
+      how many streams of that type have ever been opened. -/
+  opened : Opened
   /-- §4.6: the cumulative stream limit we have advertised to the peer. -/
   maxStreamsLocal : Counts
   /-- §4.6: the cumulative stream limit the peer has advertised to us. -/
@@ -109,7 +138,7 @@ structure State where
     streams through transport parameters during the handshake." -/
 def init (role : Role) (ours theirs : Limits) : State :=
   { role, ours, theirs, streams := [],
-    openedLocal := ⟨0, 0⟩, openedRemote := ⟨0, 0⟩,
+    opened := ⟨⟨0, 0⟩, ⟨0, 0⟩⟩,
     maxStreamsLocal := ⟨ours.maxStreamsBidi, ours.maxStreamsUni⟩,
     maxStreamsPeer := ⟨theirs.maxStreamsBidi, theirs.maxStreamsUni⟩,
     maxDataLocal := ours.maxData, recvTotal := 0,
@@ -140,14 +169,10 @@ def sendMaxOf (s : State) (id : StreamId) : Nat :=
 def freshStream (s : State) (id : StreamId) : Stream.State :=
   Stream.init id s.role (s.sendMaxOf id) (s.recvMaxOf id)
 
-/-- The high-water mark for the type of streams initiated by `initiator` in
-    direction `dir`: how many have ever been opened. -/
-def opened (s : State) (initiator : Role) (dir : StreamDir) : Nat :=
-  if initiator = s.role then s.openedLocal.get dir else s.openedRemote.get dir
-
 /-- §2.1, line 712: a stream exists once its index is below the high-water mark
     of its type — which is what makes implicit opening decidable. -/
-def has (s : State) (id : StreamId) : Bool := decide (id.index < s.opened id.initiator id.dir)
+def has (s : State) (id : StreamId) : Bool :=
+  decide (id.index < s.opened.get id.initiator id.dir)
 
 /-- The state of a stream: its entry in the table, or its initial state if it
     has not taken a step yet.  Only meaningful when `has s id`. -/
@@ -160,9 +185,9 @@ def setStream (s : State) (id : StreamId) (st : Stream.State) : State :=
 /-- §2.1, line 712: "A stream ID that is used out of order results in all
     streams of that type with lower-numbered stream IDs also being opened." -/
 def openThrough (s : State) (id : StreamId) : State :=
-  let n := max (s.opened id.initiator id.dir) (id.index + 1)
-  if id.initiator = s.role then { s with openedLocal := s.openedLocal.set id.dir n }
-  else { s with openedRemote := s.openedRemote.set id.dir n }
+  { s with
+      opened := s.opened.set id.initiator id.dir
+        (max (s.opened.get id.initiator id.dir) (id.index + 1)) }
 
 /-- §4.6, line 1553: "Endpoints MUST NOT exceed the limit set by their peer." -/
 def withinPeerStreamLimit (s : State) (id : StreamId) : Bool :=
@@ -266,6 +291,17 @@ def connSendBlocked (s : State) (st : Stream.State) (e : Stream.Event) : Bool :=
   | none => false
   | some k => decide (s.maxDataPeer < s.sentTotal + (k - sentHighest st))
 
+theorem sentEnd_eq_none_of_peerFrame {e : Stream.Event} (h : peerFrame e = true) :
+    sentEnd e = none := by
+  cases e with
+  | send e => cases e <;> simp_all [peerFrame, sentEnd, Stream.Send.Event.isPeerFrame]
+  | recv e => rfl
+
+/-- A frame from the peer never consumes send-side credit. -/
+theorem connSendBlocked_false_of_peerFrame {s : State} {st : Stream.State} {e : Stream.Event}
+    (h : peerFrame e = true) : connSendBlocked s st e = false := by
+  simp [connSendBlocked, sentEnd_eq_none_of_peerFrame h]
+
 theorem connSendBlocked_false_of_recvViolation {s : State} {st : Stream.State}
     {e : Stream.Event} (h : connRecvViolation s st e = true) :
     connSendBlocked s st e = false := by
@@ -283,7 +319,8 @@ def afterStep (s : State) (id : StreamId) (st st' : Stream.State) : State :=
 /-- §2.1, line 712: one `streamOpened` per stream that opening `id` creates,
     in increasing order of stream ID. -/
 def openedEffects (s : State) (id : StreamId) : List Effect :=
-  (List.range' (s.opened id.initiator id.dir) (id.index + 1 - s.opened id.initiator id.dir)).map
+  (List.range' (s.opened.get id.initiator id.dir)
+      (id.index + 1 - s.opened.get id.initiator id.dir)).map
     (fun n => Effect.streamOpened (StreamId.make id.initiator id.dir n))
 
 /-- Lift one stream's outcome to the table: `base` is the table after any
@@ -310,6 +347,6 @@ theorem delegate_ne (base : State) (id : StreamId) (st : Stream.State) (pre : Li
 
 /-- The next stream ID of a type that the application will open. -/
 def State.nextLocal (s : State) (dir : StreamDir) : StreamId :=
-  StreamId.make s.role dir (s.openedLocal.get dir)
+  StreamId.make s.role dir (s.opened.get s.role dir)
 
 end Quic.Spec.StreamTable
