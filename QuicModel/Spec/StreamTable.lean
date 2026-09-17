@@ -1,393 +1,24 @@
-import QuicModel.Spec.StreamTable.Inv
+import QuicModel.Spec.StreamTable.Theorems
 
 /-
-  WP9 StreamTable, part 3 of 3: the send side, the `Component`, the named
-  theorems, examples and the coverage table.
+  WP9 StreamTable, part 5 of 5: examples from the text (§9), the coverage table
+  and the notes (§10).
 
-  Parts 1–4 are in `StreamTable/Defs.lean` and `StreamTable/Step.lean`, part 5
-  in `StreamTable/Inv.lean`; together they follow the ten-part order of
-  `Spec/Template.lean`, whose stream-count component this package supersedes.
+  All the streams of one connection, as seen by one endpoint: stream creation
+  and implicit opening (§2.1), the stream-count limits of §4.6, connection-level
+  flow control (§4.1, §4.5, §19.9) and the routing of every stream-scoped frame
+  to WP2's `Spec.Stream.component`.
+
+  * `StreamTable/Defs.lean`    — §1 state, events, effects, routing vocabulary
+  * `StreamTable/Step.lean`    — §2–§4 `Step`, `outcomes`, `outcomes_iff`
+  * `StreamTable/Inv.lean`     — §5 `Inv`, `step_inv`
+  * `StreamTable/Send.lean`    — §6 `MaySend`, §7 the `Component`
+  * `StreamTable/Theorems.lean`— §8 named theorems
+  * this file                  — §9 examples, §10 coverage and notes
+
+  Supersedes `Spec/Template.lean`'s stream-count component (see NOTES).
 -/
 namespace Quic.Spec.StreamTable
-
-/-! ## 6. Send side
-
-Frames this component governs: the two connection-level limit frames, the two
-connection/stream-count blocked frames, and — by conjunction with WP2's
-per-stream `MaySend` — every frame that names a stream.
-
-Two readings of the text are worth stating up front.
-
-* **A smaller limit may be advertised.**  §4.1, line 1357: "Once a receiver
-  advertises a limit for the connection or a stream, it is not an error to
-  advertise a smaller limit, but the smaller limit has no effect", and §4.6,
-  line 1559: "Once a receiver advertises a stream limit using the MAX_STREAMS
-  frame, advertising a smaller limit has no effect.  A receiver MUST ignore any
-  MAX_STREAMS frame that does not increase the stream limit."  Neither sentence
-  forbids sending it, so `MaySend` does not require an increase — unlike
-  `Spec/Template.lean`, which this file supersedes (see NOTES).
-* **A blocked frame carries the limit in force.**  §13.3, line 5409: "These
-  frames always include the limit that is causing blocking at the time that they
-  are transmitted." -/
-
-/-- §4.6, line 1553 with §4.1, line 1330: what the connection level adds to a
-    stream's own `MaySend` for a frame that consumes send credit. -/
-def sendCredit (s : State) (id : StreamId) (k : Nat) : Prop :=
-  s.sentTotal + (k - sentHighest (s.get id)) ≤ s.maxDataPeer
-
-def sendCreditB (s : State) (id : StreamId) (k : Nat) : Bool :=
-  decide (s.sentTotal + (k - sentHighest (s.get id)) ≤ s.maxDataPeer)
-
-/-- A frame naming a stream may be sent only for a stream that exists, within
-    the peer's stream limit (§4.6, line 1553), and if the stream itself permits
-    it (WP2). -/
-def streamMaySend (s : State) (id : StreamId) (f : Frame) : Prop :=
-  s.has id = true ∧ s.withinPeerStreamLimit id = true ∧ Stream.MaySend (s.get id) f
-
-def streamMaySendB (s : State) (id : StreamId) (f : Frame) : Bool :=
-  s.has id && s.withinPeerStreamLimit id && Stream.maySend (s.get id) f
-
-def MaySend (s : State) : Frame → Prop
-  | .maxData v => v ≤ maxVarint
-  | .maxStreams _ v => v ≤ maxStreamsLimit
-  | .dataBlocked v => v = s.maxDataPeer
-  | .streamsBlocked dir v => v ≤ maxStreamsLimit ∧ v = s.maxStreamsPeer.get dir
-  | .stream id offset fin data =>
-      streamMaySend s ⟨id⟩ (.stream id offset fin data) ∧
-        sendCredit s ⟨id⟩ (offset + data.size)
-  | .resetStream id code fs =>
-      streamMaySend s ⟨id⟩ (.resetStream id code fs) ∧ sendCredit s ⟨id⟩ fs
-  | .streamDataBlocked id v => streamMaySend s ⟨id⟩ (.streamDataBlocked id v)
-  | .maxStreamData id v => streamMaySend s ⟨id⟩ (.maxStreamData id v)
-  | .stopSending id code => streamMaySend s ⟨id⟩ (.stopSending id code)
-  | _ => True
-
-def maySend (s : State) : Frame → Bool
-  | .maxData v => decide (v ≤ maxVarint)
-  | .maxStreams _ v => decide (v ≤ maxStreamsLimit)
-  | .dataBlocked v => decide (v = s.maxDataPeer)
-  | .streamsBlocked dir v => decide (v ≤ maxStreamsLimit) && decide (v = s.maxStreamsPeer.get dir)
-  | .stream id offset fin data =>
-      streamMaySendB s ⟨id⟩ (.stream id offset fin data) && sendCreditB s ⟨id⟩ (offset + data.size)
-  | .resetStream id code fs =>
-      streamMaySendB s ⟨id⟩ (.resetStream id code fs) && sendCreditB s ⟨id⟩ fs
-  | .streamDataBlocked id v => streamMaySendB s ⟨id⟩ (.streamDataBlocked id v)
-  | .maxStreamData id v => streamMaySendB s ⟨id⟩ (.maxStreamData id v)
-  | .stopSending id code => streamMaySendB s ⟨id⟩ (.stopSending id code)
-  | _ => true
-
-theorem streamMaySend_iff (s : State) (id : StreamId) (f : Frame) :
-    streamMaySendB s id f = true ↔ streamMaySend s id f := by
-  simp [streamMaySendB, streamMaySend, Stream.maySend_iff, and_assoc]
-
-theorem sendCredit_iff (s : State) (id : StreamId) (k : Nat) :
-    sendCreditB s id k = true ↔ sendCredit s id k := by
-  simp [sendCreditB, sendCredit]
-
-theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
-  cases f <;>
-    simp [maySend, MaySend, streamMaySend_iff, sendCredit_iff]
-
-/-! ## 7. The component -/
-
-@[reducible] def component : Component where
-  State := State
-  Event := Event
-  Effect := Effect
-  Step := Step
-  outcomes := outcomes
-  outcomes_iff := outcomes_iff
-  outcomes_ne := outcomes_ne
-  Inv := Inv
-  step_inv := step_inv
-  MaySend := MaySend
-  maySend := maySend
-  maySend_iff := maySend_iff
-
-/-! ### The SHOULDs that are about *when*, not *whether*
-
-§4.1, line 1371 and §4.6, line 1569 recommend a blocked frame when actually
-blocked; §4.2's autotuning advice and §4.3 are performance guidance with no
-observable rule.  None of them restricts `MaySend`. -/
-
-def Recommended (s : State) : Frame → Prop
-  -- §4.1, line 1368: "If a sender has sent data up to the limit, it will be
-  -- unable to send new data and is considered blocked."
-  | .dataBlocked _ => s.sentTotal = s.maxDataPeer
-  -- §4.6, line 1569: "An endpoint that is unable to open a new stream due to
-  -- the peer's limits SHOULD send a STREAMS_BLOCKED frame."
-  | .streamsBlocked dir _ => s.opened.get s.role dir = s.maxStreamsPeer.get dir
-  | _ => True
-
-/-! ## 8. Named theorems -/
-
-/-! ### (a) Connection-level flow control -/
-
-/-- **(a) Nothing beyond the connection-level credit we advertised is ever
-    accounted for.**  §19.9, line 7710: "The sum of the final sizes on all
-    streams — including streams in terminal states — MUST NOT exceed the value
-    advertised by a receiver." -/
-theorem recvTotal_le_advertised {s₀ s : State} (h0 : Inv s₀)
-    (h : component.Reachable s₀ s) : s.recvTotal ≤ s.maxDataLocal :=
-  (component.inv_of_reachable h0 h).1
-
-/-- **(a, send side) We never send beyond the peer's MAX_DATA.**  §4.1,
-    line 1330: "Senders MUST NOT send data in excess of either limit."  Every
-    `Step` that records a transmission checks `connSendBlocked` first, which is
-    exactly the connection-level half of `MaySend`; a frame that fails it is
-    never sent (`Step.existSendBlocked`), so the hypothesis "every send
-    satisfied `MaySend`" is discharged by the model itself. -/
-theorem sentTotal_le_peer {s₀ s : State} (h0 : Inv s₀)
-    (h : component.Reachable s₀ s) : s.sentTotal ≤ s.maxDataPeer :=
-  (component.inv_of_reachable h0 h).2.1
-
-/-- The link between the two halves of (a): the connection-level part of
-    `MaySend` for a STREAM frame is exactly the check `Step` makes on the
-    corresponding `sentStream` event. -/
-theorem maySend_stream_iff_not_blocked (s : State) (id : StreamId) (offset : Nat)
-    (fin : Bool) (data : ByteArray) :
-    sendCredit s id (offset + data.size) ↔
-      connSendBlocked s (s.get id) (.send (.sentStream offset data.size fin)) = false := by
-  simp [sendCredit, connSendBlocked, sentEnd]
-
-/-! ### (b) Stream-count limits -/
-
-/-- **(b) The peer never opens more streams of a type than we advertised.**
-    §4.6, line 1553: "An endpoint MUST terminate a connection with a
-    STREAM_LIMIT_ERROR error if a peer opens more streams than was
-    permitted." -/
-theorem openedRemote_le_advertised {s₀ s : State} (h0 : Inv s₀)
-    (h : component.Reachable s₀ s) (d : StreamDir) :
-    s.opened.get s.role.peer d ≤ s.maxStreamsLocal.get d :=
-  (component.inv_of_reachable h0 h).2.2.1 d
-
-/-- **(b, our side) We never open more streams than the peer allowed.**
-    §4.6, line 1553: "Endpoints MUST NOT exceed the limit set by their peer." -/
-theorem openedLocal_le_peer {s₀ s : State} (h0 : Inv s₀)
-    (h : component.Reachable s₀ s) (d : StreamDir) :
-    s.opened.get s.role d ≤ s.maxStreamsPeer.get d :=
-  (component.inv_of_reachable h0 h).2.2.2.1 d
-
-/-! ### (c) A stream ID is never reused -/
-
-theorem opened_step {s s' : State} {e : Event} {fx : List Effect}
-    (h : Step s e (.ok s' fx)) (r : Role) (d : StreamDir) :
-    s.opened.get r d ≤ s'.opened.get r d := by
-  cases h with
-  | @openOk id e2 st2 gx hx hp hr hl hfc hs =>
-    show s.opened.get r d ≤ (s.openThrough id).opened.get r d
-    rw [openThrough_opened]
-    split
-    · rename_i hc
-      obtain ⟨h1, h2⟩ := hc
-      rw [h1, h2] at *
-      omega
-    · exact Nat.le_refl _
-  | @openLocal dir hlt =>
-    show s.opened.get r d ≤ (s.opened.set s.role dir (s.opened.get s.role dir + 1)).get r d
-    rw [Opened.get_set]
-    split
-    · rename_i hc
-      obtain ⟨h1, h2⟩ := hc
-      rw [← h1, ← h2]
-      omega
-    · exact Nat.le_refl _
-  | _ => exact Nat.le_refl _
-
-/-- **(c) Once a stream exists it exists forever**, and no step ever announces
-    the opening of a stream that already existed: §2.1, line 687 "A QUIC
-    endpoint MUST NOT reuse a stream ID within a connection." -/
-theorem no_reuse {s s' : State} {e : Event} {fx : List Effect} (h : Step s e (.ok s' fx))
-    {id : StreamId} (hh : s.has id = true) :
-    s'.has id = true ∧ ∀ id', Effect.streamOpened id' ∈ fx → id' ≠ id := by
-  constructor
-  · simp only [State.has, decide_eq_true_eq] at hh ⊢
-    exact Nat.lt_of_lt_of_le hh (opened_step h _ _)
-  · intro id' hmem
-    cases h with
-    | @existOk id₀ e2 st2 gx hx hb hfc hs =>
-      simp only [List.mem_map] at hmem
-      obtain ⟨a, -, ha⟩ := hmem
-      exact absurd ha (by simp)
-    | @openOk id₀ e2 st2 gx hx hp hr hl hfc hs =>
-      simp only [List.mem_append, List.mem_map] at hmem
-      rcases hmem with hmem | ⟨a, -, ha⟩
-      · simp only [openedEffects, List.mem_map] at hmem
-        obtain ⟨n, hn, hid⟩ := hmem
-        simp only [List.mem_range'_1] at hn
-        simp only [Effect.streamOpened.injEq] at hid
-        subst hid
-        intro hc
-        subst hc
-        simp only [State.has, StreamId.initiator_make, StreamId.dir_make, StreamId.index_make,
-          decide_eq_true_eq] at hh
-        omega
-      · exact absurd ha (by simp)
-    | @openLocal dir hlt =>
-      simp only [List.mem_singleton, Effect.streamOpened.injEq] at hmem
-      subst hmem
-      intro hc
-      subst hc
-      simp only [State.nextLocal, State.has, StreamId.initiator_make, StreamId.dir_make,
-        StreamId.index_make, decide_eq_true_eq] at hh
-      omega
-    | _ => simp_all
-
-/-- The reachable form of (c): every stream of the initial state, and every
-    stream opened on the way, is still there. -/
-theorem has_forever {s₀ s : State} (h : component.Reachable s₀ s) {id : StreamId}
-    (hh : s₀.has id = true) : s.has id = true :=
-  component.reachable_induction (motive := fun s => s.has id = true) hh
-    (fun _ hstep hprev => (no_reuse hstep hprev).1) h
-
-/-! ### (d) Implicit opening -/
-
-/-- **(d) §2.1, line 712**: "A stream ID that is used out of order results in
-    all streams of that type with lower-numbered stream IDs also being opened."
-    This holds in every state, hence after every step. -/
-theorem has_lower {s : State} {id : StreamId} (h : s.has id = true) {n : Nat}
-    (hn : n < id.index) : s.has (StreamId.make id.initiator id.dir n) = true := by
-  simp only [State.has, StreamId.initiator_make, StreamId.dir_make, StreamId.index_make,
-    decide_eq_true_eq] at h ⊢
-  omega
-
-theorem has_lower_step {s s' : State} {e : Event} {fx : List Effect}
-    (_h : Step s e (.ok s' fx)) {id : StreamId} (hh : s'.has id = true) {n : Nat}
-    (hn : n < id.index) : s'.has (StreamId.make id.initiator id.dir n) = true :=
-  has_lower hh hn
-
-/-! ### (e) Lifting WP2 to every stream of the table -/
-
-/-- Which stream a step can have changed: all but one are untouched, and that
-    one moved by a `Stream.Step`. -/
-theorem get_step {s s' : State} {e : Event} {fx : List Effect} (hi : Inv s)
-    (h : Step s e (.ok s' fx)) (id : StreamId) :
-    s'.get id = s.get id ∨ ∃ e' gx, Stream.Step (s.get id) e' (.ok (s'.get id) gx) := by
-  cases h with
-  | @existOk id₀ e2 st2 gx hx hb hfc hs =>
-    by_cases hide : id = id₀
-    · subst hide
-      exact Or.inr ⟨e2, gx, by rw [afterStep_get_self]; exact hs⟩
-    · exact Or.inl (afterStep_get_of_ne s _ _ hide)
-  | @openOk id₀ e2 st2 gx hx hp hr hl hfc hs =>
-    by_cases hide : id = id₀
-    · subst hide
-      refine Or.inr ⟨e2, gx, ?_⟩
-      rw [afterStep_get_self, get_of_not_has hi hx]
-      exact hs
-    · exact Or.inl (by rw [afterStep_get_of_ne _ _ _ hide, openThrough_get])
-  | _ => exact Or.inl rfl
-
-/-- **(e) WP2's invariant holds for every stream of the table**, in every
-    reachable state — whether or not the stream has an entry. -/
-theorem stream_inv {s₀ s : State} (h0 : Inv s₀) (h : component.Reachable s₀ s)
-    (id : StreamId) : Stream.Inv (s.get id) :=
-  (inv_get (component.inv_of_reachable h0 h) id).2.2
-
-/-- **(e₁) Lifted from WP2**: no stream has accepted data beyond the credit we
-    advertised for it (§4.1, line 1359; `Stream.highest_le_maxData`). -/
-theorem stream_highest_le_maxData {s₀ s : State} (h0 : Inv s₀)
-    (h : component.Reachable s₀ s) (id : StreamId) {rs : Stream.Recv.State}
-    (hr : (s.get id).recv = some rs) : rs.highest ≤ rs.maxData :=
-  ((stream_inv h0 h id).2.2.2 rs hr).2.2.1
-
-/-- **(e₂) Lifted from WP2**: the final size of a stream, once known, never
-    changes (§4.5, line 1516; `Stream.finalSize_immutable`) — on both halves of
-    every stream in the table. -/
-theorem stream_finalSize_immutable {s s' : State} {e : Event} {fx : List Effect}
-    (hi : Inv s) (h : Step s e (.ok s' fx)) (id : StreamId) :
-    (∀ ss ss' f, (s.get id).send = some ss → (s'.get id).send = some ss' →
-      ss.finalSize = some f → ss'.finalSize = some f) ∧
-    (∀ rs rs' f, (s.get id).recv = some rs → (s'.get id).recv = some rs' →
-      rs.finalSize = some f → rs'.finalSize = some f) := by
-  rcases get_step hi h id with heq | ⟨e', gx, hs⟩
-  · constructor
-    · intro a b f h1 h2 h3
-      rw [heq, h1] at h2
-      simp only [Option.some.injEq] at h2
-      subst h2; exact h3
-    · intro a b f h1 h2 h3
-      rw [heq, h1] at h2
-      simp only [Option.some.injEq] at h2
-      subst h2; exact h3
-  · exact Stream.finalSize_immutable hs
-
-/-! ### (f) Advertised limits never decrease -/
-
-/-- **(f) §4.1, line 1357 and §4.6, line 1559**: a smaller limit "has no
-    effect", so what we have advertised — and what we have been told — only
-    ever grows. -/
-theorem maxDataLocal_mono {s s' : State} {e : Event} {fx : List Effect}
-    (h : Step s e (.ok s' fx)) : s.maxDataLocal ≤ s'.maxDataLocal := by
-  cases h with
-  | sendMaxData => exact Nat.le_max_left _ _
-  | _ => exact Nat.le_refl _
-
-theorem maxStreamsLocal_mono {s s' : State} {e : Event} {fx : List Effect}
-    (h : Step s e (.ok s' fx)) (d : StreamDir) :
-    s.maxStreamsLocal.get d ≤ s'.maxStreamsLocal.get d := by
-  cases h with
-  | @sendMaxStreams dir v hle =>
-    show s.maxStreamsLocal.get d ≤
-      (s.maxStreamsLocal.set dir (max (s.maxStreamsLocal.get dir) v)).get d
-    rw [Counts.get_set]
-    split
-    · rename_i hd; subst hd; exact Nat.le_max_left _ _
-    · exact Nat.le_refl _
-  | _ => exact Nat.le_refl _
-
-theorem maxDataPeer_mono {s s' : State} {e : Event} {fx : List Effect}
-    (h : Step s e (.ok s' fx)) : s.maxDataPeer ≤ s'.maxDataPeer := by
-  cases h with
-  | @maxDataRaise v hgt => exact Nat.le_of_lt hgt
-  | _ => exact Nat.le_refl _
-
-theorem maxStreamsPeer_mono {s s' : State} {e : Event} {fx : List Effect}
-    (h : Step s e (.ok s' fx)) (d : StreamDir) :
-    s.maxStreamsPeer.get d ≤ s'.maxStreamsPeer.get d := by
-  cases h with
-  | @maxStreamsRaise dir v hle hgt =>
-    show s.maxStreamsPeer.get d ≤ (s.maxStreamsPeer.set dir v).get d
-    rw [Counts.get_set]
-    split
-    · rename_i hd; subst hd; exact Nat.le_of_lt hgt
-    · exact Nat.le_refl _
-  | _ => exact Nat.le_refl _
-
-/-! ### Routing, as theorems
-
-The three sentences that WP2 left to this package, read off `Step`. -/
-
-/-- §19.8, line 7638 (and §19.4, §19.5, §19.10, §19.13): a frame for a
-    locally-initiated stream that has not yet been created is a
-    STREAM_STATE_ERROR — and nothing else is permitted. -/
-theorem localNotCreated_iff (s : State) (id : StreamId) (e : Stream.Event)
-    (hx : s.has id = false) (hp : peerFrame e = true) (hr : id.initiator = s.role) (o : Out) :
-    Step s (.stream id e) o ↔ o = .error .streamStateError := by
-  rw [← outcomes_iff]
-  simp [outcomes, streamOutcomes, hx, hp, hr]
-
-/-- §4.6, line 1554: a frame for a peer-initiated stream beyond the limit we
-    advertised is a STREAM_LIMIT_ERROR. -/
-theorem openLimit_error (s : State) (id : StreamId) (e : Stream.Event)
-    (hx : s.has id = false) (hp : peerFrame e = true) (hr : ¬ id.initiator = s.role)
-    (hl : s.maxStreamsLocal.get id.dir ≤ id.index) :
-    component.accepts s (.stream id e) (.error .streamLimitError) = true :=
-  (component.accepts_iff _ _ _).mpr (.openLimit hx hp hr hl)
-
-/-- §2.1, line 712: receiving a frame for a stream that does not exist yet opens
-    it and every lower-numbered stream of its type. -/
-theorem openOk_opens_lower {s s' : State} {id : StreamId} {e : Stream.Event}
-    {fx : List Effect} (h : Step s (.stream id e) (.ok s' fx)) (hx : s.has id = false)
-    {n : Nat} (hn : n ≤ id.index) :
-    s'.has (StreamId.make id.initiator id.dir n) = true := by
-  cases h with
-  | @existOk _ _ st2 gx hx' hb hfc hs => exact absurd (hx.symm.trans hx') (by simp)
-  | @openOk _ _ st2 gx hx' hp hr hl hfc hs =>
-    rw [afterStep_has]
-    simp only [State.has, openThrough_opened, StreamId.initiator_make, StreamId.dir_make,
-      StreamId.index_make, and_self, reduceIte, decide_eq_true_eq]
-    omega
 
 /-! ## 9. Examples (scenarios from the text) -/
 
@@ -523,7 +154,7 @@ yet been created" half of §19.4/§19.5/§19.8/§19.10/§19.13.
 | §4.1 (1331) | initial limits come from transport parameters | `Limits`, `init` |
 | §4.1 (1349) | a receiver can advertise a larger stream limit with MAX_STREAM_DATA | WP2 (`Recv.Step.sendMaxStreamData`), routed here |
 | §4.1 (1353) | a receiver can advertise a larger connection limit with MAX_DATA | `Step.sendMaxData`, `Step.maxDataRaise` |
-| §4.1 (1355) | a receiver maintains a cumulative sum of bytes received on all streams | `State.recvTotal`, `afterStep` |
+| §4.1 (1355) | a receiver maintains a cumulative sum of bytes received on all streams | `State.recvTotal`, `afterStep`, `recvTotal_eq_sum` |
 | §4.1 (1357) | advertising a smaller limit is not an error but has no effect | `Step.sendMaxData` (takes `max`), `MaySend` does *not* require an increase |
 | §4.1 (1359) | FLOW_CONTROL_ERROR if the sender violates the advertised limits | `Step.existFlowControl`, `Step.openFlowControl`, `recvTotal_le_advertised` |
 | §4.1 (1361) | a sender MUST ignore MAX_DATA frames that do not increase limits | `Step.maxDataStale` |
@@ -534,11 +165,11 @@ yet been created" half of §19.4/§19.5/§19.8/§19.10/§19.13.
 | §4.6 (1531) | only streams with an index below the limit may be opened | `Step.openLimit`, `Step.openLocalBlocked` |
 | §4.6 (1535) | separate limits for unidirectional and bidirectional streams | `Counts`, `Opened` |
 | §4.6 (1543) | a max_streams value above 2^60: FRAME_ENCODING_ERROR (frame) / TRANSPORT_PARAMETER_ERROR (parameter) | `Step.maxStreamsTooLarge`; the transport-parameter half is WP1 |
-| §4.6 (1553) | endpoints MUST NOT exceed the peer's limit; a frame beyond the limit we sent is a STREAM_LIMIT_ERROR | `Step.openLimit`, `State.withinPeerStreamLimit`, `openedLocal_le_peer`, `openedRemote_le_advertised` |
+| §4.6 (1553) | endpoints MUST NOT exceed the peer's limit; a frame beyond the limit we sent is a STREAM_LIMIT_ERROR | `Step.openLimit`, `State.withinPeerStreamLimit`, `openedLocal_le_peer`, `openedRemote_le_advertised`, `not_has_of_exceeding_limit` |
 | §4.6 (1559) | a MAX_STREAMS that does not increase the limit MUST be ignored | `Step.maxStreamsStale` |
 | §4.6 (1563) | implementations decide when to advertise more streams | `Step.sendMaxStreams` is an event: the model tracks what was advertised, not when |
 | §4.6 (1569) | an endpoint unable to open a stream SHOULD send STREAMS_BLOCKED; MUST NOT wait for it | `Recommended`; see NOTES |
-| §19.9 (7710) | the sum of the final sizes on all streams MUST NOT exceed the advertised value; FLOW_CONTROL_ERROR otherwise | `connRecvViolation`, `recvTotal_le_advertised` |
+| §19.9 (7710) | the sum of the final sizes on all streams MUST NOT exceed the advertised value; FLOW_CONTROL_ERROR otherwise | `connRecvViolation`, `recvTotal_le_advertised`, `recvTotal_eq_sum` |
 | §19.10 (7734) | MAX_STREAM_DATA for a locally-initiated stream not yet created: STREAM_STATE_ERROR | `Step.localNotCreated` |
 | §19.11 (7802) | MAX_STREAMS above 2^60: FRAME_ENCODING_ERROR | `Step.maxStreamsTooLarge` |
 | §19.11 (7809) | MAX_STREAMS that do not increase the limit MUST be ignored | `Step.maxStreamsStale` |
