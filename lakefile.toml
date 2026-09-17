@@ -1,0 +1,9 @@
+name = "QuicModel"
+defaultTargets = ["QuicModel", "quicmodel"]
+
+[[lean_lib]]
+name = "QuicModel"
+
+[[lean_exe]]
+name = "quicmodel"
+root = "Main"
