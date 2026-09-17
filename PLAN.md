@@ -61,6 +61,11 @@ Rules that go with it:
 - **Observability.** If two permitted outcomes have the same `Obs` but different
   next states, `track` cannot follow; add an effect that distinguishes them, or
   show the states coincide.
+- **Retransmission.** Frames are idempotent (§12.4) and are re-sent after loss
+  (§13.3). `MaySend` must accept an exact repeat of a frame it accepted before,
+  even though the state has since moved on.
+- **`MaySend` is never stricter than the text.** "Has no effect" or "is ignored
+  by the receiver" does not mean "must not be sent".
 - **Nothing abstract leaks.** TLS, tokens, stateless-reset token derivation and
   the Retry integrity tag are opaque parameters or events (like `Protection`).
 - **Builds.** Always run Lean under a timeout (`timeout 300 lake build …`); a

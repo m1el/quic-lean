@@ -46,6 +46,9 @@ worktrees.
   written, do not weaken `Step`: keep the faithful relation, state the theorem
   with the extra hypothesis it needs (or leave it out), and report the
   counterexample.
+- `MaySend` must never be stricter than the text ("has no effect" is not "must
+  not be sent"), and must accept an exact repeat of a frame it accepted earlier:
+  frames are idempotent (§12.4) and are retransmitted after loss (§13.3).
 - Where the text is ambiguous, choose the reading, encode it, and record it in
   the NOTES at the end of the file.
 - Anything that belongs to another package (see the table in `PLAN.md` §2) is
