@@ -62,7 +62,8 @@ namespace Server
 
 /-! ### 1. State, events, effects -/
 
-/-- The contents of a Version Negotiation packet (§17.2.1, line 6237). -/
+/-- The contents of a Version Negotiation packet (§17.2.1, line 6235: "The
+    layout of a Version Negotiation packet is:"). -/
 structure Vn where
   dcid : ByteArray
   scid : ByteArray
@@ -148,9 +149,11 @@ inductive Step : State → Event → Out → Prop
       Step s (.datagram n (some v) d c) (.ok s [.deliver])
   /-- §6.1, line 2066: "An endpoint MUST NOT send a Version Negotiation packet
       in response to receiving a Version Negotiation packet."  A long header
-      with version 0 is a Version Negotiation packet (§17.2.1, line 6228); a
-      server never processes one, so §5.2.2 line 1946 — "Servers MUST drop
-      incoming packets under all other circumstances" — applies. -/
+      with version 0 is a Version Negotiation packet (§17.2.1, line 6228: "it
+      will be identified as a Version Negotiation packet based on the Version
+      field having a value of 0"); a server never processes one, so §5.2.2
+      line 1946 — "Servers MUST drop incoming packets under all other
+      circumstances" — applies. -/
   | recvVersionNegotiation {s n d c} (hs : versionNegotiationVersion ∉ s.supported) :
       Step s (.datagram n (some versionNegotiationVersion) d c) .drop
   /-- §5.2.2, line 1916: "Servers MUST drop smaller packets that specify
@@ -467,12 +470,14 @@ inductive Event where
       list of versions (§17.2.1; `Quic.decodePacket` returns them as
       `Body.versions`). -/
   | recvVersionNegotiation (dcid scid : ByteArray) (versions : List Nat)
-  /-- Any other packet arrived, carrying `version`.  `processedOk` is whether
-      the rest of the stack processed it successfully — removing packet
-      protection and so on — which is what §6.2 counts; it also covers §5.2.1's
-      "The client MAY drop these packets, or MAY buffer them" for packets whose
-      keys are not yet available. -/
-  | recvOther (version : Nat) (processedOk : Bool)
+  /-- Any other packet arrived.  `version` is `none` for a short header, which
+      carries no version field (§5.2.2, line 1926: "Packets with a supported
+      version, or no version field"), and `some v` for a long header.
+      `processedOk` is whether the rest of the stack processed the packet
+      successfully — removing packet protection and so on — which is what §6.2
+      counts; `false` also covers §5.2.1's "The client MAY drop these packets,
+      or MAY buffer them" for packets whose keys are not yet available. -/
+  | recvOther (version : Option Nat) (processedOk : Bool)
   deriving DecidableEq
 
 inductive Effect where
@@ -498,6 +503,13 @@ def State.afterVn (s : State) : State := { s with processedAny := true, abandone
     how it is started rather than a transition here. -/
 def MayStartNewAttempt (s : State) (newDcid : ByteArray) : Prop := newDcid ≠ s.dcid
 
+/-- §5.2.1, line 1898: a received packet belongs to this connection attempt when
+    its version field is the one the client selected.  A short header has no
+    version field, so it cannot mismatch. -/
+def versionMatches (s : State) : Option Nat → Bool
+  | none => true
+  | some v => decide (v = s.chosen)
+
 /-- The versions of a Version Negotiation packet that a client of this draft may
     pick under §6.2.1: not the Version Negotiation marker, and not a reserved
     version, since those "will never represent a real protocol" (§15). -/
@@ -513,16 +525,16 @@ inductive Step : State → Event → Out → Prop
   | afterAbandon {s e} (ha : s.abandoned = true) : Step s e .drop
   /-- §5.2.1, line 1898: "If a client receives a packet that uses a different
       version than it initially selected, it MUST discard that packet." -/
-  | wrongVersion {s v ok} (ha : s.abandoned = false) (h : v ≠ s.chosen) :
+  | wrongVersion {s v ok} (ha : s.abandoned = false) (h : versionMatches s v = false) :
       Step s (.recvOther v ok) .drop
-  /-- §5.2.1, line 1893: "the client MAY drop these packets, or MAY buffer them
+  /-- §5.2.1, line 1893: "The client MAY drop these packets, or MAY buffer them
       in anticipation of later packets that allow it to compute the key" — a
       packet that is not successfully processed changes nothing. -/
-  | notProcessed {s v} (ha : s.abandoned = false) (h : v = s.chosen) :
+  | notProcessed {s v} (ha : s.abandoned = false) (h : versionMatches s v = true) :
       Step s (.recvOther v false) .drop
   /-- A packet of the selected version that is processed successfully is what
       §6.2 line 2100 counts as "any other packet". -/
-  | otherProcessed {s v} (ha : s.abandoned = false) (h : v = s.chosen) :
+  | otherProcessed {s v} (ha : s.abandoned = false) (h : versionMatches s v = true) :
       Step s (.recvOther v true) (.ok { s with processedAny := true } [.deliver])
   /-- §6.2, line 2100: "A client MUST discard any Version Negotiation packet if
       it has received and successfully processed any other packet, including an
@@ -533,18 +545,21 @@ inductive Step : State → Event → Out → Prop
       lists the QUIC version selected by the client." -/
   | vnListsChosen {s d c vs} (ha : s.abandoned = false) (hp : s.processedAny = false)
       (h : s.chosen ∈ vs) : Step s (.recvVersionNegotiation d c vs) .drop
-  /-- §6.2.1, line 2120: "The client MUST check that the Destination and Source
-      Connection ID fields match the Source and Destination Connection ID fields
-      in a packet that the client sent.  If this check fails, the packet MUST be
-      discarded." -/
+  /-- §6.2.1, line 2120 (the draft-only section): "The client MUST check that the
+      Destination and Source Connection ID fields match the Source and
+      Destination Connection ID fields in a packet that the client sent.  If
+      this check fails, the packet MUST be discarded."  This is an *additional*
+      permitted outcome, not a precondition of abandoning: §6.2 line 2098 has
+      exactly two exceptions and this is not one of them; see NOTES. -/
   | vnCidMismatch {s d c vs} (ha : s.abandoned = false) (hp : s.processedAny = false)
       (hc : s.chosen ∉ vs) (h : ¬ (d = s.scid ∧ c = s.dcid)) :
       Step s (.recvVersionNegotiation d c vs) .drop
   /-- §6.2, line 2098: "A client that supports only this version of QUIC MUST
       abandon the current connection attempt if it receives a Version
-      Negotiation packet, with the following two exceptions." -/
+      Negotiation packet, with the following two exceptions" — the two being
+      line 2100 and line 2103.  The connection IDs are not among them. -/
   | vnAbandon {s d c vs} (ha : s.abandoned = false) (hp : s.processedAny = false)
-      (hv : s.chosen ∉ vs) (hd : d = s.scid) (hs : c = s.dcid) :
+      (hv : s.chosen ∉ vs) :
       Step s (.recvVersionNegotiation d c vs) (.ok s.afterVn [.abandon])
   /-- §6.2.1, line 2115 (draft-only): "When a draft implementation receives a
       Version Negotiation packet, it MAY use it to attempt a new connection with
@@ -561,13 +576,13 @@ def outcomes (s : State) (e : Event) : List Out :=
   if s.abandoned then [.drop] else
   match e with
   | .recvOther v ok =>
-    if v ≠ s.chosen then [.drop]
+    if versionMatches s v = false then [.drop]
     else if ok then [.ok { s with processedAny := true } [.deliver]]
     else [.drop]
   | .recvVersionNegotiation d c vs =>
     if s.processedAny then [.drop]
     else if s.chosen ∈ vs then [.drop]
-    else if ¬ (d = s.scid ∧ c = s.dcid) then [.drop]
+    else if ¬ (d = s.scid ∧ c = s.dcid) then [.ok s.afterVn [.abandon], .drop]
     else (.ok s.afterVn [.abandon]) ::
       (usableVersions vs).map (fun v => .ok s.afterVn [.attemptVersion v])
 
@@ -587,7 +602,7 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
         split at h
         · simp only [List.mem_singleton] at h; subst h; exact .wrongVersion hab' ‹_›
         · rename_i hveq
-          have hv : v = s.chosen := by simpa using hveq
+          have hv : versionMatches s v = true := by simpa using hveq
           split at h
           · rename_i hok
             subst hok
@@ -607,13 +622,16 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
           split at h
           · simp only [List.mem_singleton] at h; subst h; exact .vnListsChosen hab' hp ‹_›
           · split at h
-            · simp only [List.mem_singleton] at h; subst h
-              exact .vnCidMismatch hab' hp ‹_› ‹_›
+            · rename_i hmis
+              simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+              rcases h with h | h <;> subst h
+              · exact .vnAbandon hab' hp ‹_›
+              · exact .vnCidMismatch hab' hp ‹_› hmis
             · rename_i hcid
               have hcid' : d = s.scid ∧ c = s.dcid := by simpa using hcid
               simp only [List.mem_cons, List.mem_map] at h
               rcases h with h | ⟨v, hv, h⟩
-              · subst h; exact .vnAbandon hab' hp ‹_› hcid'.1 hcid'.2
+              · subst h; exact .vnAbandon hab' hp ‹_›
               · subst h; exact .vnRetry hab' hp ‹_› hcid'.1 hcid'.2 hv
   · intro h
     cases h with
@@ -624,7 +642,8 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | vnAfterOther ha hp => simp [outcomes, ha, hp]
     | vnListsChosen ha hp h => simp [outcomes, ha, hp, h]
     | vnCidMismatch ha hp hc h => simp [outcomes, ha, hp, hc, h]
-    | vnAbandon ha hp hv hd hs => simp [outcomes, ha, hp, hv, hd, hs]
+    | @vnAbandon d c vs ha hp hv =>
+      by_cases hcid : d = s.scid ∧ c = s.dcid <;> simp [outcomes, ha, hp, hv, hcid]
     | vnRetry ha hp hv hd hs hmem =>
       simp only [outcomes, ha, hp, hv, hd, hs, Bool.false_eq_true, not_true_eq_false, and_self]
       exact List.mem_cons_of_mem _ (List.mem_map.mpr ⟨_, hmem, rfl⟩)
@@ -695,6 +714,32 @@ theorem never_acts_on_own_version {s : State} {d c : ByteArray} {vs : List Nat} 
   | vnAbandon _ _ hv => exact absurd h hv
   | vnRetry _ _ hv => exact absurd h hv
 
+/-- §6.2, line 2098: the MUST has "the following two exceptions" — line 2100
+    (another packet was processed) and line 2103 (the packet lists the chosen
+    version) — and nothing else.  In particular the connection-ID check of the
+    draft-only §6.2.1 is not a third exception: a client that abandons the
+    attempt on a Version Negotiation packet whose connection IDs do not match
+    still conforms. -/
+theorem abandon_always_permitted {s : State} {d c : ByteArray} {vs : List Nat}
+    (ha : s.abandoned = false) (hp : s.processedAny = false) (hv : s.chosen ∉ vs) :
+    Step s (.recvVersionNegotiation d c vs) (.ok s.afterVn [.abandon]) :=
+  .vnAbandon ha hp hv
+
+/-- §6.2.1, line 2120: discarding such a packet instead is also permitted. -/
+theorem cid_mismatch_may_discard {s : State} {d c : ByteArray} {vs : List Nat}
+    (ha : s.abandoned = false) (hp : s.processedAny = false) (hv : s.chosen ∉ vs)
+    (h : ¬ (d = s.scid ∧ c = s.dcid)) :
+    Step s (.recvVersionNegotiation d c vs) .drop :=
+  .vnCidMismatch ha hp hv h
+
+/-- §6.2.1, line 2120: the draft-only retry, on the other hand, happens only
+    when the connection IDs do match. -/
+theorem retry_needs_cid_match {s : State} {d c : ByteArray} {vs : List Nat} {v : Nat}
+    (h : Step s (.recvVersionNegotiation d c vs) (.ok s.afterVn [.attemptVersion v])) :
+    d = s.scid ∧ c = s.dcid := by
+  cases h with
+  | vnRetry _ _ _ hd hs _ => exact ⟨hd, hs⟩
+
 /-- Neither flag is ever cleared. -/
 theorem flags_mono {s s' : State} {e : Event} {fx : List Effect} (h : Step s e (.ok s' fx)) :
     (s.processedAny = true → s'.processedAny = true) ∧
@@ -706,7 +751,7 @@ theorem flags_mono {s s' : State} {e : Event} {fx : List Effect} (h : Step s e (
 
 theorem processedAny_reachable {s₀ s : State} (h0 : s₀.processedAny = true)
     (h : component.Reachable s₀ s) : s.processedAny = true :=
-  Component.Reachable.rec (motive := fun (x : State) _ => x.processedAny = true) h0
+  component.reachable_induction (motive := fun (x : State) => x.processedAny = true) h0
     (fun _ hs ih => (flags_mono hs).1 ih) h
 
 /-- Acting on a Version Negotiation packet requires an untouched connection
@@ -779,28 +824,40 @@ example : component.accepts cli (.recvVersionNegotiation ⟨#[9,9]⟩ ⟨#[1,2,3
 example : component.step cli
     (.recvVersionNegotiation ⟨#[9,9]⟩ ⟨#[1,2,3,4]⟩ [versionV1, 0xff00001d]) = .drop := by decide
 -- §6.2.1: "The client MUST check that the Destination and Source Connection ID
--- fields match the Source and Destination Connection ID fields in a packet that
--- the client sent."
+-- fields match ... If this check fails, the packet MUST be discarded."  That
+-- check is in the draft-only section, so it is an extra permitted outcome …
+example : component.accepts cli
+    (.recvVersionNegotiation ⟨#[7,7]⟩ ⟨#[1,2,3,4]⟩ [0xff00001d]) .drop = true := by decide
+-- … while §6.2's "MUST abandon the current connection attempt", which has only
+-- two exceptions and no connection-ID check, still applies (VN-1).
 example : component.step cli (.recvVersionNegotiation ⟨#[7,7]⟩ ⟨#[1,2,3,4]⟩ [0xff00001d]) =
-    .drop := by decide
+    .ok cli.afterVn [.abandon] := by decide
+-- The §6.2.1 retry, though, is available only when the connection IDs match.
+example : component.accepts cli (.recvVersionNegotiation ⟨#[7,7]⟩ ⟨#[1,2,3,4]⟩ [0xff00001d])
+    (.ok cli.afterVn [.attemptVersion 0xff00001d]) = false := by decide
 -- §6.2: "MUST discard any Version Negotiation packet if it has received and
 -- successfully processed any other packet".
 example : component.step { cli with processedAny := true }
     (.recvVersionNegotiation ⟨#[9,9]⟩ ⟨#[1,2,3,4]⟩ [0xff00001d]) = .drop := by decide
 -- … and processing a server packet is what sets that flag.
-example : component.step cli (.recvOther versionV1 true) =
+example : component.step cli (.recvOther (some versionV1) true) =
+    .ok { cli with processedAny := true } [.deliver] := by decide
+-- A short header carries no version field, so it cannot mismatch (§5.2.2).
+example : component.step cli (.recvOther none true) =
     .ok { cli with processedAny := true } [.deliver] := by decide
 -- §5.2.1: "If a client receives a packet that uses a different version than it
 -- initially selected, it MUST discard that packet."
-example : component.step cli (.recvOther versionV2 true) = .drop := by decide
+example : component.step cli (.recvOther (some versionV2) true) = .drop := by decide
+example : component.accepts cli (.recvOther (some versionV2) true)
+    (.ok { cli with processedAny := true } [.deliver]) = false := by decide
 -- … and a packet it cannot yet decrypt leaves the flag clear, so a later
 -- Version Negotiation packet is still acted upon.
-example : component.step cli (.recvOther versionV1 false) = .drop := by decide
+example : component.step cli (.recvOther (some versionV1) false) = .drop := by decide
 -- Following an implementation from the outside: the abandon is observable.
 example : component.track cli (.recvVersionNegotiation ⟨#[9,9]⟩ ⟨#[1,2,3,4]⟩ [0xff00001d])
     (.ok [.abandon]) = some { cli with processedAny := true, abandoned := true } := by decide
 -- Once abandoned, nothing is processed any more (§5.2.1).
-example : component.step cli.afterVn (.recvOther versionV1 true) = .drop := by decide
+example : component.step cli.afterVn (.recvOther (some versionV1) true) = .drop := by decide
 
 end Client
 
@@ -814,29 +871,31 @@ Assigned ranges: lines 1835–1984 (§5.2), 2044–2156 (§6), 5920–5958 (§15
 | §5.2 (1853) | associate a packet with an existing connection by DCID | out of scope: the connection table is WP12 `Endpoint`; §5.2's routing MUSTs about CIDs are WP4 `ConnIds` |
 | §5.2 (1867) | endpoints can send a Stateless Reset for unattributable packets | out of scope: WP6 `Termination` |
 | §5.2 (1872) | packets inconsistent with the connection state are discarded, e.g. a different version | `Client.Step.wrongVersion` (client side); server side is `Server.Step.supported`'s complement |
-| §5.2 (1878) | invalid Initial/Retry/VN MAY be discarded; otherwise a connection error or full revert | `Client.Step.notProcessed`, `Server.Step.unsupportedSilent`; Retry is WP5 |
+| §5.2 (1878) | invalid Initial/Retry/VN MAY be discarded; otherwise a connection error or full revert | `Client.Step.notProcessed` and `Client.Step.vnCidMismatch` (an unmatched Version Negotiation packet is exactly such an invalid packet), `Server.Step.unsupportedSilent`; the Initial half is `DatagramSize.Step.initialDiscard`, Retry is WP5 |
 | §5.2.1 (1889) | packets that do not match an existing connection are discarded | `Client.Step.afterAbandon` |
 | §5.2.1 (1893) | MAY drop or buffer packets whose keys are not yet available | `Client.Step.notProcessed` (`processedOk = false`) |
-| §5.2.1 (1898) | a client MUST discard a packet of a version other than the one it selected | `Client.Step.wrongVersion` |
+| §5.2.1 (1898) | a client MUST discard a packet of a version other than the one it selected | `Client.Step.wrongVersion` over `Client.versionMatches` (a short header has no version field, so it never mismatches) |
 | §5.2.2 (1911) | unsupported version + large enough → SHOULD send Version Negotiation | `Server.Step.unsupportedSendVn` |
 | §5.2.2 (1914) | a server MAY limit the number of packets it responds to | `Server.Step.unsupportedSilent` |
 | §5.2.2 (1916) | servers MUST drop smaller packets with unsupported versions | `Server.Step.unsupportedTooSmall`, theorem `small_unsupported_drop` |
-| §5.2.2 (1923) | servers SHOULD respond with VN provided the datagram is long enough | same as line 1911 |
+| §5.2.2 (1923) | servers SHOULD respond with VN provided the datagram is long enough | same as line 1911: the SHOULD is the *preferred* outcome of `outcomes`, so `Server.component.step` sends the Version Negotiation packet |
 | §5.2.2 (1926) | supported version or no version field → match to a connection | `Server.Step.supported`, `Server.Step.noVersionField` |
 | §5.2.2 (1932) | a conforming Initial commits the server to the client's version | out of scope: WP11 `Handshake` |
-| §5.2.2 (1936) | refusing a connection SHOULD send CONNECTION_CLOSE(CONNECTION_REFUSED) | out of scope: WP6 `Termination` |
+| §5.2.2 (1936) | refusing a connection SHOULD send CONNECTION_CLOSE(CONNECTION_REFUSED) | out of scope: connection-level, WP12 `Endpoint` (WP6 `Termination` owns the close itself, and WP5 `AddressValidation` forbids sending it before address validation — the review's AV-4; the lead's disposition puts the union in WP12) |
 | §5.2.2 (1940) | 0-RTT MAY be buffered; servers SHOULD ignore client Handshake packets | out of scope: WP11 `Handshake` |
-| §5.2.2 (1946) | servers MUST drop incoming packets under all other circumstances | `Server.eventOfDatagram = none` (unparseable), `Server.Step.recvVersionNegotiation` |
-| §5.2.3 (1948–1983) | load-balancer advice; stateless reset oracle | out of scope: deployment advice; stateless reset is WP6 |
-| §6 (2051) | clients SHOULD size the first datagram to the largest minimum of all versions they support | `DatagramSize.MaySendDatagram` (1200 for this version); the multi-version SHOULD is advice, see NOTES |
+| §5.2.2 (1946) | servers MUST drop incoming packets under all other circumstances | out of scope: WP12 `Endpoint`.  This component decides only the version question; "all other circumstances" means a datagram that reaches no connection and starts none.  WP12 must check: after version handling says `.deliver`, if the DCID matches no connection, the datagram creates a connection only when it is a conforming Initial (§5.2.2 line 1932), otherwise the only outcomes are `.drop` or a Stateless Reset (WP6).  Locally covered: `Server.eventOfDatagram = none` for a datagram that is not even RFC 8999-parseable, and `Server.Step.recvVersionNegotiation` |
+| §5.2.3 (1948–1974) | load-balancer advice; connection continuity when the client's address changes | advice, not checkable here: it is about a server deployment, not about one endpoint's events |
+| §5.2.3 (1975) | a deployment without migration support SHOULD set `disable_active_migration` | out of scope: WP1 `TransportParams` holds the parameter, WP10 `Migration` its effect |
+| §5.2.3 (1982) | such deployments MUST avoid creating a stateless reset oracle | out of scope: WP6 `Termination` (stateless reset) |
+| §6 (2051) | clients SHOULD size the first datagram to the largest minimum of all versions they support | the part that concerns this version is `DatagramSize.MaySendDatagram` (≥ 1200); the multi-version part is advice, not checkable here: it quantifies over versions the model does not know, see NOTES |
 | §6.1 (2063) | the server responds with a Version Negotiation packet listing versions it accepts | `Server.mkVersionNegotiation`, `Server.MaySendVn`, theorem `vn_lists_supported` |
 | §6.1 (2066) | MUST NOT send a VN in response to a VN | `Server.Step.recvVersionNegotiation`, theorem `no_vn_in_response_to_vn` |
 | §6.1 (2083) | a server MAY limit the number of VN packets it sends | `Server.Step.unsupportedSilent` |
-| §6.2 (2098) | a client MUST abandon the attempt on receiving a VN | `Client.Step.vnAbandon`, theorem `acting_abandons` |
+| §6.2 (2098) | a client MUST abandon the attempt on receiving a VN, with exactly two exceptions | `Client.Step.vnAbandon`, theorems `acting_abandons` and `abandon_always_permitted` (the two exceptions are the next two rows; nothing else gates it) |
 | §6.2 (2100) | MUST discard a VN if any other packet was received and successfully processed | `Client.Step.vnAfterOther`, theorem `acts_on_vn_once` |
 | §6.2 (2103) | MUST discard a VN that lists the version the client selected | `Client.Step.vnListsChosen`, theorem `never_acts_on_own_version` |
 | §6.2.1 (2115) | a draft implementation MAY try a version from the list instead | `Client.Step.vnRetry` |
-| §6.2.1 (2120) | the client MUST check the echoed connection IDs; otherwise discard | `Client.Step.vnCidMismatch` |
+| §6.2.1 (2120) | the client MUST check the echoed connection IDs; otherwise discard | `Client.Step.vnCidMismatch`, as an *additional* outcome on a mismatch and as a precondition of `Client.Step.vnRetry` only — §6.2's abandon is not gated on it; see NOTES |
 | §6.2.1 (2136) | the new connection MUST use a new random DCID | `Client.MayStartNewAttempt` |
 | §6.2.1 (2141) | MUST NOT be used outside of draft implementations | see NOTES |
 | §6.3 (2147) | 0x?a?a?a?a versions are reserved | `isReservedVersion`, theorem `isReservedVersion_iff` |
@@ -891,6 +950,22 @@ NOTES
   §6.2.1's "MUST NOT be used outside of draft implementations" cannot be
   expressed as a transition rule: it is a condition on the implementation, not
   on a state.
+- **The connection-ID check is not a third exception** (review finding VN-1).
+  §6.2 line 2098 says a client "MUST abandon the current connection attempt if
+  it receives a Version Negotiation packet, with the following two exceptions",
+  and names them on lines 2100 and 2103.  The check that the packet echoes the
+  connection IDs appears only in §6.2.1, the section line 2113 marks
+  "[[RFC editor: please remove this section before publication.]]".  So on a
+  connection-ID mismatch both outcomes stand: `vnAbandon` (§6.2's MUST, and the
+  preferred outcome, which is what an RFC 9000 implementation such as ngtcp2
+  does) and `vnCidMismatch` (§6.2.1 line 2120's "the packet MUST be discarded",
+  available to a draft implementation).  The mismatch does gate `vnRetry`:
+  starting a new attempt on the strength of an unauthenticated packet is exactly
+  what that check is for (`retry_needs_cid_match`).
+- **A short header has no version field.**  `Client.Event.recvOther` takes an
+  `Option Nat`, like the server's event: `none` is a short header, which §5.2.2
+  line 1926 groups with supported versions ("Packets with a supported version,
+  or no version field"), so §5.2.1 line 1898's discard rule cannot fire on it.
 - **Reserved versions in `vnRetry`.**  §6.2.1 says the client "selects an
   acceptable protocol version from the list".  A reserved version "will never
   represent a real protocol" (§15), and version 0 is the negotiation marker, so
@@ -913,11 +988,22 @@ NOTES
   §17.2.1 say.  `sendVn_maySendVn` proves that everything `Step` permits the
   server to send satisfies it, given `Inv` — the invariant is what says the
   advertised list contains every supported version, which `MaySendVn` demands.
+  It stays a free-standing function rather than moving into the component's
+  `MaySendPacket` field: `MaySendPacket : State → OutPacket → Prop` sees one
+  packet and no trigger, whereas every rule here — echoed connection IDs, the
+  1200-byte threshold, "not in response to a Version Negotiation packet" — is
+  about *which datagram* is being answered, and a `Spec.OutPacket` carries
+  frames, which a Version Negotiation packet does not have.  WP12 must call
+  `Server.maySendVn s e vn` with the triggering event, not `maySendPacket`.
 - **`Effect.deliver` is not "accept".**  For the server it means only that
   version handling does not stop the datagram: §5.2.2's connection lookup, and
   what a server does when no connection matches (a Stateless Reset, WP6, or a
   drop), are WP12's.  So this component never produces `.drop` for a supported
-  version, and composition with the connection table may still drop it.
+  version, and composition with the connection table may still drop it — in
+  particular the MAY-discard of §5.2 line 1878 for Initial packets is
+  `DatagramSize.Step.initialDiscard`, and WP12 must take the *union* of the
+  components' permitted outcomes there rather than the intersection, or a
+  conforming implementation that discards an Initial will be rejected.
 -/
 
 end Quic.Spec.VersionNeg
