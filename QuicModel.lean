@@ -19,3 +19,4 @@ import QuicModel.Spec.Ack
 import QuicModel.Spec.TransportParams
 import QuicModel.Spec.Stream
 import QuicModel.Spec.StreamTable
+import QuicModel.Spec.Migration
