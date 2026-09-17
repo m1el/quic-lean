@@ -1097,4 +1097,201 @@ theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
   | _ => simp only [outcomes] <;> repeat' split
          all_goals simp
 
+/-! ## 5. Invariant -/
+
+/-- Three things hold of every reachable state:
+
+* the handshake is not confirmed before it is complete (§19.20, line 8207:
+  "Servers MUST NOT send a HANDSHAKE_DONE frame before completing the
+  handshake", and RFC 9001 §4.1.2 for the client);
+* §7.5, line 2703: "Implementations MUST support buffering at least 4096 bytes
+  of data received in out-of-order CRYPTO frames";
+* every CRYPTO stream is canonical and fully flushed — nothing buffered is
+  already deliverable. -/
+def Inv (s : State) : Prop :=
+  (s.confirmed = true → s.complete = true) ∧ 4096 ≤ s.bufLimit ∧
+    ∀ l : CryptoLevel, (s.stream l).WF
+
+theorem stream_setStream (s : State) (l l' : CryptoLevel) (c : Crypto) :
+    (s.setStream l c).stream l' = if l' = l then c else s.stream l' :=
+  Streams.get_set _ _ _ _
+
+/-- Announcing a key touches nothing but the key sets. -/
+theorem provideKey_eq (s : State) (d : KeyDir) (l : Level) :
+    ∃ r w, s.provideKey d l = { s with read := r, write := w } := by
+  cases d
+  · by_cases hd : s.read.get l = .discarded
+    · exact ⟨s.read, s.write, by simp [State.provideKey, hd]⟩
+    · exact ⟨s.read.set l .present, s.write, by simp [State.provideKey, hd]⟩
+  · by_cases hd : s.write.get l = .discarded
+    · exact ⟨s.read, s.write, by simp [State.provideKey, hd]⟩
+    · exact ⟨s.read, s.write.set l .present, by simp [State.provideKey, hd]⟩
+
+theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
+    (hi : Inv s) (h : Step s e (.ok s' fx)) : Inv s' := by
+  obtain ⟨hcc, hbl, hwf⟩ := hi
+  cases h with
+  | keys =>
+    rename_i dir l
+    obtain ⟨r, w, he⟩ := provideKey_eq s dir l
+    rw [he]
+    exact ⟨hcc, hbl, hwf⟩
+  | discard => exact ⟨hcc, hbl, hwf⟩
+  | discardAgain => exact ⟨hcc, hbl, hwf⟩
+  | send =>
+    refine ⟨hcc, hbl, fun l' => ?_⟩
+    rw [stream_setStream]
+    split
+    · rename_i he; subst he; exact hwf _
+    · exact hwf l'
+  | params hp =>
+    cases hp with
+    | accept => exact ⟨hcc, hbl, hwf⟩
+    | acceptNone => exact ⟨hcc, hbl, hwf⟩
+  | zeroRttAccepted => exact ⟨hcc, hbl, hwf⟩
+  | zeroRttRejected => exact ⟨hcc, hbl, hwf⟩
+  | completeServer => exact ⟨fun _ => rfl, hbl, hwf⟩
+  | completeClient => exact ⟨fun _ => rfl, hbl, hwf⟩
+  | completeAgain => exact ⟨hcc, hbl, hwf⟩
+  | header hh =>
+    cases hh with
+    | keysAbsentBuffer => exact ⟨hcc, hbl, hwf⟩
+    | cliInitialFirst => exact ⟨hcc, hbl, hwf⟩
+    | cliInitialSame => exact ⟨hcc, hbl, hwf⟩
+    | cliRetryFirst => exact ⟨hcc, hbl, hwf⟩
+    | cliHandshakeOk => exact ⟨hcc, hbl, hwf⟩
+    | cliOneRtt => exact ⟨hcc, hbl, hwf⟩
+    | cliVn => exact ⟨hcc, hbl, hwf⟩
+    | srvInitialFirst => exact ⟨hcc, hbl, hwf⟩
+    | srvInitialSame => exact ⟨hcc, hbl, hwf⟩
+    | srvHandshakeDiscard => exact ⟨hcc, hbl, hwf⟩
+    | srvHandshakeAgain => exact ⟨hcc, hbl, hwf⟩
+    | srvAppData => exact ⟨hcc, hbl, hwf⟩
+    | srvVn => exact ⟨hcc, hbl, hwf⟩
+  | crypto hh =>
+    cases hh with
+    | alreadyDiscarding => exact ⟨hcc, hbl, hwf⟩
+    | accept =>
+      refine ⟨hcc, hbl, fun l' => ?_⟩
+      rw [stream_setStream]
+      split
+      · rename_i he; subst he; exact Crypto.WF_recv (hwf _) _ _
+      · exact hwf l'
+    | expand =>
+      refine ⟨hcc, hbl, fun l' => ?_⟩
+      rw [stream_setStream]
+      split
+      · rename_i he; subst he; exact Crypto.WF_recv (hwf _) _ _
+      · exact hwf l'
+    | overflowDiscard =>
+      refine ⟨hcc, hbl, fun l' => ?_⟩
+      rw [stream_setStream]
+      split
+      · rename_i he; subst he; exact hwf _
+      · exact hwf l'
+  | doneClient _ hc => exact ⟨fun _ => hc, hbl, hwf⟩
+  | doneEarly => exact ⟨hcc, hbl, hwf⟩
+  | doneServer => exact ⟨hcc, hbl, hwf⟩
+  | sentHandshake => exact ⟨hcc, hbl, hwf⟩
+  | sentOther => exact ⟨hcc, hbl, hwf⟩
+  | sentRetry => exact ⟨hcc, hbl, hwf⟩
+  | sentRetryClient => exact ⟨hcc, hbl, hwf⟩
+
+/-! ## 6. Send side -/
+
+/-- §19.6: a CRYPTO frame at level `l` that we are allowed to put on the wire.
+    The bytes must be ones TLS has handed over (an exact repeat is therefore
+    always permitted: §12.4, line 4936, "All frames are idempotent in this
+    version of QUIC"), the stream must not have been discarded with its keys
+    (§17.2.2.1, line 6407), and §19.6's offset limit must hold. -/
+def maySendCryptoAt (s : State) (l : CryptoLevel) (off len : Nat) : Bool :=
+  decide (off + len ≤ (s.stream l).handed) && decide (off + len ≤ maxCryptoOffset) &&
+    !(s.write.get l.level == KeyState.discarded)
+
+def cryptoLevels : List CryptoLevel := [.initial, .handshake, .oneRtt]
+
+theorem mem_cryptoLevels (l : CryptoLevel) : l ∈ cryptoLevels := by
+  cases l <;> simp [cryptoLevels]
+
+/-- Frame-level send rules.  A CRYPTO frame does not say which level it belongs
+    to, so the frame alone is only required to be sendable at *some* level; the
+    level-exact rule is in `MaySendPacket`, which sees the packet type. -/
+def MaySend (s : State) : Frame → Prop
+  | .crypto off data => ∃ l : CryptoLevel, maySendCryptoAt s l off data.size = true
+  -- §19.20, line 8207: "A HANDSHAKE_DONE frame can only be sent by the server.
+  -- Servers MUST NOT send a HANDSHAKE_DONE frame before completing the
+  -- handshake."
+  | .handshakeDone => s.role = .server ∧ s.complete = true
+  | _ => True
+
+def maySend (s : State) : Frame → Bool
+  | .crypto off data => cryptoLevels.any (fun l => maySendCryptoAt s l off data.size)
+  | .handshakeDone => (s.role == .server) && s.complete
+  | _ => true
+
+theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
+  cases f with
+  | crypto off data =>
+    simp only [maySend, MaySend, List.any_eq_true]
+    constructor
+    · rintro ⟨l, _, hl⟩; exact ⟨l, hl⟩
+    · rintro ⟨l, hl⟩; exact ⟨l, mem_cryptoLevels l, hl⟩
+  | handshakeDone => simp [maySend, MaySend]
+  | _ => simp [maySend, MaySend]
+
+/-- The CRYPTO frames of a packet at level `l`. -/
+def cryptoFrameOk (s : State) (l : CryptoLevel) : Frame → Bool
+  | .crypto off data => maySendCryptoAt s l off data.size
+  | _ => true
+
+/-- Packet-level send rules:
+
+* no packet may be sent at a level whose write keys we do not have, or have
+  discarded (§17.2.2.1, line 6396: "A client stops both sending and processing
+  Initial packets when it sends its first Handshake packet");
+* §17.2.3, line 6453: a 0-RTT packet carries "early data from the client to the
+  server", and line 6482: "A client MUST NOT send 0-RTT packets once it starts
+  processing 1-RTT packets from the server";
+* §19.6: a CRYPTO frame must be within what TLS handed over *at this packet's
+  level* — the frame-level rule cannot see the level. -/
+def MaySendPacket (s : State) (p : OutPacket) : Prop :=
+  (∀ l, levelOf p.ptype = some l → s.write.get l = .present) ∧
+  (p.ptype = .zeroRtt → s.role = .client ∧ s.processed1Rtt = false) ∧
+  (∀ l, cryptoLevelOf p.ptype = some l → ∀ f ∈ p.frames, cryptoFrameOk s l f = true)
+
+def maySendPacket (s : State) (p : OutPacket) : Bool :=
+  (match levelOf p.ptype with
+   | none => true
+   | some l => s.write.get l == KeyState.present) &&
+  (match p.ptype with
+   | .zeroRtt => (s.role == .client) && !s.processed1Rtt
+   | _ => true) &&
+  (match cryptoLevelOf p.ptype with
+   | none => true
+   | some l => p.frames.all (cryptoFrameOk s l))
+
+theorem maySendPacket_iff (s : State) (p : OutPacket) :
+    maySendPacket s p = true ↔ MaySendPacket s p := by
+  cases hp : p.ptype <;>
+    simp [maySendPacket, MaySendPacket, hp, levelOf, cryptoLevelOf, List.all_eq_true]
+
+/-! ## 7. The component -/
+
+@[reducible] def component : Component where
+  State := State
+  Event := Event
+  Effect := Effect
+  Step := Step
+  outcomes := outcomes
+  outcomes_iff := outcomes_iff
+  outcomes_ne := outcomes_ne
+  Inv := Inv
+  step_inv := step_inv
+  MaySend := MaySend
+  maySend := maySend
+  maySend_iff := maySend_iff
+  MaySendPacket := MaySendPacket
+  maySendPacket := maySendPacket
+  maySendPacket_iff := maySendPacket_iff
+
 end Quic.Spec.Handshake
