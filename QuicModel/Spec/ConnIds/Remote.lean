@@ -402,4 +402,143 @@ theorem rpt_mono_reachable {s₀ s : State} (h : component.Reachable s₀ s) :
   Component.Reachable.rec (motive := fun (t : State) _ => s₀.retirePriorTo ≤ t.retirePriorTo)
     (Nat.le_refl _) (fun _ hs ih => Nat.le_trans ih (rpt_mono hs)) h
 
+/-! ## 9. Examples (scenarios from the text) -/
+
+section Examples
+
+/-- A 128-bit stateless reset token, all bytes equal. -/
+private def tok (b : UInt8) : ResetToken := List.replicate 16 b
+
+/-- After the handshake: the peer's initial connection ID (sequence number 0)
+    and the one from its `preferred_address` (sequence number 1); we advertised
+    an `active_connection_id_limit` of 4. -/
+private def s0 : State :=
+  { entries := [⟨0, [1], tok 0⟩, ⟨1, [2], tok 1⟩], retired := [], retirePriorTo := 0,
+    limit := 4, peerZeroLen := false }
+
+-- An ordinary NEW_CONNECTION_ID with Retire Prior To 0: the ID is added and
+-- nothing is retired.
+example : component.step s0 (.recvNewCid 2 0 [3] (tok 3)) =
+    .ok { s0 with entries := s0.entries ++ [⟨2, [3], tok 3⟩] } [] := by decide
+
+-- §5.1.2, line 1811: "Upon receipt of an increased Retire Prior To field, the
+-- peer MUST stop using the corresponding connection IDs and retire them with
+-- RETIRE_CONNECTION_ID frames before adding the newly provided connection ID".
+example : (component.step s0 (.recvNewCid 2 2 [3] (tok 3))).obs =
+    .ok [.stopUsing 0 [1], .queueRetire 0, .stopUsing 1 [2], .queueRetire 1] := by decide
+example : ((component.step s0 (.recvNewCid 2 2 [3] (tok 3))).next s0).retired = [0, 1] := by decide
+example : ((component.step s0 (.recvNewCid 2 2 [3] (tok 3))).next s0).retirePriorTo = 2 := by decide
+example : ((component.step s0 (.recvNewCid 2 2 [3] (tok 3))).next s0).activeCount = 1 := by decide
+
+-- §19.15, line 7979: "Receipt of the same frame multiple times MUST NOT be
+-- treated as a connection error" — the second copy changes nothing.
+example :
+    component.step ((component.step s0 (.recvNewCid 2 2 [3] (tok 3))).next s0)
+      (.recvNewCid 2 2 [3] (tok 3)) =
+    .ok ((component.step s0 (.recvNewCid 2 2 [3] (tok 3))).next s0) [] := by decide
+
+-- §19.15, line 8013: "An endpoint that receives a NEW_CONNECTION_ID frame with
+-- a sequence number smaller than the Retire Prior To field of a previously
+-- received NEW_CONNECTION_ID frame MUST send a corresponding
+-- RETIRE_CONNECTION_ID frame that retires the newly received connection ID,
+-- unless it has already done so for that sequence number."
+private def s2 : State := (component.step s0 (.recvNewCid 5 4 [3] (tok 3))).next s0
+example : s2.retirePriorTo = 4 ∧ s2.retired = [0, 1] := by decide
+example : (component.step s2 (.recvNewCid 3 0 [9] (tok 9))).obs =
+    .ok [.stopUsing 3 [9], .queueRetire 3] := by decide
+-- … "unless it has already done so": sequence number 1 was retired above.
+example : (component.step s2 (.recvNewCid 1 0 [2] (tok 1))).obs = .ok [] := by decide
+
+-- §19.15, line 7998: "A receiver MUST ignore any Retire Prior To fields that do
+-- not increase the largest received Retire Prior To value."
+example :
+    ((component.step ((component.step s0 (.recvNewCid 5 2 [3] (tok 3))).next s0)
+      (.recvNewCid 6 1 [9] (tok 9))).next s0).retirePriorTo = 2 := by decide
+
+-- §19.15, line 7993: Retire Prior To greater than the sequence number.
+example : component.step s0 (.recvNewCid 2 3 [3] (tok 3)) =
+    .error .frameEncodingError := by decide
+
+-- §19.15, line 7959: connection ID length outside 1..20.
+example : component.step s0 (.recvNewCid 2 0 [] (tok 3)) =
+    .error .frameEncodingError := by decide
+
+-- §5.1.1, line 1743: a fifth active connection ID under a limit of 4.
+private def s1 : State := { s0 with entries := s0.entries ++ [⟨2, [3], tok 3⟩, ⟨3, [4], tok 4⟩] }
+example : s1.activeCount = 4 := by decide
+example : component.step s1 (.recvNewCid 4 0 [5] (tok 5)) =
+    .error .connectionIdLimitError := by decide
+-- …but the same frame with a large enough Retire Prior To is fine (§5.1.1,
+-- line 1722: "An endpoint MAY send connection IDs that temporarily exceed a
+-- peer's limit if the NEW_CONNECTION_ID frame also requires the retirement of
+-- any excess").
+example : ((component.step s1 (.recvNewCid 4 4 [5] (tok 5))).next s1).activeCount = 1 := by decide
+
+-- §19.15, line 7985: a sequence number reused for a different connection ID.
+-- Both alternatives of the MAY are permitted …
+private def reuse : Event := .recvNewCid 1 0 [7] (tok 1)
+example : component.accepts s0 reuse (.error .protocolViolation) = true := by decide
+example : component.accepts s0 reuse (.ok s0 []) = true := by decide
+-- … and nothing else is.
+example : component.accepts s0 reuse (.error .frameEncodingError) = false := by decide
+
+-- §19.15, line 7974: we send packets with a zero-length Destination Connection
+-- ID, so NEW_CONNECTION_ID is a PROTOCOL_VIOLATION.
+example : component.step { s0 with entries := [], peerZeroLen := true }
+    (.recvNewCid 1 0 [7] (tok 1)) = .error .protocolViolation := by decide
+
+-- §19.16 send side.
+example : component.maySend s0 (.retireConnectionId 1) = true := by decide
+example : component.maySend s0 (.retireConnectionId 9) = false := by decide       -- never issued
+example : component.maySend { s0 with retired := [1] } (.retireConnectionId 1) = false := by decide
+example : component.maySend { s0 with peerZeroLen := true } (.retireConnectionId 1) = false := by
+  decide
+
+-- Following an implementation whose state we cannot see.
+example : component.track s0 (.recvNewCid 2 0 [3] (tok 3)) (.ok []) =
+    some { s0 with entries := s0.entries ++ [⟨2, [3], tok 3⟩] } := by decide
+
+end Examples
+
+/-! ## 10. Coverage and notes
+
+Assigned text: lines 1608–1834 (§5.1, §5.1.1, §5.1.2) and 7923–8058 (§19.15,
+§19.16).  This file covers the half of it that concerns connection IDs the peer
+issued to us.
+
+| Text (line) | Sentence | Encoded as |
+|---|---|---|
+| §5.1 (1641) | connection IDs MUST NOT be correlatable by an observer | out of scope: a property of the issuer's generation function, not of any state machine |
+| §5.1 (1644) | the same connection ID MUST NOT be issued more than once | `Local.canIssue` (send side) |
+| §5.1 (1670) | MUST NOT reuse an address/port pair for concurrent zero-length-CID connections | out of scope: about several connections, not one endpoint's CID set |
+| §5.1.1 (1709) | an issuer MUST accept packets carrying an issued CID until retired | `Local.State.active` |
+| §5.1.1 (1712) | issued and not retired = active | `State.active` |
+| §5.1.1 (1718) | SHOULD keep the peer supplied with CIDs | `Local.Recommended` (advice, not `Step`) |
+| §5.1.1 (1721) | MUST NOT provide more CIDs than the peer's limit | `Local.canIssue`, `Local.issue_respects_peer_limit` |
+| §5.1.1 (1722) | MAY exceed temporarily with a large enough Retire Prior To | `Local.State.peerActiveAfter` |
+| §5.1.1 (1743) | more active CIDs than advertised → CONNECTION_ID_LIMIT_ERROR | `Step.ncidLimit`, `Inv`, `active_le_limit` |
+| §5.1.1 (1749) | SHOULD supply a new CID when the peer retires one | `Local.Effect.cidRetiredByPeer` (advice) |
+| §5.1.1 (1753) | MAY limit the total number of CIDs issued | permitted: `Step.issueRefused` allows refusing |
+| §5.1.1 (1766) | a zero-length-CID endpoint cannot issue a new CID | `Local.canIssue` |
+| §5.1.2 (1779) | send RETIRE_CONNECTION_ID to remove a CID from use | `Step.retireOk`, `MaySend` |
+| §5.1.2 (1799) | SHOULD retire CIDs no longer used on a path | out of scope: paths are WP10 |
+| §5.1.2 (1806) | the issuer SHOULD keep accepting until retired; MAY close otherwise | advice; closing is WP6 |
+| §5.1.2 (1811) | MUST stop using, and retire, CIDs below an increased Retire Prior To, before adding the new one | `staleOf`, `applyNcid`, `Effect.stopUsing`/`queueRetire` |
+| §5.1.2 (1823) | SHOULD limit unacknowledged retirements; MUST NOT forget a CID without retiring it; MAY treat an excess as CONNECTION_ID_LIMIT_ERROR | partly: `entries` is never pruned, so nothing is forgotten; the retirement backlog needs the loss recovery state (RFC 9002), out of scope |
+| §5.1.2 (1831) | SHOULD NOT raise Retire Prior To before the previous one is honoured | `Local.Recommended` |
+| §19.15 (7959) | CID length <1 or >20 → FRAME_ENCODING_ERROR | `Step.ncidBadLen` |
+| §19.15 (7970) | MUST NOT send NEW_CONNECTION_ID while requiring zero-length DCIDs from the peer | `Local.canIssue` |
+| §19.15 (7974) | receiving it while sending zero-length DCIDs → PROTOCOL_VIOLATION | `Step.ncidZeroLen` |
+| §19.15 (7979) | a repeated frame MUST NOT be a connection error | `entriesAfter`, `Step.ncidOk` |
+| §19.15 (7985) | reused CID/sequence number MAY be PROTOCOL_VIOLATION | `Step.ncidConflict` vs `Step.ncidLimit`/`ncidOk` |
+| §19.15 (7993) | Retire Prior To > Sequence Number → FRAME_ENCODING_ERROR | `Step.ncidRptTooLarge` |
+| §19.15 (7998) | MUST ignore a Retire Prior To that does not increase the largest seen | `Nat.max` in `applyNcid`, `rpt_mono` |
+| §19.15 (8013) | a sequence number below a seen Retire Prior To MUST be retired, unless already done | `staleOf` over `entriesAfter` |
+| §19.16 (8046) | sequence number greater than any sent → PROTOCOL_VIOLATION | `Local.Step.retireUnknown` |
+| §19.16 (8050) | MUST NOT retire the packet's own DCID; peer MAY treat as PROTOCOL_VIOLATION | `Local.Step.retireSelf`; the send-side MUST NOT needs the packet being assembled, which is WP12 |
+| §19.16 (8055) | cannot send when the peer's CID is zero-length; receiving one when we issue zero-length CIDs → PROTOCOL_VIOLATION | `MaySend` here, `Local.Step.retireZeroLen` there |
+
+NOTES on this half are collected in `QuicModel/Spec/ConnIds.lean`.
+-/
+
 end Quic.Spec.ConnIds.Remote
