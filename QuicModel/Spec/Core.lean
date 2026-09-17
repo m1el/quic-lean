@@ -239,6 +239,16 @@ inductive Reachable (s₀ : C.State) : C.State → Prop
   | refl : Reachable s₀ s₀
   | step {s s' e fx} : Reachable s₀ s → C.Step s e (.ok s' fx) → Reachable s₀ s'
 
+/-- Induction over reachable states, stated with a plain `motive` so that it
+    applies from a concrete component, where `induction` on `Reachable` trips
+    over `component.State` vs. the concrete state type. -/
+theorem reachable_induction {s₀ : C.State} {motive : C.State → Prop} (base : motive s₀)
+    (ind : ∀ {s s' e fx}, C.Reachable s₀ s → C.Step s e (.ok s' fx) → motive s → motive s')
+    {s : C.State} (h : C.Reachable s₀ s) : motive s := by
+  induction h with
+  | refl => exact base
+  | step hr hs ih => exact ind hr hs ih
+
 theorem inv_of_reachable {s₀ s : C.State} (h0 : C.Inv s₀) (h : C.Reachable s₀ s) : C.Inv s := by
   induction h with
   | refl => exact h0
