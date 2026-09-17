@@ -214,6 +214,27 @@ commit that adds this section:
 | Trace-level obligations | agreed: a per-step predicate cannot force something to happen. WP12 must state liveness-style MUSTs (ACK within max_ack_delay, RESET_STREAM owed after STOP_SENDING, second path validation) as requirements on timed traces, fed by exported predicates such as `AckOverdue` |
 | Draft-34 vs RFC 9000, extension profile | open. The model follows draft-34 plus RFC 9221 (DATAGRAM), RFC 9287 (grease bit) and RFC 9369 (v2 type codes) at the wire layer only. Needs a text diff against RFC 9000 and an explicit profile before any conformance claim |
 
+## 4c. Review of Wave 1, batch B (`reviews/wave1-b.md`): disposition
+
+HIGH and MEDIUM findings, all accepted unless noted:
+
+| Finding | Owner | Status |
+|---|---|---|
+| AV-1 anti-amplification binds a client's first packet | WP5 fix run | dispatched |
+| PV-1 duplicate/late PATH_RESPONSE accepted as PROTOCOL_VIOLATION | WP5 fix run | dispatched |
+| AV-2, AV-3 missing MAY-discard / SHOULD-proceed alternatives | WP5 fix run | dispatched |
+| AV-5 server-side Retry send rules (§17.2.5.1) unmodelled | WP5 fix run | dispatched |
+| T-1 stateless reset size rule drops the "unless" exemption | WP6 fix run | dispatched |
+| T-2 idle close mandatory at the exact deadline instant | WP6 fix run | dispatched |
+| T-5 `MaySend` in closing stricter than the text (lead's earlier instruction was wrong too) | WP6 fix run | dispatched |
+| T-6 `Recommended` drops a qualifier; T-7 `confirmed` lost on closing; wrong line numbers in §10.2 | WP6 fix run | dispatched |
+| DS-1 no `.drop` alternative for received datagrams | WP7 fix run | dispatched |
+| DS-2 NO_VIABLE_PATH offered unconditionally; DS-3 local `OutDatagram` | WP7 fix run | dispatched |
+| VN-1 CID check applied to the §6.2 abandon path | WP7 fix run | dispatched |
+| T-4 §11 generic error codes | `Core`: `Obs.matchesSpec` | done |
+| `Spec.OutDatagram` lacked destination and probe flag | `Core` | done |
+| AV-4 CONNECTION_REFUSED (§5.2.2); T-4 second half, §11.1 "MAY discard an invalid Initial even where an error is mandated"; VN-2 "MUST drop under all other circumstances"; T-3 closing-state amplification rules (§10.2.1 lines 3993, 4008); conflicting `.drop` readings between PathValidation and Termination | WP12 | recorded: composition must take the *union* for connection-level refusals and let Termination's phase gate every other component |
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
