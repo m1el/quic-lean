@@ -115,14 +115,31 @@ inductive Event where
   deriving DecidableEq, Repr
 
 inductive Effect where
-  /-- Send a packet containing a CONNECTION_CLOSE frame carrying this reason. -/
+  /-- Send a packet containing a CONNECTION_CLOSE frame carrying this reason.
+      The reason is only ever the one the text itself fixes: the code supplied
+      by the `localError`/`appClose` event that closed the connection, or the
+      one already recorded in `closedWith` when that close is retransmitted
+      (§11.1, line 4458). -/
   | sendClose (reason : CloseReason)
+  /-- §10.2.2, line 4037: "An endpoint that receives a CONNECTION_CLOSE frame
+      MAY send a single packet containing a CONNECTION_CLOSE frame before
+      entering the draining state, using a NO_ERROR code if appropriate."
+      The text does not fix the error code ("if appropriate"), so neither does
+      this effect: it means "one packet carrying some CONNECTION_CLOSE frame".
+      The NO_ERROR hint is `recommendedFarewellReason`. -/
+  | sendFarewellClose
   /-- §10.2, line 3954: "The endpoint MAY send a stateless reset in response to
       any further incoming packets belonging to this connection." -/
   | sendStatelessReset
   /-- §10.1, line 3830 / §10.2, line 3953: the connection state is discarded. -/
   | discardState
   deriving DecidableEq, Repr
+
+/-- Does this effect put a packet on the wire?  §10.2.2, line 4023 ("an endpoint
+    in the draining state MUST NOT send any packets") is about exactly these. -/
+def Effect.sendsPacket : Effect → Bool
+  | .sendClose _ | .sendFarewellClose | .sendStatelessReset => true
+  | .discardState => false
 
 abbrev Out := Outcome State Effect
 
@@ -341,7 +358,7 @@ inductive Step : State → Event → Out → Prop
       endpoint MUST NOT send further packets." -/
   | recvCloseActiveReply {s now pto r c} (hp : s.phase = .active c) :
       Step s (.recvClose now pto r)
-        (.ok (s.toDraining now pto (some r)) [.sendClose (.transport .noError 0)])
+        (.ok (s.toDraining now pto (some r)) [.sendFarewellClose])
   /-- §10.2.2, line 4044: "An endpoint MAY enter the draining state from the
       closing state if it receives a CONNECTION_CLOSE frame ... the endpoint
       uses the same end time, but ceases transmission of any packets." -/
@@ -402,7 +419,7 @@ def outcomes (s : State) : Event → List Out
     match s.phase with
     | .active _ =>
       [.ok (s.toDraining now pto (some r)) [],
-       .ok (s.toDraining now pto (some r)) [.sendClose (.transport .noError 0)]]
+       .ok (s.toDraining now pto (some r)) [.sendFarewellClose]]
     | .closing =>
       [.ok (s.toDraining now pto s.closedWith) [], .ok s [.sendClose s.reason], .ok s []]
     | .draining => [.ok s []]

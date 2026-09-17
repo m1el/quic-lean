@@ -37,28 +37,55 @@ def isConnectionClose : Frame → Bool
   | .connectionClose _ _ _ => true
   | _ => false
 
-/-- §10.2.1, line 3962: in the closing state an endpoint "retains only enough
-    information to generate a packet containing a CONNECTION_CLOSE frame";
+def isPadding : Frame → Bool
+  | .padding _ => true
+  | _ => false
+
+/-- §10.2.1, line 3961: in the closing state an endpoint "retains only enough
+    information to generate a packet containing a CONNECTION_CLOSE frame and to
+    identify packets as belonging to the connection", and line 3965 it "sends a
+    packet containing a CONNECTION_CLOSE frame".  PADDING is permitted with it:
+    the text nowhere forbids padding that packet, and §14.1 *requires* a client
+    to pad any datagram carrying an Initial packet to 1200 bytes, which includes
+    an Initial carrying CONNECTION_CLOSE during the handshake (§10.2.3).
+
     §10.2.2, line 4023: "an endpoint in the draining state MUST NOT send any
     packets"; §10.2, line 3953: once the state is discarded there is nothing
     left to send with. -/
 def MaySend (s : State) (f : Frame) : Prop :=
   match s.phase with
   | .active _ => True
-  | .closing => ∃ err ft reason, f = .connectionClose err ft reason
+  | .closing =>
+    (∃ err ft reason, f = .connectionClose err ft reason) ∨ (∃ n, f = .padding n)
   | .draining => False
   | .closed => False
 
 def maySend (s : State) (f : Frame) : Bool :=
   match s.phase with
   | .active _ => true
-  | .closing => isConnectionClose f
+  | .closing => isConnectionClose f || isPadding f
   | .draining => false
   | .closed => false
 
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
   cases hp : s.phase <;> simp only [maySend, MaySend, hp] <;>
-    cases f <;> simp [isConnectionClose]
+    cases f <;> simp [isConnectionClose, isPadding]
+
+/-- §10.2.1, line 3965: "An endpoint in the closing state sends a packet
+    *containing a CONNECTION_CLOSE frame* in response to any incoming packet".
+    That a closing packet must actually carry a CONNECTION_CLOSE is a
+    packet-level rule, not a frame-level one: `MaySend` cannot see the other
+    frames in the packet.  Exported here for WP12 to apply when it assembles a
+    packet sent from the closing state. -/
+def closingPacketOk (fs : List Frame) : Bool :=
+  fs.any isConnectionClose && fs.all (fun f => isConnectionClose f || isPadding f)
+
+theorem maySend_of_closingPacketOk {s : State} (hp : s.phase = .closing)
+    {fs : List Frame} (h : closingPacketOk fs = true) : ∀ f ∈ fs, MaySend s f := by
+  intro f hf
+  rw [← maySend_iff]
+  simp only [closingPacketOk, Bool.and_eq_true, List.all_eq_true] at h
+  simpa [maySend, hp] using h.2 f hf
 
 /-! ### 6.2 Packet level (§10.2.3, §19.19)
 
@@ -147,6 +174,12 @@ structure Recommended (s : State) (role : Role) (entry : Time) (pto : Nat) : Pro
   /-- §10.2, line 3949: "Servers that retain an open socket for accepting new
       connections SHOULD NOT end the closing or draining states early." -/
   serverDoesNotEndEarly : role = .server → s.mayEndEarly = false
+
+/-- §10.2.2, line 4038: the single packet an endpoint MAY send before entering
+    the draining state uses "a NO_ERROR code if appropriate".  Advice only: the
+    text says "if appropriate", so `Step` emits `Effect.sendFarewellClose`,
+    which fixes no code, and `accepts` never rejects another choice. -/
+def recommendedFarewellReason : CloseReason := .transport .noError 0
 
 /-- §10.3, line 4206: "An endpoint that sends a stateless reset in response to a
     packet that is 43 bytes or shorter SHOULD send a stateless reset that is one

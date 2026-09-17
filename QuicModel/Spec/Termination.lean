@@ -59,12 +59,59 @@ theorem maySend_false_of_draining_or_closed' (s : State) (f : Frame)
     (hp : s.phase = .draining ∨ s.phase = .closed) : maySend s f = false := by
   rcases hp with hp | hp <;> simp [maySend, hp]
 
-/-- (b) §10.2.1, line 3962: in the closing state an endpoint retains "only
+/-- Stronger than (a) at the effect level: in the draining state no permitted
+    step puts a packet on the wire (§10.2.2, line 4023). -/
+theorem draining_emits_no_packet {s e s' fx} (hp : s.phase = .draining)
+    (h : Step s e (.ok s' fx)) : ∀ x ∈ fx, x.sendsPacket = false := by
+  have hne : ∀ c : Bool, s.phase ≠ .active c := by rw [hp]; simp
+  have hnc : s.phase ≠ .closing := by rw [hp]; simp
+  have hncl : s.phase ≠ .closed := by rw [hp]; simp
+  cases h with
+  | recvActive hp' => exact absurd hp' (hne _)
+  | recvClosingRespond hp' => exact absurd hp' hnc
+  | recvClosingSilent _ => simp
+  | recvDraining _ => simp
+  | recvClosed hp' => exact absurd hp' hncl
+  | recvClosedReset hp' => exact absurd hp' hncl
+  | sentAckEliciting => simp
+  | tickExpire _ => simp [Effect.sendsPacket]
+  | tickStay _ => simp
+  | tickEndEarly _ _ _ => simp [Effect.sendsPacket]
+  | localErrorActive hp' => exact absurd hp' (hne _)
+  | localErrorLate _ => simp
+  | appCloseActive hp' => exact absurd hp' (hne _)
+  | appCloseLate _ => simp
+  | recvCloseActive hp' => exact absurd hp' (hne _)
+  | recvCloseActiveReply hp' => exact absurd hp' (hne _)
+  | recvCloseClosingDrain hp' => exact absurd hp' hnc
+  | recvCloseClosingRespond hp' => exact absurd hp' hnc
+  | recvCloseClosingSilent hp' => exact absurd hp' hnc
+  | recvCloseDraining _ => simp
+  | recvCloseClosed hp' => exact absurd hp' hncl
+  | recvCloseClosedReset hp' => exact absurd hp' hncl
+  | statelessReset => simp
+  | handshakeConfirmed => simp
+
+/-- (b) §10.2.1, line 3961: in the closing state an endpoint retains "only
     enough information to generate a packet containing a CONNECTION_CLOSE
-    frame"; exactly the CONNECTION_CLOSE frames may be sent. -/
+    frame"; CONNECTION_CLOSE and the PADDING that may accompany it (§14.1) are
+    exactly the frames it may send. -/
 theorem maySend_closing_iff (s : State) (f : Frame) (hp : s.phase = .closing) :
-    MaySend s f ↔ ∃ err ft reason, f = .connectionClose err ft reason := by
+    MaySend s f ↔
+      (∃ err ft reason, f = .connectionClose err ft reason) ∨ (∃ n, f = .padding n) := by
   simp [MaySend, hp]
+
+/-- `MaySend` reads nothing but the phase.  With `phase_forward` this is the
+    BRIEF's idempotence rule: while the phase does not change, a frame that was
+    acceptable stays acceptable, so an exact repeat — in particular the
+    retransmitted CONNECTION_CLOSE of §11.1 line 4458 — is always accepted. -/
+theorem maySend_of_phase_eq {s s' : State} (h : s.phase = s'.phase) (f : Frame) :
+    MaySend s f ↔ MaySend s' f := by
+  simp only [MaySend, h]
+
+theorem maySend_stable {s e s' fx} (_h : Step s e (.ok s' fx)) (hph : s'.phase = s.phase)
+    (f : Frame) (hf : MaySend s f) : MaySend s' f :=
+  (maySend_of_phase_eq hph.symm f).mp hf
 
 /-- (c) Termination only ever moves forward:
     `active → closing → draining → closed`, with `active → draining`,
@@ -176,12 +223,12 @@ theorem idle_timeout_silent {s : State} {c : Bool} {now : Time} {pto : Nat}
     (hp : s.phase = .active c) (hne : s.effectiveIdle pto ≠ 0)
     (hd : s.idleStart + s.effectiveIdle pto ≤ now)
     (h : Step s (.tick now pto) (.ok s' fx)) :
-    s'.phase = .closed ∧ ∀ r, Effect.sendClose r ∉ fx := by
+    s'.phase = .closed ∧ ∀ x ∈ fx, x.sendsPacket = false := by
   have he := idle_timeout_closes hp hne hd h
   simp only [Outcome.ok.injEq] at he
   obtain ⟨h1, h2⟩ := he
   refine ⟨by simp [h1], ?_⟩
-  intro r; rw [h2]; simp
+  rw [h2]; simp [Effect.sendsPacket]
 
 /-- §10.1, line 3848: the effective idle timeout is never shorter than 3 PTO,
     unless it is disabled altogether. -/
@@ -293,11 +340,20 @@ example : component.step { sClosing with phase := .draining } (.recvPacket 1600 
 example : component.maySend { sClosing with phase := .draining } .ping = false := by decide
 example : component.maySend { sClosing with phase := .draining }
     (.connectionClose 0 (some 0) ByteArray.empty) = false := by decide
--- closing may send CONNECTION_CLOSE but nothing else
+-- closing may send CONNECTION_CLOSE, and the PADDING that §14.1 makes a client
+-- add to a datagram carrying an Initial packet, but nothing else
 example : component.maySend sClosing (.connectionClose 0 (some 0) ByteArray.empty) = true := by
   decide
+example : component.maySend sClosing (.padding 3) = true := by decide
 example : component.maySend sClosing .ping = false := by decide
-example : component.maySend sClosing (.padding 3) = false := by decide
+-- a repeated CONNECTION_CLOSE is still acceptable: `MaySend` reads only the phase
+example : component.maySend (component.step sClosing (.recvPacket 1500 400) |>.next sClosing)
+    (.connectionClose 0 (some 0) ByteArray.empty) = true := by decide
+-- the packet-level rule: a closing packet must actually carry a CONNECTION_CLOSE
+example : closingPacketOk [.connectionClose 0 (some 0) ByteArray.empty, .padding 1100] = true := by
+  decide
+example : closingPacketOk [.padding 1200] = false := by decide
+example : closingPacketOk [.connectionClose 0 (some 0) ByteArray.empty, .ping] = false := by decide
 
 -- §10.3.1: a detected stateless reset drains without sending anything.
 example : component.step s0 (.statelessReset 2000 400) =
@@ -305,10 +361,12 @@ example : component.step s0 (.statelessReset 2000 400) =
 
 -- §10.2.2: on receiving CONNECTION_CLOSE while active, a single reply is the
 -- permitted alternative to silence.
+-- The reply's error code is not fixed by the text ("a NO_ERROR code if
+-- appropriate"), so the effect does not fix it either.
 example : component.accepts s0 (.recvClose 2000 400 (.application 7))
     (.ok { s0 with phase := .draining, closeDeadline := 2000 + 3 * 400,
                    closedWith := some (.application 7) }
-          [.sendClose (.transport .noError 0)]) = true := by decide
+          [.sendFarewellClose]) = true := by decide
 
 -- §10.3 / §10.3.3: stateless reset sizes.
 example : maySendStatelessReset 1200 43 = true := by decide
@@ -358,14 +416,15 @@ Assigned text: §10 and §11 (lines 3813–4515) and §19.19 (8125–8192).
 | §10.2 (3953) | SHOULD discard all connection state once the state ends | `Effect.discardState` |
 | §10.2 (3954) | MAY send a stateless reset to further incoming packets | `Step.recvClosedReset`, `Step.recvCloseClosedReset` |
 | §10.2.1 (3960) | enters closing after initiating an immediate close | `State.toClosing` |
-| §10.2.1 (3965) | closing answers any incoming packet with CONNECTION_CLOSE | `Step.recvClosingRespond`, `Step.recvCloseClosingRespond` |
+| §10.2.1 (3965) | closing answers any incoming packet with CONNECTION_CLOSE | `Step.recvClosingRespond`, `Step.recvCloseClosingRespond`; the packet-level "contains a CONNECTION_CLOSE" part is `closingPacketOk` (for WP12) |
 | §10.2.1 (3969) | SHOULD limit the rate of packets generated while closing | `Step.recvClosingSilent`, `Step.recvCloseClosingSilent` (the permitted alternative) |
 | §10.2.1 (3983–3985) | MAY discard other connection state / MAY retain keys | out of scope: key and CID state are WP4/WP11 |
 | §10.2.1 (3988–3996) | MAY drop keys; MUST limit sent bytes to 3× received; MAY resend the identical packet | out of scope: the 3× budget is WP5 (anti-amplification); noted below |
 | §10.2.1 (4008) | closing MUST either discard packets from an unvalidated address or apply the 3× limit | out of scope: WP5 owns address validation |
 | §10.2.1 (4016–) | key updates while closing | out of scope: WP11 |
-| §10.2.2 (4023) | draining MUST NOT send any packets | `MaySend` = `False`, `maySend_false_of_draining_or_closed`, `Step.recvDraining`, `Step.recvCloseDraining` |
-| §10.2.2 (4037) | MAY send a single CONNECTION_CLOSE before entering draining; MUST NOT send further packets | `Step.recvCloseActiveReply` (the single packet) and `MaySend` = `False` afterwards |
+| §10.2.2 (4023) | draining MUST NOT send any packets | `MaySend` = `False`, `maySend_false_of_draining_or_closed`, `draining_emits_no_packet`, `Step.recvDraining`, `Step.recvCloseDraining` |
+| §10.2.2 (4037) | MAY send a single CONNECTION_CLOSE before entering draining; MUST NOT send further packets | `Step.recvCloseActiveReply` emitting `Effect.sendFarewellClose` (one packet, code unconstrained) and `MaySend` = `False` afterwards |
+| §10.2.2 (4038) | that packet uses "a NO_ERROR code if appropriate" | `recommendedFarewellReason` (advice; `Step` fixes no code) |
 | §10.2.2 (4044) | MAY enter draining from closing, with the same end time | `Step.recvCloseClosingDrain`, `drain_from_closing_keeps_deadline` |
 | §10.2.3 (4056) | after confirmation, CONNECTION_CLOSE MUST be in a 1-RTT packet | `maySendCloseIn` |
 | §10.2.3 (4060–4079) | MAY/SHOULD send CONNECTION_CLOSE at lower levels before confirmation | `maySendCloseIn confirmed:=false` permits every packet type for 0x1c |
@@ -393,7 +452,8 @@ Assigned text: §10 and §11 (lines 3813–4515) and §19.19 (8125–8192).
 | §11 (4441) | a stateless reset MUST NOT be used by an endpoint that has the state to send a frame | see `no_reset_while_sendable` note |
 | §11.1 (4447) | connection errors MUST be signalled with CONNECTION_CLOSE | `Step.localErrorActive` |
 | §11.1 (4451) | 0x1d for application errors, 0x1c for transport errors | `CloseReason` |
-| §11.1 (4458) | SHOULD be prepared to retransmit CONNECTION_CLOSE on further packets | `Step.recvClosingRespond` with `State.reason` |
+| §11.1 (4458) | SHOULD be prepared to retransmit CONNECTION_CLOSE on further packets | `Step.recvClosingRespond` with `State.reason`; `maySend_stable` shows the repeat stays acceptable |
+| §14.1 (out of range) | a client MUST pad a datagram carrying an Initial packet to 1200 bytes | not modelled here (WP7 owns sizes), but it is why `MaySend` accepts PADDING while closing |
 | §11.1 (4486) | MAY discard an invalid Initial packet instead of erroring | out of scope: detection side |
 | §11.2 (4494–4513) | stream errors, RESET_STREAM MUST only be instigated by the application | out of scope: streams are WP2/WP9 |
 | §19.19 (8125–8160) | CONNECTION_CLOSE frame format and fields | out of scope: wire format (already done); `CloseReason` mirrors the two variants |
@@ -405,11 +465,17 @@ NOTES
 - The spec has no name for the phase before termination begins; `Phase.active`
   is it.  `open` is a Lean keyword, hence the rename.  Its field is "handshake
   confirmed", which §10.2.3 needs.
-- `MaySend` in the closing state is *exactly* the CONNECTION_CLOSE frames, as
-  the named theorem (b) requires.  The text says the endpoint retains "only
-  enough information to generate a packet containing a CONNECTION_CLOSE frame",
-  which strictly read also excludes PADDING; a packet-assembly package that
-  wants to pad a closing packet would have to relax this.
+- `MaySend` in the closing state accepts CONNECTION_CLOSE *and* PADDING.  The
+  text never forbids padding the closing packet, and §14.1 requires a client to
+  pad any datagram carrying an Initial packet to 1200 bytes — which includes an
+  Initial carrying CONNECTION_CLOSE during the handshake (§10.2.3).  That a
+  closing packet must actually *contain* a CONNECTION_CLOSE is a packet-level
+  rule, which `MaySend : State → Frame → Prop` cannot see; it is exported as
+  `closingPacketOk : List Frame → Bool` for WP12.
+- `MaySend` depends on nothing but the phase (`maySend_of_phase_eq`), so a
+  frame that was acceptable stays acceptable for as long as the phase does
+  (`maySend_stable`).  In particular the CONNECTION_CLOSE that §11.1 line 4458
+  tells an endpoint to retransmit is accepted every time it is repeated.
 - The packet-type rules of §10.2.3 and §19.19 cannot live in `MaySend`, whose
   signature is `State → Frame → Prop`.  They are `maySendCloseIn` /
   `appCloseAllowedIn`, with handshake confirmation as an explicit argument
@@ -444,9 +510,14 @@ NOTES
 - `Event.handshakeConfirmed` is not in the assigned list of events but is
   needed to ever reach `Phase.active true`; it carries no other behaviour.
 - §10.2.2 line 4038 says the single farewell packet uses "a NO_ERROR code if
-  appropriate".  `Step.recvCloseActiveReply` fixes the code to NO_ERROR, which
-  is narrower than the text: an endpoint that replies with a different code is
-  rejected by `accepts`.  Widening it would need the code on the event.
+  appropriate", so the text does not determine the code.  The effect
+  `Effect.sendFarewellClose` therefore carries none: it means "one packet
+  containing some CONNECTION_CLOSE frame", and `accepts` cannot reject a
+  conforming implementation over the code it picked.  The NO_ERROR hint lives
+  in `recommendedFarewellReason`.  `Effect.sendClose` does carry a reason, but
+  only where the text fixes one: the code supplied by the `localError` /
+  `appClose` event that closed the connection, and the same code again when
+  that close is retransmitted from `closedWith` (§11.1, line 4458).
 - Both deadlines are tested with `≤`, not `<`: the idle timeout fires at
   `idleStart + effective` and the close period ends at `closeDeadline`.  The
   text says "remains idle for *longer than*" (line 3829), which read literally
