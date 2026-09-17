@@ -46,8 +46,11 @@ structure Addr where
   id : Nat
   deriving DecidableEq, Repr
 
-/-- Time in microseconds.  Always supplied on events; the model never reads a clock. -/
-abbrev Time := Nat
+/-- Time in microseconds.  Always supplied on events; the model never reads a clock.
+
+    A notation rather than an `abbrev`: `omega` only recognises terms whose type
+    is syntactically `Nat`, and deadlines are arithmetic. -/
+notation "Time" => Nat
 
 /-- §2.1: a stream ID is a 62-bit integer; its two low bits give the type.
     Frames carry stream IDs as bare `Nat`s; wrap them with `⟨id⟩`. -/
