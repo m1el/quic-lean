@@ -888,6 +888,11 @@ NOTES
   `stopSending_obliges_reset` below states the consequence that is checkable:
   after a STOP_SENDING in "Ready"/"Send" the endpoint is always permitted to
   send the RESET_STREAM.
+* **STREAM_DATA_BLOCKED reports the current credit.**  §19.13's Maximum Stream
+  Data field is "the offset of the stream at which the blocking occurred", which
+  is read here as exactly the limit the peer last advertised, so `maySendBlocked`
+  requires `limit = maxData`.  A sender that reported a stale limit would be
+  rejected; the template's `streamsBlocked` rule reads §19.14 the same way.
 * **Final size on RESET_STREAM.**  When no final size is fixed yet, `maySendReset`
   requires exactly `finalSize = sent`, reading §4.5's "one higher than the
   offset of the byte with the largest offset sent on the stream" as a
