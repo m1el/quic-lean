@@ -17,3 +17,4 @@ import QuicModel.Spec.Termination
 import QuicModel.Spec.FrameRules
 import QuicModel.Spec.Ack
 import QuicModel.Spec.TransportParams
+import QuicModel.Spec.Stream
