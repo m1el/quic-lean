@@ -110,6 +110,11 @@ inductive Event where
       Stateless Reset Token associated with this connection and remote address.
       The match itself is opaque here (WP4 owns tokens). -/
   | statelessReset (now : Time) (pto : Nat)
+  /-- §12.3, line 4693: "If the packet number for sending reaches 2^62 - 1, the
+      sender MUST close the connection without sending a CONNECTION_CLOSE frame
+      or any further packets".  WP3 owns the detection (`pnExhausted` on the
+      packet-number state); this component owns the consequence. -/
+  | pnExhausted (now : Time) (pto : Nat)
   /-- §4.1.2 of [QUIC-TLS], as used by §10.2.3.  Supplied by WP11. -/
   | handshakeConfirmed (now : Time) (pto : Nat)
   deriving DecidableEq, Repr
@@ -386,6 +391,19 @@ inductive Step : State → Event → Out → Prop
       period and not send any further packets on this connection." -/
   | statelessReset {s now pto} :
       Step s (.statelessReset now pto) (.ok (s.onStatelessReset now pto) [])
+  /-- §12.3, line 4693: "If the packet number for sending reaches 2^62 - 1, the
+      sender MUST close the connection without sending a CONNECTION_CLOSE frame
+      or any further packets; an endpoint MAY send a Stateless Reset
+      (Section 10.3) in response to further packets that it receives."
+      Straight to `closed`: no frame is sent, no closing or draining period is
+      entered, and `closed` is the one phase from which the stateless reset that
+      the second half of the sentence permits is still a permitted outcome
+      (§10.2, line 3954). -/
+  | pnExhausted {s now pto} (hp : s.phase ≠ .closed) :
+      Step s (.pnExhausted now pto) (.ok s.toClosed [.discardState])
+  /-- Nothing left to close. -/
+  | pnExhaustedClosed {s now pto} (hp : s.phase = .closed) :
+      Step s (.pnExhausted now pto) (.ok s [])
   /-- Handshake confirmation, needed by §10.2.3. -/
   | handshakeConfirmed {s now pto} :
       Step s (.handshakeConfirmed now pto) (.ok s.confirm [])
@@ -425,6 +443,8 @@ def outcomes (s : State) : Event → List Out
     | .draining => [.ok s []]
     | .closed => [.ok s [], .ok s [.sendStatelessReset]]
   | .statelessReset now pto => [.ok (s.onStatelessReset now pto) []]
+  | .pnExhausted _ _ =>
+    if s.phase = .closed then [.ok s []] else [.ok s.toClosed [.discardState]]
   | .handshakeConfirmed _ _ => [.ok s.confirm []]
 
 /-! ## 4. The two forms agree -/
@@ -524,6 +544,13 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
         · exact .recvCloseClosedReset hp
     | statelessReset now pto =>
       simp only [outcomes, List.mem_singleton] at h; subst h; exact .statelessReset
+    | pnExhausted now pto =>
+      simp only [outcomes] at h
+      split at h
+      · rename_i hq
+        simp only [List.mem_singleton] at h; subst h; exact .pnExhaustedClosed hq
+      · rename_i hq
+        simp only [List.mem_singleton] at h; subst h; exact .pnExhausted hq
     | handshakeConfirmed now pto =>
       simp only [outcomes, List.mem_singleton] at h; subst h; exact .handshakeConfirmed
   · intro h
@@ -562,6 +589,8 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | recvCloseClosed hp => simp [outcomes, hp]
     | recvCloseClosedReset hp => simp [outcomes, hp]
     | statelessReset => simp [outcomes]
+    | pnExhausted hp => simp [outcomes, hp]
+    | pnExhaustedClosed hp => simp [outcomes, hp]
     | handshakeConfirmed => simp [outcomes]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
@@ -601,6 +630,8 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
   | recvCloseClosed hp => exact hi
   | recvCloseClosedReset hp => exact hi
   | statelessReset => intro c hq; exact absurd hq (onStatelessReset_phase_ne_active _ _ _ _)
+  | pnExhausted _ => intro c hq; simp at hq
+  | pnExhaustedClosed _ => exact hi
   | handshakeConfirmed =>
     intro c hq
     obtain ⟨c', hc⟩ := confirm_active hq

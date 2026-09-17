@@ -45,6 +45,9 @@ namespace Quic.Spec.Termination
   MaySend := MaySend
   maySend := maySend
   maySend_iff := maySend_iff
+  MaySendPacket := MaySendPacket
+  maySendPacket := maySendPacket
+  maySendPacket_iff := maySendPacket_iff
 
 /-! ## 8. Named theorems -/
 
@@ -90,6 +93,8 @@ theorem draining_emits_no_packet {s e s' fx} (hp : s.phase = .draining)
   | recvCloseClosed hp' => exact absurd hp' hncl
   | recvCloseClosedReset hp' => exact absurd hp' hncl
   | statelessReset => simp
+  | pnExhausted _ => simp [Effect.sendsPacket]
+  | pnExhaustedClosed hp' => exact absurd hp' hncl
   | handshakeConfirmed => simp
 
 /-- (b) §10.2.1, line 3961: in the closing state an endpoint retains "only
@@ -144,6 +149,8 @@ theorem phase_forward {s e s' fx} (h : Step s e (.ok s' fx)) :
   | recvCloseClosedReset hp => simp
   | statelessReset =>
     cases hph : s.phase <;> simp [State.onStatelessReset, hph, Phase.rank]
+  | pnExhausted _ => cases hph : s.phase <;> simp [Phase.rank]
+  | pnExhaustedClosed _ => simp
   | handshakeConfirmed =>
     cases hph : s.phase <;> simp [State.confirm, hph, Phase.rank]
 
@@ -175,6 +182,8 @@ theorem confirmed_mono {s e s' fx} (h : Step s e (.ok s' fx))
   | recvCloseClosed hp => simp [hc]
   | recvCloseClosedReset hp => simp [hc]
   | statelessReset => exact onStatelessReset_phase_ne_active _ _ _ _
+  | pnExhausted _ => simp
+  | pnExhaustedClosed _ => simp [hc]
   | handshakeConfirmed => simp [State.confirm, hc]
 
 /-- (d) §10.2, line 3939: a tick at or after the recorded end of the closing or
@@ -280,6 +289,117 @@ theorem drain_from_closing_keeps_deadline (s : State) (now : Time) (pto : Nat)
     (s.toDraining now pto r).closeDeadline = s.closeDeadline := by
   simp [State.toDraining, hp]
 
+/-! ### Packet number exhaustion (§12.3, line 4693) -/
+
+/-- `closed` absorbs: no permitted step leaves it. -/
+theorem closed_absorbing {s e s' fx} (hp : s.phase = .closed)
+    (h : Step s e (.ok s' fx)) : s'.phase = .closed := by
+  have hne : ∀ c : Bool, s.phase ≠ .active c := by rw [hp]; simp
+  have hnc : s.phase ≠ .closing := by rw [hp]; simp
+  have hnd : s.phase ≠ .draining := by rw [hp]; simp
+  cases h with
+  | recvActive hp' => exact absurd hp' (hne _)
+  | recvClosingRespond hp' => exact absurd hp' hnc
+  | recvClosingSilent hp' => exact absurd hp' hnc
+  | recvDraining hp' => exact absurd hp' hnd
+  | recvClosed _ => exact hp
+  | recvClosedReset _ => exact hp
+  | sentAckEliciting => simpa using hp
+  | tickExpire _ => rfl
+  | tickStay _ => exact hp
+  | tickEndEarly _ _ hc => simp [State.inClosePeriod, hp] at hc
+  | localErrorActive hp' => exact absurd hp' (hne _)
+  | localErrorLate _ => exact hp
+  | appCloseActive hp' => exact absurd hp' (hne _)
+  | appCloseLate _ => exact hp
+  | recvCloseActive hp' => exact absurd hp' (hne _)
+  | recvCloseActiveReply hp' => exact absurd hp' (hne _)
+  | recvCloseClosingDrain hp' => exact absurd hp' hnc
+  | recvCloseClosingRespond hp' => exact absurd hp' hnc
+  | recvCloseClosingSilent hp' => exact absurd hp' hnc
+  | recvCloseDraining hp' => exact absurd hp' hnd
+  | recvCloseClosed _ => exact hp
+  | recvCloseClosedReset _ => exact hp
+  | statelessReset => simp [State.onStatelessReset, hp]
+  | pnExhausted hp' => exact absurd hp hp'
+  | pnExhaustedClosed _ => exact hp
+  | handshakeConfirmed => simp [State.confirm, hp]
+
+/-- §10.2, line 3954 / §12.3, line 4696: from `closed` the only thing that may
+    still go on the wire is a stateless reset. -/
+theorem closed_emits_only_statelessReset {s e s' fx} (hp : s.phase = .closed)
+    (h : Step s e (.ok s' fx)) : ∀ x ∈ fx, x.sendsPacket = true → x = .sendStatelessReset := by
+  have hne : ∀ c : Bool, s.phase ≠ .active c := by rw [hp]; simp
+  have hnc : s.phase ≠ .closing := by rw [hp]; simp
+  have hnd : s.phase ≠ .draining := by rw [hp]; simp
+  cases h with
+  | recvActive hp' => exact absurd hp' (hne _)
+  | recvClosingRespond hp' => exact absurd hp' hnc
+  | recvClosingSilent hp' => exact absurd hp' hnc
+  | recvDraining hp' => exact absurd hp' hnd
+  | recvClosed _ => simp
+  | recvClosedReset _ => simp
+  | sentAckEliciting => simp
+  | tickExpire _ => simp [Effect.sendsPacket]
+  | tickStay _ => simp
+  | tickEndEarly _ _ hc => simp [State.inClosePeriod, hp] at hc
+  | localErrorActive hp' => exact absurd hp' (hne _)
+  | localErrorLate _ => simp
+  | appCloseActive hp' => exact absurd hp' (hne _)
+  | appCloseLate _ => simp
+  | recvCloseActive hp' => exact absurd hp' (hne _)
+  | recvCloseActiveReply hp' => exact absurd hp' (hne _)
+  | recvCloseClosingDrain hp' => exact absurd hp' hnc
+  | recvCloseClosingRespond hp' => exact absurd hp' hnc
+  | recvCloseClosingSilent hp' => exact absurd hp' hnc
+  | recvCloseDraining hp' => exact absurd hp' hnd
+  | recvCloseClosed _ => simp
+  | recvCloseClosedReset _ => simp
+  | statelessReset => simp
+  | pnExhausted hp' => exact absurd hp hp'
+  | pnExhaustedClosed _ => simp
+  | handshakeConfirmed => simp
+
+/-- Every state reachable from a `closed` one is `closed`. -/
+theorem reachable_closed {s₀ s : State} (hp : s₀.phase = .closed)
+    (h : component.Reachable s₀ s) : s.phase = .closed :=
+  component.reachable_induction (motive := fun x => x.phase = .closed) hp
+    (fun _ hstep hmot => closed_absorbing hmot hstep) h
+
+/-- §12.3, line 4693: "If the packet number for sending reaches 2^62 - 1, the
+    sender MUST close the connection without sending a CONNECTION_CLOSE frame or
+    any further packets".  The step itself sends nothing and lands in `closed`;
+    `MaySend` is then `False` for every frame. -/
+theorem pnExhausted_closes_silently {s : State} {now : Time} {pto : Nat}
+    {s' : State} {fx : List Effect} (h : Step s (.pnExhausted now pto) (.ok s' fx)) :
+    s'.phase = .closed ∧ (∀ x ∈ fx, x.sendsPacket = false) ∧ ∀ f : Frame, ¬ MaySend s' f := by
+  cases h with
+  | pnExhausted _ =>
+    exact ⟨rfl, by simp [Effect.sendsPacket], fun f =>
+      maySend_false_of_draining_or_closed _ f (.inr rfl)⟩
+  | pnExhaustedClosed hp =>
+    exact ⟨hp, by simp, fun f => maySend_false_of_draining_or_closed _ f (.inr hp)⟩
+
+/-- §12.3, line 4695: "... or any further packets; an endpoint MAY send a
+    Stateless Reset (Section 10.3) in response to further packets that it
+    receives."  After packet-number exhaustion, no permitted step — now or from
+    any state reachable afterwards — puts anything on the wire except a
+    stateless reset. -/
+theorem pnExhausted_no_further_packets {s : State} {now : Time} {pto : Nat}
+    {s₁ : State} {fx₁ : List Effect} (h : Step s (.pnExhausted now pto) (.ok s₁ fx₁))
+    {s₂ : State} (hr : component.Reachable s₁ s₂)
+    {e : Event} {s₃ : State} {fx₃ : List Effect} (h₃ : Step s₂ e (.ok s₃ fx₃)) :
+    ∀ x ∈ fx₃, x.sendsPacket = true → x = .sendStatelessReset :=
+  closed_emits_only_statelessReset (reachable_closed (pnExhausted_closes_silently h).1 hr) h₃
+
+/-- … and no packet at all may be assembled after exhaustion. -/
+theorem pnExhausted_no_packet_may_be_sent {s : State} {now : Time} {pto : Nat}
+    {s₁ : State} {fx₁ : List Effect} (h : Step s (.pnExhausted now pto) (.ok s₁ fx₁))
+    {s₂ : State} (hr : component.Reachable s₁ s₂) (p : OutPacket) :
+    ¬ MaySendPacket s₂ p := by
+  have := reachable_closed (pnExhausted_closes_silently h).1 hr
+  simp [MaySendPacket, this]
+
 /-! ## 9. Examples (scenarios from the text) -/
 
 private def s0 : State :=
@@ -354,6 +474,22 @@ example : closingPacketOk [.connectionClose 0 (some 0) ByteArray.empty, .padding
   decide
 example : closingPacketOk [.padding 1200] = false := by decide
 example : closingPacketOk [.connectionClose 0 (some 0) ByteArray.empty, .ping] = false := by decide
+-- the same rule as the component's packet-level predicate: a closing Initial
+-- padded to 1200 bytes is fine, an unpadded packet with no close is not
+example : component.maySendPacket sClosing
+    { ptype := .initial,
+      frames := [.connectionClose 0 (some 0) ByteArray.empty, .padding 1100] } = true := by decide
+example : component.maySendPacket sClosing
+    { ptype := .initial, frames := [.padding 1200] } = false := by decide
+-- §19.19: the application variant 0x1d may not travel in an Initial packet …
+example : component.maySendPacket s0
+    { ptype := .initial, frames := [.connectionClose 7 none ByteArray.empty] } = false := by decide
+-- … but may in a 1-RTT packet
+example : component.maySendPacket s0
+    { ptype := .oneRtt, frames := [.connectionClose 7 none ByteArray.empty] } = true := by decide
+-- §10.2.2: while draining not even an empty packet may be sent
+example : component.maySendPacket { sClosing with phase := .draining }
+    { ptype := .oneRtt, frames := [] } = false := by decide
 
 -- §10.3.1: a detected stateless reset drains without sending anything.
 example : component.step s0 (.statelessReset 2000 400) =
@@ -367,6 +503,21 @@ example : component.accepts s0 (.recvClose 2000 400 (.application 7))
     (.ok { s0 with phase := .draining, closeDeadline := 2000 + 3 * 400,
                    closedWith := some (.application 7) }
           [.sendFarewellClose]) = true := by decide
+
+-- §12.3, line 4693: the sending packet number reaches 2^62 - 1.  The connection
+-- closes at once, with no CONNECTION_CLOSE frame and no further packets …
+example : component.step s0 (.pnExhausted 5000 400) =
+    .ok { s0 with phase := .closed } [.discardState] := by decide
+example : component.step sClosing (.pnExhausted 5000 400) =
+    .ok { sClosing with phase := .closed } [.discardState] := by decide
+example : component.maySend { s0 with phase := .closed } .ping = false := by decide
+example : component.maySend { s0 with phase := .closed }
+    (.connectionClose 0 (some 0) ByteArray.empty) = false := by decide
+-- … but the MAY of line 4696 keeps the stateless reset available afterwards.
+example : component.accepts { s0 with phase := .closed } (.recvPacket 6000 400)
+    (.ok { s0 with phase := .closed } [.sendStatelessReset]) = true := by decide
+example : component.accepts { s0 with phase := .closed } (.recvPacket 6000 400)
+    (.ok { s0 with phase := .closed } [.sendClose (.transport .noError 0)]) = false := by decide
 
 -- §10.3 / §10.3.3: stateless reset sizes.
 example : maySendStatelessReset 1200 43 = true := by decide
@@ -393,7 +544,8 @@ example : component.track sClosing (.recvPacket 1500 400)
 
 /-! ## 10. Coverage and notes
 
-Assigned text: §10 and §11 (lines 3813–4515) and §19.19 (8125–8192).
+Assigned text: §10 and §11 (lines 3813–4515) and §19.19 (8125–8192), plus the
+one sentence of §12.3 (line 4693) whose consequence is a connection close.
 
 | Text (line) | Sentence | Encoded as |
 |---|---|---|
@@ -458,7 +610,10 @@ Assigned text: §10 and §11 (lines 3813–4515) and §19.19 (8125–8192).
 | §11.2 (4494–4513) | stream errors, RESET_STREAM MUST only be instigated by the application | out of scope: streams are WP2/WP9 |
 | §19.19 (8125–8160) | CONNECTION_CLOSE frame format and fields | out of scope: wire format (already done); `CloseReason` mirrors the two variants |
 | §19.19 (8134) | open streams are implicitly closed | out of scope: WP2/WP9 |
-| §19.19 (8186) | 0x1d can only be sent in 0-RTT or 1-RTT packets | `appCloseAllowedIn`, `maySendCloseIn` |
+| §19.19 (8186) | 0x1d can only be sent in 0-RTT or 1-RTT packets | `appCloseFrameOk`, and through it `MaySendPacket` and `maySendCloseIn` |
+| §12.3 (4692) | MUST NOT reuse a packet number within a packet number space | out of scope: WP3 owns packet numbers |
+| §12.3 (4693) | on reaching 2^62 - 1 the sender MUST close without a CONNECTION_CLOSE frame or any further packets | `Event.pnExhausted`, `Step.pnExhausted`, `pnExhausted_closes_silently`, `pnExhausted_no_further_packets`, `pnExhausted_no_packet_may_be_sent` (WP3 detects; this package is the consequence) |
+| §12.3 (4696) | MAY send a Stateless Reset in response to further packets | `Step.recvClosedReset` / `Step.recvCloseClosedReset`, reachable because exhaustion lands in `closed`; `closed_emits_only_statelessReset` |
 
 NOTES
 
@@ -477,10 +632,30 @@ NOTES
   (`maySend_stable`).  In particular the CONNECTION_CLOSE that §11.1 line 4458
   tells an endpoint to retransmit is accepted every time it is repeated.
 - The packet-type rules of §10.2.3 and §19.19 cannot live in `MaySend`, whose
-  signature is `State → Frame → Prop`.  They are `maySendCloseIn` /
-  `appCloseAllowedIn`, with handshake confirmation as an explicit argument
-  because the `confirmed` bit is only carried while the phase is `active` (once
-  closing, the phase no longer records it).  WP12 must supply it.
+  signature is `State → Frame → Prop`.  The half that needs no handshake state —
+  §19.19 line 8186, the application variant 0x1d — is `appCloseFrameOk`, and is
+  part of `Component.MaySendPacket` together with `closingPacketOk` and the
+  "no packets at all while draining or closed" rule of §10.2.2 line 4023.  The
+  other half, §10.2.3 line 4056 ("after the handshake is confirmed ... MUST send
+  any CONNECTION_CLOSE frames in a 1-RTT packet"), stays free-standing as
+  `maySendCloseIn`, because the `confirmed` bit is only carried while the phase
+  is `active`: once closing, the phase no longer records it, so WP12 must supply
+  it.
+- `Component.MaySendDatagram` is left at its default.  `maySendStatelessReset`
+  is about a datagram that is not made of QUIC packets at all (§10.3, line 4174:
+  "A stateless reset uses an entire UDP datagram, starting with the first two
+  bits of the packet header"), and it relates the reset's size to the size of
+  the datagram that *triggered* it, which `OutDatagram` does not carry.  It
+  stays free-standing for WP12.
+- Packet-number exhaustion (§12.3, line 4693) lands directly in `closed`, not in
+  `closing` or `draining`.  `closing` is out because the text forbids sending a
+  CONNECTION_CLOSE frame at all, which is the only thing the closing state is
+  for.  `draining` is out because §10.2.2 line 4023 makes it "MUST NOT send any
+  packets", which would forbid the stateless reset that the second half of the
+  same §12.3 sentence explicitly permits.  `closed` is the phase where `MaySend`
+  is `False` for every frame *and* §10.2 line 3954 still permits "a stateless
+  reset in response to any further incoming packets" — exactly the pair of
+  properties §12.3 asks for.  The event is a no-op once already `closed`.
 - "A packet received while closing": the three permitted alternatives are
   enumerated as `Step.recvClosingRespond` (answer with CONNECTION_CLOSE — the
   preferred outcome, and what `component.step` produces), `Step.recvClosingSilent`

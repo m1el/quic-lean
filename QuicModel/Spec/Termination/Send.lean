@@ -87,12 +87,13 @@ theorem maySend_of_closingPacketOk {s : State} (hp : s.phase = .closing)
   simp only [closingPacketOk, Bool.and_eq_true, List.all_eq_true] at h
   simpa [maySend, hp] using h.2 f hf
 
-/-! ### 6.2 Packet level (§10.2.3, §19.19)
+/-! ### 6.2 Packet level (§10.2.1, §10.2.2, §10.2.3, §19.19)
 
-The `Component` shape has no packet type in `MaySend`, so the rules that depend
-on the packet a CONNECTION_CLOSE frame travels in are stated here as separate
-predicates for WP12 to conjoin.  Handshake confirmation is taken as an explicit
-argument because it is only tracked while the connection is `active`. -/
+What cannot be said frame by frame: which packet a CONNECTION_CLOSE may travel
+in, and what a packet sent from the closing state must contain.  These become
+`Component.MaySendPacket`.  Handshake confirmation is the one rule that stays
+free-standing, because it is only tracked while the connection is `active`
+(once closing, the phase no longer records it) — see `maySendCloseIn`. -/
 
 /-- §20.1 APPLICATION_ERROR. -/
 def applicationErrorCode : Nat := TransportError.applicationError.code
@@ -114,15 +115,28 @@ def appCloseAllowedIn : PacketType → Bool
   | .zeroRtt | .oneRtt => true
   | _ => false
 
-/-- §10.2.3, line 4056: "After the handshake is confirmed ..., an endpoint MUST
-    send any CONNECTION_CLOSE frames in a 1-RTT packet."  Line 4060: "However,
-    prior to confirming the handshake, ... another CONNECTION_CLOSE frame MAY be
-    sent in a packet that uses a lower packet protection level." -/
-def maySendCloseIn (confirmed : Bool) (pt : PacketType) : Frame → Bool
-  | .connectionClose _ ft _ =>
-    (match ft with | none => appCloseAllowedIn pt | some _ => true) &&
-      (if confirmed then decide (pt = PacketType.oneRtt) else true)
+/-- One frame against the packet type it would travel in: §19.19 line 8186 and
+    §10.2.3 line 4084, the rule for the application variant 0x1d.  This is the
+    half of `maySendCloseIn` that needs no handshake state, so it is the half
+    that goes into `MaySendPacket`. -/
+def appCloseFrameOk (pt : PacketType) : Frame → Bool
+  | .connectionClose _ none _ => appCloseAllowedIn pt
   | _ => true
+
+/-- §10.2.3, line 4056: "After the handshake is confirmed (see Section 4.1.2 of
+    [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames in a 1-RTT
+    packet."  Line 4060: "However, prior to confirming the handshake, ... another
+    CONNECTION_CLOSE frame MAY be sent in a packet that uses a lower packet
+    protection level." -/
+def closeAfterConfirmationOk (confirmed : Bool) (pt : PacketType) : Frame → Bool
+  | .connectionClose _ _ _ => if confirmed then decide (pt = PacketType.oneRtt) else true
+  | _ => true
+
+/-- Both packet-type rules for a CONNECTION_CLOSE frame.  Stays free-standing
+    (it is not part of `MaySendPacket`) because `confirmed` is not in the state
+    once the phase leaves `active`; WP12 supplies it. -/
+def maySendCloseIn (confirmed : Bool) (pt : PacketType) (f : Frame) : Bool :=
+  appCloseFrameOk pt f && closeAfterConfirmationOk confirmed pt f
 
 /-- The conversion of §10.2.3 always produces a frame that a handshake packet
     may carry. -/
@@ -130,10 +144,55 @@ theorem maySendCloseIn_convert (pt : PacketType) (f : Frame) :
     maySendCloseIn false pt (convertCloseForHandshake f) = true := by
   cases f
   case connectionClose err ft reason =>
-    cases ft <;> simp [convertCloseForHandshake, maySendCloseIn]
-  all_goals simp [convertCloseForHandshake, maySendCloseIn]
+    cases ft <;>
+      simp [convertCloseForHandshake, maySendCloseIn, appCloseFrameOk, closeAfterConfirmationOk]
+  all_goals
+    simp [convertCloseForHandshake, maySendCloseIn, appCloseFrameOk, closeAfterConfirmationOk]
 
-/-! ### 6.3 Datagram level: sending a stateless reset (§10.3, §10.3.3) -/
+/-- `Component.MaySendPacket`: the packet-level half of the send side.
+
+* Every frame must be legal in this packet type (§19.19, line 8186: "The
+  application-specific variant of CONNECTION_CLOSE (type 0x1d) can only be sent
+  using 0-RTT or 1-RTT packets").
+* §10.2.1, line 3965: "An endpoint in the closing state sends a packet
+  containing a CONNECTION_CLOSE frame in response to any incoming packet that it
+  attributes to the connection" — a packet sent while closing must actually
+  carry one, which `MaySend` cannot see.
+* §10.2.2, line 4023: "an endpoint in the draining state MUST NOT send any
+  packets", and §10.2 line 3953 leaves nothing to send with once the state is
+  discarded.  This is not a repetition of `MaySend`: it also rules out a packet
+  with no frames at all, which `MaySend` has nothing to say about. -/
+def MaySendPacket (s : State) (p : OutPacket) : Prop :=
+  (∀ f ∈ p.frames, appCloseFrameOk p.ptype f = true) ∧
+    (match s.phase with
+     | .active _ => True
+     | .closing => closingPacketOk p.frames = true
+     | .draining => False
+     | .closed => False)
+
+def maySendPacket (s : State) (p : OutPacket) : Bool :=
+  p.frames.all (appCloseFrameOk p.ptype) &&
+    (match s.phase with
+     | .active _ => true
+     | .closing => closingPacketOk p.frames
+     | .draining => false
+     | .closed => false)
+
+theorem maySendPacket_iff (s : State) (p : OutPacket) :
+    maySendPacket s p = true ↔ MaySendPacket s p := by
+  cases hp : s.phase <;>
+    simp only [maySendPacket, MaySendPacket, hp, Bool.and_eq_true, List.all_eq_true] <;>
+    simp
+
+/-! ### 6.3 Datagram level: sending a stateless reset (§10.3, §10.3.3)
+
+`Component.MaySendDatagram` is left at its default here.  A stateless reset is
+not built out of QUIC packets — §10.3, line 4174: "A stateless reset uses an
+entire UDP datagram, starting with the first two bits of the packet header",
+and its contents are unpredictable bits plus a token — so it has no
+`OutDatagram.packets` to describe, and the rule below relates its size to the
+size of the datagram that triggered it, which `OutDatagram` does not carry.
+`maySendStatelessReset` therefore stays free-standing for WP12. -/
 
 /-- §10.3, line 4220: "Endpoints MUST discard packets that are too small to be
     valid QUIC packets ... short header packets that are smaller than 21 bytes
