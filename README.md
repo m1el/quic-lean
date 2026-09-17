@@ -18,6 +18,8 @@ by both and the results compared.
 | `QuicModel/Theorems.lean` | General theorems about the same functions the harness calls. |
 | `harness/frame_diff.c` | `ngtcp2_frame_decoder_decode` vs `Quic.decodeFrames`; then the model re-encodes and both the model and ngtcp2 must decode that to the same frames. |
 | `harness/pkt_diff.c` | Header decoders, `ngtcp2_pkt_adjust_pkt_num`, and writer round trip (`ngtcp2_ppe` → `Quic.decodePacket`). |
+| `harness/conn_trace.c` | Drives a whole `ngtcp2_conn` (stub crypto, no TLS) from a script and records an observable text trace: frames in, callbacks fired, return code and QUIC error code, frames out, clock and expiry. WP8; the Lean side joins it in WP13. |
+| `harness/scripts/` | Hand-written scenarios for `conn_trace --script`, with the traces they produce under `expected/` and `run.sh` to replay and diff them. |
 | `FINDINGS.md` | What the comparison showed. |
 | `PLAN.md` | Plan for formalizing the rest of the transport spec. |
 | `spec/` | The draft text the model is written against. |
@@ -55,7 +57,7 @@ where the tag sits.
 ```sh
 export NGTCP2=../ngtcp2            # default; an ngtcp2 checkout
 ./build_ngtcp2.sh                  # once: libngtcp2 with ASan + libFuzzer coverage, asserts on
-./build_harness.sh frame_diff pkt_diff
+./build_harness.sh frame_diff pkt_diff conn_trace
 
 export ASAN_OPTIONS=detect_leaks=0 DIFF_OUT=out/artifacts
 mkdir -p out/artifacts
@@ -63,6 +65,11 @@ mkdir -p out/artifacts
 ./out/frame_diff -runs=0 corpus/frame                # replay only
 DIFF_SHOW=1 ./out/frame_diff some_input              # show both decodings
 lake exe quicmodel some_input                        # model only, verbose
+
+./out/conn_trace --script harness/scripts/01-stream-in-order.txt   # one scenario
+./harness/scripts/run.sh                             # replay all, diff against expected/
+TRACE_SHOW=1 ./out/conn_trace some_input             # show the trace for a fuzz input
+./out/conn_trace corpus/conn_trace -max_total_time=300
 ```
 
 A mismatch prints both renderings, saves the input under `$DIFF_OUT`, and aborts.
