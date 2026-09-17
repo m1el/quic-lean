@@ -49,6 +49,11 @@ worktrees.
 - `MaySend` must never be stricter than the text ("has no effect" is not "must
   not be sent"), and must accept an exact repeat of a frame it accepted earlier:
   frames are idempotent (§12.4) and are retransmitted after loss (§13.3).
+- Declare components as `@[reducible] def component : Component where …`
+  (see the template) so `decide` works on `component.track`/`trackSet` results.
+- Rules about whole packets or datagrams go in the optional `MaySendPacket` /
+  `MaySendDatagram` fields of `Component` (over `Spec.OutPacket` /
+  `Spec.OutDatagram`), not in free-standing functions.
 - Scratch files (axiom checks, experiments) go under `out/` inside your own
   worktree, never in a shared temp directory: other agents run in parallel.
 - Where the text is ambiguous, choose the reading, encode it, and record it in

@@ -24,6 +24,9 @@ structure Component where
   MaySend  : State → Frame → Prop              -- send side; True for frames not governed
   maySend  : State → Frame → Bool
   maySend_iff : maySend s f = true ↔ MaySend s f
+  -- optional, default "anything": rules about whole packets / datagrams
+  MaySendPacket   : State → OutPacket → Prop     (+ maySendPacket, _iff)
+  MaySendDatagram : State → OutDatagram → Prop   (+ maySendDatagram, _iff)
 
 inductive Outcome σ ε | ok (s : σ) (effects : List ε) | error (code : TransportError) | drop
 ```
@@ -36,7 +39,11 @@ inductive Outcome σ ε | ok (s : σ) (effects : List ε) | error (code : Transp
 - `C.track s e obs : Option State` — follow an implementation whose state is not
   visible, from what it observably did (`Obs` = effects, error code, or drop);
   `track_sound`, `track_complete`. This is what the ngtcp2 harness calls.
-- `C.Reachable`, `inv_of_reachable`.
+- `C.trackAll` / `C.trackSet s-list e pattern` — the same when observations do
+  not determine the state (ngtcp2 cannot tell `ok []` from `drop`): follow the
+  set of candidate states; a violation is the set becoming empty.
+  `mem_trackSet` states soundness and completeness.
+- `C.Reachable`, `reachable_induction`, `inv_of_reachable`.
 
 Why a list of outcomes: receive-side looseness in QUIC is always a finite choice
 (one of two error codes; ignore or reject), so enumerating it gives the

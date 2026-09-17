@@ -164,6 +164,34 @@ def Outcome.next (s : σ) : Outcome σ ε → σ
   | .ok s' _ => s'
   | _ => s
 
+/-! ### What gets sent
+
+Frames travel in packets and packets in datagrams; some rules of the text are
+about those larger units (a closing packet must contain a CONNECTION_CLOSE; an
+Initial datagram must be at least 1200 bytes; at most three times the bytes
+received may be sent to an unvalidated address). -/
+
+/-- A packet about to be sent, as far as the rules of the text can see it. -/
+structure OutPacket where
+  ptype : PacketType
+  frames : List Frame
+  deriving DecidableEq
+
+/-- A UDP datagram about to be sent: its payload size and the packets coalesced
+    in it. -/
+structure OutDatagram where
+  size : Nat
+  packets : List OutPacket
+  deriving DecidableEq
+
+/-- The usual pattern for an API that cannot tell "processed, nothing visible"
+    from "discarded": an observed `ok []` also matches `drop`. -/
+def Obs.matchesLoosely [DecidableEq ε] (seen : Obs ε) (o : Obs ε) : Bool :=
+  match seen, o with
+  | .ok [], .drop => true
+  | .drop, .ok [] => true
+  | a, b => decide (a = b)
+
 /-! ### The shape of a component -/
 
 /-- One part of the transport, specified twice and proved to agree.
@@ -191,6 +219,18 @@ structure Component where
   MaySend : State → Frame → Prop
   maySend : State → Frame → Bool
   maySend_iff : ∀ s f, maySend s f = true ↔ MaySend s f
+  /-- Packet-level send rules, for what cannot be said frame by frame.  Optional:
+      the default permits everything.  Must not repeat `MaySend`: the endpoint
+      checks every frame with `MaySend` *and* the packet with this. -/
+  MaySendPacket : State → OutPacket → Prop := fun _ _ => True
+  maySendPacket : State → OutPacket → Bool := fun _ _ => true
+  maySendPacket_iff : ∀ s p, maySendPacket s p = true ↔ MaySendPacket s p := by
+    intros; simp
+  /-- Datagram-level send rules (sizes, amplification).  Optional, as above. -/
+  MaySendDatagram : State → OutDatagram → Prop := fun _ _ => True
+  maySendDatagram : State → OutDatagram → Bool := fun _ _ => true
+  maySendDatagram_iff : ∀ s d, maySendDatagram s d = true ↔ MaySendDatagram s d := by
+    intros; simp
 
 namespace Component
 variable (C : Component)
@@ -233,6 +273,41 @@ theorem track_complete {s : C.State} {e : C.Event} {o : Outcome C.State C.Effect
   simp only [track, Option.isSome_map]
   rw [List.find?_isSome]
   exact ⟨o, hm, by simp⟩
+
+/-! #### Following an implementation through observations that do not
+determine the state
+
+An implementation's API may not distinguish all outcomes: ngtcp2 returns 0 both
+for a packet it processed without visible effect and for one it discarded, so
+`.ok s' []` and `.drop` look alike.  The caller therefore supplies a *pattern*
+(which observations are compatible with what it saw) and follows the set of all
+states the spec allows.  A violation is when that set becomes empty. -/
+
+/-- Every state the spec permits after an outcome whose observation matches. -/
+def trackAll (s : C.State) (e : C.Event) (pat : Obs C.Effect → Bool) : List C.State :=
+  ((C.outcomes s e).filter (fun o => pat o.obs)).map (·.next s)
+
+/-- One step of set tracking: from any of the candidate states. -/
+def trackSet (ss : List C.State) (e : C.Event) (pat : Obs C.Effect → Bool) : List C.State :=
+  (ss.flatMap (fun s => C.trackAll s e pat)).eraseDups
+
+theorem mem_trackAll {s s' : C.State} {e : C.Event} {pat : Obs C.Effect → Bool} :
+    s' ∈ C.trackAll s e pat ↔ ∃ o, C.Step s e o ∧ pat o.obs = true ∧ o.next s = s' := by
+  simp only [trackAll, List.mem_map, List.mem_filter]
+  constructor
+  · rintro ⟨o, ⟨hm, hp⟩, rfl⟩
+    exact ⟨o, (C.outcomes_iff s e o).mp hm, hp, rfl⟩
+  · rintro ⟨o, hs, hp, rfl⟩
+    exact ⟨o, ⟨(C.outcomes_iff s e o).mpr hs, hp⟩, rfl⟩
+
+/-- Soundness and completeness of set tracking: the candidates after an
+    observation are exactly the spec-permitted successors of the candidates
+    before it. -/
+theorem mem_trackSet {ss : List C.State} {s' : C.State} {e : C.Event}
+    {pat : Obs C.Effect → Bool} :
+    s' ∈ C.trackSet ss e pat ↔
+      ∃ s ∈ ss, ∃ o, C.Step s e o ∧ pat o.obs = true ∧ o.next s = s' := by
+  simp only [trackSet, List.mem_eraseDups, List.mem_flatMap, mem_trackAll]
 
 /-- States reachable from `s₀` by permitted steps. -/
 inductive Reachable (s₀ : C.State) : C.State → Prop

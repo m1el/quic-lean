@@ -32,7 +32,7 @@ namespace Quic.Spec.Termination
 
 /-! ## 7. The component -/
 
-def component : Component where
+@[reducible] def component : Component where
   State := State
   Event := Event
   Effect := Effect

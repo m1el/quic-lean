@@ -278,7 +278,7 @@ theorem maySendVn_iff (s : State) (e : Event) (vn : Vn) :
 
 /-! ### 7. The component -/
 
-def component : Component where
+@[reducible] def component : Component where
   State := State
   Event := Event
   Effect := Effect
@@ -661,7 +661,7 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
 
 /-! ### 7. The component -/
 
-def component : Component where
+@[reducible] def component : Component where
   State := State
   Event := Event
   Effect := Effect

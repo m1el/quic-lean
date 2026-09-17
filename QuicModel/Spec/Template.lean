@@ -185,9 +185,14 @@ def maySend (s : State) : Frame → Bool
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
   cases f <;> simp [maySend, MaySend]
 
-/-! ## 7. The component -/
+/-! ## 7. The component
 
-def component : Component where
+`@[reducible]`, so that `component.State` unfolds to `State` during instance
+search; without it `decide` cannot compare `component.track … = some s`.
+Packet- and datagram-level send rules (`MaySendPacket`, `MaySendDatagram`) are
+optional fields defaulting to "anything"; this component has none. -/
+
+@[reducible] def component : Component where
   State := State
   Event := Event
   Effect := Effect
@@ -246,6 +251,11 @@ example : component.accepts s0 (.recvStreamsBlocked .bidi (2 ^ 60 + 1)) (.ok s0 
 example : component.track s0 (.recvMaxStreams .bidi 7) (.ok [.streamsAvailable .bidi 7]) =
     some { s0 with peerMaxBidi := 7 } := by decide
 example : component.maySend s0 (.maxStreams .bidi 9) = false := by decide  -- would lower our limit
+-- set tracking, for APIs whose observations do not determine the state:
+-- seeing only "some error" keeps the state; seeing something the spec forbids empties the set
+example : component.trackSet [s0] (.recvStreamsBlocked .bidi (2 ^ 60 + 1))
+    (fun o => match o with | .error _ => true | _ => false) = [s0] := by decide
+example : component.trackSet [s0] (.recvMaxStreams .uni 9) (Obs.ok []).matchesLoosely = [] := by decide
 
 /-! ## 10. Coverage and notes
 
