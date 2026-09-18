@@ -585,7 +585,7 @@ issued to us.
 | §19.15 (7998) | MUST ignore a Retire Prior To that does not increase the largest seen | `Nat.max` in `applyNcid`, `rpt_mono` |
 | §19.15 (8013) | a sequence number below a seen Retire Prior To MUST be retired, unless already done | `staleOf` over `entriesAfter` |
 | §19.16 (8046) | sequence number greater than any sent → PROTOCOL_VIOLATION | `Local.Step.retireUnknown` |
-| §19.16 (8050) | MUST NOT retire the packet's own DCID; peer MAY treat as PROTOCOL_VIOLATION | `Local.Step.retireSelf`; the send-side MUST NOT needs the packet being assembled, which is WP12 |
+| §19.16 (8050) | MUST NOT retire the packet's own DCID; peer MAY treat as PROTOCOL_VIOLATION | `Local.Step.retireSelf`; the send-side MUST NOT needs the packet being assembled, which is WP12: `Endpoint.RetireNotSelf` |
 | §19.16 (8055) | cannot send when the peer's CID is zero-length; receiving one when we issue zero-length CIDs → PROTOCOL_VIOLATION | `MaySend` here, `Local.Step.retireZeroLen` there |
 | §12.4 (4936) | "All frames are idempotent in this version of QUIC" | send side: the retransmission disjunct of `MaySend` here and `Local.isReNewCid`; receive side: `entriesAfter` (a repeated NEW_CONNECTION_ID is a no-op) and `Local.applyRetire` (a repeated RETIRE_CONNECTION_ID is a no-op) |
 

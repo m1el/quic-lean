@@ -7,7 +7,8 @@ import QuicModel.Spec.Endpoint.Events
 
   * `MaySend s f` — the frame-level rules (`Component.MaySend`);
   * `MaySendPacket s p` — every component's `MaySendPacket`, plus `FrameRules`'
-    packet-type table, plus `MaySend` applied to every frame in the packet;
+    packet-type table, plus `MaySend` applied to every frame in the packet
+    and `StreamTable.MaySendAll` to all of them at once;
   * `MaySendDatagram s d` — every component's `MaySendDatagram`, plus
     `MaySendPacket` for every packet coalesced in it, plus the three rules the
     packages could not state from one state alone and left here:
@@ -18,6 +19,16 @@ import QuicModel.Spec.Endpoint.Events
     well as `dest` (`PathValidation` NOTES 11), and §7.2's connection ID fields
     (`Handshake.MaySendDatagramOn`), whose line 2380 needs WP4's issued
     connection IDs alongside WP11's state.
+
+  Two rules belong to no single frame and no single component, so they are
+  stated here over the whole unit being sent (third audit, D34-5 to D34-7):
+  `StreamTable.MaySendAll`, §4.1 line 1330's connection credit for all the
+  frames of a packet, and of a datagram, *together*; and `DcidOk`, which looks
+  the datagram's Destination Connection ID up in WP4's `ConnIds.Remote` and
+  asks that it is not retired (§5.1.2, line 1811) and that WP10's history
+  allows it on this path (§9.5, lines 3603 and 3608).  `RetireNotSelf` uses the
+  same lookup for §19.16 line 8050: no RETIRE_CONNECTION_ID for the connection
+  ID the datagram itself carries (`TRIAGE.md` `WP13-4`).
 
   Three more rules are about things that are not datagrams of QUIC packets at
   all, so they stay free functions with their own arguments, exactly as WP5,
@@ -88,23 +99,27 @@ theorem ecnPacketOk_iff (s : State) (p : OutPacket) :
 def MaySendPacket (s : State) (p : OutPacket) : Prop :=
   FrameRules.MaySendPacket s.fr p ∧ Handshake.MaySendPacket s.hs p ∧
   Termination.MaySendPacket s.term p ∧ Migration.MaySendPacket s.mig p ∧
-  AckPacketOk s p ∧ EcnPacketOk s p ∧ ∀ f ∈ p.frames, MaySend s f
+  AckPacketOk s p ∧ EcnPacketOk s p ∧
+  -- §4.1, line 1330: the connection credit the frames consume *together*;
+  -- `MaySend` alone lets each frame spend the same remaining credit (D34-5)
+  StreamTable.MaySendAll s.st p.frames ∧ ∀ f ∈ p.frames, MaySend s f
 
 def maySendPacket (s : State) (p : OutPacket) : Bool :=
   FrameRules.maySendPacket s.fr p && Handshake.maySendPacket s.hs p &&
   Termination.maySendPacket s.term p && Migration.maySendPacket s.mig p &&
-  ackPacketOk s p && ecnPacketOk s p && p.frames.all (maySend s)
+  ackPacketOk s p && ecnPacketOk s p && StreamTable.maySendAll s.st p.frames &&
+  p.frames.all (maySend s)
 
 theorem maySendPacket_iff (s : State) (p : OutPacket) :
     maySendPacket s p = true ↔ MaySendPacket s p := by
   simp only [maySendPacket, MaySendPacket, Bool.and_eq_true, FrameRules.maySendPacket_iff,
     Handshake.maySendPacket_iff, Termination.maySendPacket_iff, Migration.maySendPacket_iff,
-    ackPacketOk_iff, ecnPacketOk_iff, List.all_eq_true, and_assoc]
+    ackPacketOk_iff, ecnPacketOk_iff, StreamTable.maySendAll_iff, List.all_eq_true, and_assoc]
   constructor
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, fun f hf => (maySend_iff s f).mp (h7 f hf)⟩
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, fun f hf => (maySend_iff s f).mpr (h7 f hf)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, fun f hf => (maySend_iff s f).mp (h8 f hf)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, fun f hf => (maySend_iff s f).mpr (h8 f hf)⟩
 
 instance instDecidableMaySendPacket (s : State) (p : OutPacket) : Decidable (MaySendPacket s p) :=
   decidable_of_iff _ (maySendPacket_iff s p)
@@ -172,7 +187,8 @@ theorem ecnMarkOk_iff (s : State) (d : OutDatagram) :
     `ConnIds.Remote` holds them — so WP11 exports the rule with the set as a
     parameter, in the shape `Migration.MaySendDatagramOn` already uses, and it is
     supplied here.  Every connection ID the peer ever issued counts, retired or
-    not: not using a retired one is §5.1.2's rule and WP4's, not §7.2's. -/
+    not: not using a retired one is §5.1.2's rule, not §7.2's, and is `DcidOk`
+    below. -/
 def peerIssuedCids (s : State) : List ConnIds.Cid := s.cidRemote.entries.map (·.cid)
 
 def HandshakeHeaderOk (s : State) (d : OutDatagram) : Prop :=
@@ -184,6 +200,101 @@ def handshakeHeaderOk (s : State) (d : OutDatagram) : Bool :=
 theorem handshakeHeaderOk_iff (s : State) (d : OutDatagram) :
     handshakeHeaderOk s d = true ↔ HandshakeHeaderOk s d :=
   Handshake.maySendDatagramOn_iff _ _ _
+
+/-- The sequence number of the peer-issued connection ID with these bytes.
+    §9.5 and §5.1.2 are written about sequence numbers and `OutDatagram.dcid`
+    carries bytes; WP4 `ConnIds.Remote` holds every connection ID the peer ever
+    issued, so the lookup is made against it, here, and not against
+    `Migration.State.peerCids`, which no endpoint event fills (audit D34-7).
+    Bytes WP4 does not hold are sequence number 0 when they are the handshake's
+    current Destination Connection ID — §5.1.1, line 1706: "The sequence number
+    of the initial connection ID is 0" — which covers the unpredictable value of
+    a client's first flight (§7.2, line 2337); anything else is a connection ID
+    the peer never issued. -/
+def dcidSeq? (s : State) (cid : ConnIds.Cid) : Option Nat :=
+  match s.cidRemote.entries.find? (fun e => decide (e.cid = cid)) with
+  | some e => some e.seq
+  | none => if s.hs.dcidSent = some cid then some 0 else none
+
+/-- The Destination Connection ID a datagram actually carries.
+
+* §5.1, line 1668 and §7.2, line 2380: it is one the peer issued;
+* §5.1.2, line 1811: "Upon receipt of an increased Retire Prior To field, the
+  peer MUST stop using the corresponding connection IDs" — it is not retired.
+  `HandshakeHeaderOk` deliberately admits retired connection IDs and the
+  handshake's current one, so neither of its allowances may stand in for this
+  (audit D34-6);
+* §9.5, lines 3603 and 3608: it has not been used from another local address
+  or, line 3611's rebinding apart, to another destination — `Migration`'s
+  history, consulted with the sequence number `dcidSeq?` found.  With a
+  zero-length connection ID there is nothing to reuse (`Migration.MaySendCid`).
+
+`none` is "the rule being checked does not look at them" (`Spec.OutDatagram`),
+as everywhere else. -/
+def DcidOk (s : State) (d : OutDatagram) : Prop :=
+  match d.dcid with
+  | none => True
+  | some cid =>
+    match dcidSeq? s cid with
+    | none => False
+    | some n =>
+      s.cidRemote.isRetired n = false ∧
+        (s.cidRemote.peerZeroLen = true ∨ Migration.MaySendCidOn s.mig (datagramPath d) n)
+
+def dcidOk (s : State) (d : OutDatagram) : Bool :=
+  match d.dcid with
+  | none => true
+  | some cid =>
+    match dcidSeq? s cid with
+    | none => false
+    | some n =>
+      !s.cidRemote.isRetired n &&
+        (s.cidRemote.peerZeroLen || decide (Migration.MaySendCidOn s.mig (datagramPath d) n))
+
+theorem dcidOk_iff (s : State) (d : OutDatagram) : dcidOk s d = true ↔ DcidOk s d := by
+  unfold dcidOk DcidOk
+  cases d.dcid with
+  | none => simp
+  | some cid =>
+    dsimp only
+    cases dcidSeq? s cid <;> simp
+
+/-- Every frame of every packet coalesced in a datagram: what §4.1, line 1330
+    is judged over at datagram level (`StreamTable.MaySendAll`). -/
+def datagramFrames (d : OutDatagram) : List Frame := d.packets.flatMap (·.frames)
+
+/-- Is `f` a RETIRE_CONNECTION_ID for sequence number `n`? -/
+def retiresSeq (n : Nat) : Frame → Bool
+  | .retireConnectionId m => m == n
+  | _ => false
+
+/-- §19.16, line 8050: "The sequence number specified in a RETIRE_CONNECTION_ID
+    frame MUST NOT refer to the Destination Connection ID field of the packet in
+    which the frame is contained."  The frame retires one of the *peer's*
+    connection IDs and the Destination Connection ID is one of them too, so the
+    sequence number is `dcidSeq?`'s, from WP4 `ConnIds.Remote` — not
+    `cidLocal`'s, as `TRIAGE.md` `WP13-4` first had it.  One connection ID per
+    datagram (§12.2), so every packet coalesced in it is covered.
+
+    `DcidOk` does not already imply this: `ConnIds.Remote.MaySend` allows the
+    *first* RETIRE_CONNECTION_ID of a connection ID that is still active, which
+    is exactly the one `DcidOk` lets the datagram carry.  Bytes `dcidSeq?` cannot
+    resolve are `DcidOk`'s to refuse; here they forbid nothing.  The receive
+    side is `ConnIds.Local.Step.retireSelf`. -/
+def RetireNotSelf (s : State) (d : OutDatagram) : Prop :=
+  match d.dcid.bind (dcidSeq? s) with
+  | none => True
+  | some n => ∀ f ∈ datagramFrames d, retiresSeq n f = false
+
+def retireNotSelf (s : State) (d : OutDatagram) : Bool :=
+  match d.dcid.bind (dcidSeq? s) with
+  | none => true
+  | some n => (datagramFrames d).all (fun f => !retiresSeq n f)
+
+theorem retireNotSelf_iff (s : State) (d : OutDatagram) :
+    retireNotSelf s d = true ↔ RetireNotSelf s d := by
+  unfold retireNotSelf RetireNotSelf
+  cases d.dcid.bind (dcidSeq? s) <;> simp
 
 /-- Everything the model knows about a datagram this endpoint may send. -/
 def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
@@ -205,6 +316,12 @@ def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
   EcnMarkOk s d ∧
   -- §7.2, lines 2340, 2341 and 2380: the connection IDs the datagram carries
   HandshakeHeaderOk s d ∧
+  -- §5.1.2, line 1811 and §9.5, lines 3603/3608: the connection ID it carries
+  DcidOk s d ∧
+  -- §19.16, line 8050: no RETIRE_CONNECTION_ID for that very connection ID
+  RetireNotSelf s d ∧
+  -- §4.1, line 1330: the connection credit all its packets consume together
+  StreamTable.MaySendAll s.st (datagramFrames d) ∧
   -- every packet coalesced in it
   ∀ p ∈ d.packets, MaySendPacket s p
 
@@ -217,6 +334,9 @@ def maySendDatagram (s : State) (d : OutDatagram) : Bool :=
   pathResponsesOnPath s d &&
   ecnMarkOk s d &&
   handshakeHeaderOk s d &&
+  dcidOk s d &&
+  retireNotSelf s d &&
+  StreamTable.maySendAll s.st (datagramFrames d) &&
   d.packets.all (maySendPacket s)
 
 /-- Diagnostic: the components whose frame-level `maySend` refuses `f`. -/
@@ -241,14 +361,15 @@ def maySendPacketWhy (s : State) (p : OutPacket) : List String :=
      ("Handshake.maySendPacket", Handshake.maySendPacket s.hs p),
      ("Termination.maySendPacket", Termination.maySendPacket s.term p),
      ("Migration.maySendPacket", Migration.maySendPacket s.mig p),
-     ("ackPacketOk", ackPacketOk s p), ("ecnPacketOk", ecnPacketOk s p)]
+     ("ackPacketOk", ackPacketOk s p), ("ecnPacketOk", ecnPacketOk s p),
+     ("StreamTable.maySendAll", StreamTable.maySendAll s.st p.frames)]
   (checks.filter (fun c => !c.2)).map (·.1) ++
     (p.frames.zipIdx.filter (fun fi => !maySend s fi.1)).map
       (fun fi => s!"frame#{fi.2}: {maySendWhy s fi.1}")
 
 /-- Diagnostic twin of `maySendDatagram`: the names of the conjuncts that refuse
     `d` (empty iff `maySendDatagram s d = true`).  For the differential harness,
-    which otherwise sees one bit for a nine-way conjunction (TRIAGE WP13-17). -/
+    which otherwise sees one bit for a twelve-way conjunction (TRIAGE WP13-17). -/
 def maySendDatagramWhy (s : State) (d : OutDatagram) : List String :=
   let checks : List (String × Bool) :=
     [("AddressValidation.maySendTo", AddressValidation.maySendTo s.av d.dest d.size),
@@ -259,6 +380,9 @@ def maySendDatagramWhy (s : State) (d : OutDatagram) : List String :=
      ("pathResponsesOnPath", pathResponsesOnPath s d),
      ("ecnMarkOk", ecnMarkOk s d),
      ("handshakeHeaderOk", handshakeHeaderOk s d),
+     ("dcidOk", dcidOk s d),
+     ("retireNotSelf", retireNotSelf s d),
+     ("StreamTable.maySendAll", StreamTable.maySendAll s.st (datagramFrames d)),
      ("maySendPacket", d.packets.all (maySendPacket s))]
   (checks.filter (fun c => !c.2)).map (·.1) ++
     (d.packets.filter (fun p => !maySendPacket s p)).flatMap (maySendPacketWhy s)
@@ -277,17 +401,24 @@ theorem maySendDatagramWhy_nil_iff (s : State) (d : OutDatagram) :
     have h6 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl))))))
     have h7 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))))
     have h8 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl))))))))
-    have h9 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr rfl))))))))
-    simp only [Bool.not_eq_eq_eq_not, Bool.not_true, Bool.not_eq_false] at h1 h2 h3 h4 h5 h6 h7 h8 h9
-    exact ⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩
-  · rintro ⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩
+    have h9 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))))))
+    have h10 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr
+      (Or.inl rfl))))))))))
+    have h11 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr
+      (Or.inr (Or.inl rfl)))))))))))
+    have h12 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr
+      (Or.inr (Or.inr rfl)))))))))))
+    simp only [Bool.not_eq_eq_eq_not, Bool.not_true, Bool.not_eq_false]
+      at h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11 h12
+    exact ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩
+  · rintro ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩
     refine ⟨fun c hc => ?_, ?_⟩
-    · rcases hc with hc | hc | hc | hc | hc | hc | hc | hc | hc <;> rw [hc] <;>
-        simp only [h1, h2, h3, h4, h5, h6, h7, h8, h9, Bool.not_true, Bool.false_eq_true,
-          not_false_eq_true]
+    · rcases hc with hc | hc | hc | hc | hc | hc | hc | hc | hc | hc | hc | hc <;> rw [hc] <;>
+        simp only [h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, Bool.not_true,
+          Bool.false_eq_true, not_false_eq_true]
     · simp only [List.flatMap_eq_nil_iff, List.mem_filter]
       intro p hp
-      have := List.all_eq_true.mp h9 p hp.1
+      have := List.all_eq_true.mp h12 p hp.1
       simp [this] at hp
 
 theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
@@ -295,12 +426,15 @@ theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
   simp only [maySendDatagram, MaySendDatagram, Bool.and_eq_true, AddressValidation.maySendTo_iff,
     DatagramSize.maySendDatagram_iff, Migration.maySendDatagram_iff,
     PathValidation.maySendDatagramOn_iff, pathResponsesOnPath_iff, ecnMarkOk_iff,
-    handshakeHeaderOk_iff, decide_eq_true_eq, List.all_eq_true, and_assoc]
+    handshakeHeaderOk_iff, dcidOk_iff, retireNotSelf_iff, StreamTable.maySendAll_iff,
+    decide_eq_true_eq, List.all_eq_true, and_assoc]
   constructor
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, h7, h8, fun p hp => (maySendPacket_iff s p).mp (h9 p hp)⟩
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, h7, h8, fun p hp => (maySendPacket_iff s p).mpr (h9 p hp)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11,
+      fun p hp => (maySendPacket_iff s p).mp (h12 p hp)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11,
+      fun p hp => (maySendPacket_iff s p).mpr (h12 p hp)⟩
 
 instance instDecidableMaySendDatagram (s : State) (d : OutDatagram) :
     Decidable (MaySendDatagram s d) := decidable_of_iff _ (maySendDatagram_iff s d)
@@ -357,6 +491,19 @@ theorem not_maySendPacket_of_pnExhausted {s : State} {p : OutPacket} {sp : PnSpa
   rintro ⟨-, -, -, -, ⟨hi, hh, ha⟩, -, -⟩
   have : Ack.MaySendPacket (s.ack sp) p := by cases sp <;> assumption
   exact Ack.not_maySendPacket_of_exhausted hx (by rw [hsp, hspace]) this
+
+/-- §19.16, line 8050: a datagram this endpoint may send carries no
+    RETIRE_CONNECTION_ID for the connection ID it is addressed with. -/
+theorem retire_ne_dcid_of_maySendDatagram {s : State} {d : OutDatagram}
+    (h : MaySendDatagram s d) {cid : ConnIds.Cid} {n : Nat} (hd : d.dcid = some cid)
+    (hn : dcidSeq? s cid = some n) {p : OutPacket} (hp : p ∈ d.packets) :
+    Frame.retireConnectionId n ∉ p.frames := by
+  have hr : RetireNotSelf s d := h.2.2.2.2.2.2.2.2.2.1
+  unfold RetireNotSelf at hr
+  simp only [hd, Option.bind_some, hn] at hr
+  intro hf
+  have := hr _ (List.mem_flatMap.mpr ⟨p, hp, hf⟩)
+  simp [retiresSeq] at this
 
 /-- §12.4, line 4740: a packet this endpoint sends always carries a frame. -/
 theorem maySendPacket_frames_ne_nil {s : State} {p : OutPacket} (h : MaySendPacket s p) :

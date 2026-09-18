@@ -423,10 +423,11 @@ example : maySendPacket cli07 ⟨.oneRtt, [.stream 0 0 false (filler 16)]⟩ = t
 example : maySendPacket cli07 ⟨.oneRtt, [.stream 4 0 true (filler 8)]⟩ = true := by decide
 -- §14.1: a client's 1-RTT datagram is not bound to 1200 bytes, and §8.1
 -- line 2818 exempts a client from the amplification limit on this path.
-example : maySendDatagram cli07
+-- `#guard`, not `decide`: `DcidOk` reads the connection ID's bytes.
+#guard maySendDatagram cli07
     { size := 129, packets := [⟨.oneRtt, [.stream 0 0 false (filler 16)]⟩],
       dest := peerAddr, src := selfAddr,
-      dcid := some peerCid.toList, scid := some localCid.toList } = true := by decide
+      dcid := some peerCid.toList, scid := some localCid.toList }
 
 /-- The state after the two STREAM frames have actually travelled: this is what
     `LocalAction.sentFrameIn` is for, and it is what makes the Final Size of the
@@ -448,10 +449,10 @@ example : maySend cli07b (.stopSending 4 9) = true := by decide
 -- The third `OUT` record of the trace, as one packet and as one datagram.
 example : maySendPacket cli07b ⟨.oneRtt, [.resetStream 0 7 16, .stopSending 4 9]⟩ = true := by
   decide
-example : maySendDatagram cli07b
+#guard maySendDatagram cli07b
     { size := 33, packets := [⟨.oneRtt, [.resetStream 0 7 16, .stopSending 4 9]⟩],
       dest := peerAddr, src := selfAddr,
-      dcid := some peerCid.toList, scid := some localCid.toList } = true := by decide
+      dcid := some peerCid.toList, scid := some localCid.toList }
 
 -- §3.5, line 1255: "An endpoint that receives a STOP_SENDING frame MUST send a
 -- RESET_STREAM frame if the stream is in the Ready or Send state."
@@ -751,6 +752,86 @@ private def shortSample : ByteArray :=
           = [⟨1, 1⟩]
 -- On its own it is simply skipped.
 #guard outcomeRenderC (recvOut cli shortSample) = "OK [dsz_deliver; skipped_rest]"
+
+/-! ### D34-5 — §4.1, line 1330: the frames of one packet or datagram spend the
+connection's send credit together, not each against the same state -/
+
+private def creditCli : State :=
+  let cfg := cfgOf false
+  let s := tls (tls (tls (tls (tls (init { cfg with theirs := { cfg.theirs with maxData := 10 } })
+    (.tlsKeys .read .handshake)) (.tlsKeys .write .handshake))
+    (.tlsKeys .read .oneRtt)) (.tlsKeys .write .oneRtt)) .tlsComplete
+  app (app (app (app s (.openStream .bidi)) (.openStream .bidi)) (.write ⟨0⟩ 6)) (.write ⟨4⟩ 6)
+
+private def six (id : Nat) (offset : Nat := 0) : Frame := .stream id offset false (filler 6)
+
+private def auditDg (fs : List (List Frame)) (src : Addr := selfAddr)
+    (dcid : ByteArray := peerCid) : OutDatagram :=
+  { size := 100, packets := fs.map (⟨.oneRtt, ·⟩), src := src, dest := peerAddr,
+    dcid := some dcid.toList, scid := some localCid.toList }
+
+-- Each six-byte frame fits the ten bytes of credit; the two together do not,
+-- in one packet or coalesced in one datagram.
+#guard maySendPacket creditCli ⟨.oneRtt, [six 0]⟩ && maySendPacket creditCli ⟨.oneRtt, [six 4]⟩
+#guard !maySendPacket creditCli ⟨.oneRtt, [six 0, six 4]⟩
+#guard !maySendDatagram creditCli (auditDg [[six 0, six 4]])
+#guard !maySendDatagram creditCli (auditDg [[six 0], [six 4]])
+#guard maySendDatagramWhy creditCli (auditDg [[six 0], [six 4]]) = ["StreamTable.maySendAll"]
+-- A stream is counted once, up to its highest offset: the same six bytes twice
+-- (a retransmission in the same datagram) cost six, and 0–6 with 4–10 costs ten.
+#guard maySendPacket creditCli ⟨.oneRtt, [six 0, six 0]⟩
+#guard maySendPacket { creditCli with st := { creditCli.st with maxDataPeer := 100 } }
+    ⟨.oneRtt, [six 0, six 0 4]⟩ = false  -- the stream wrote six bytes, not ten
+#guard StreamTable.batchIncrease creditCli.st [(⟨0⟩, 6), (⟨0⟩, 10), (⟨4⟩, 3), (⟨0⟩, 6)] = 13
+
+/-! ### D34-6 — §5.1.2, line 1811: a Destination Connection ID the peer has made
+us retire is not sendable, although §7.2 (`HandshakeHeaderOk`) still lists it -/
+
+private def newCid : ByteArray := bytes [0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7]
+
+private def retiredCli : State :=
+  recvNext cli 0 [.newConnectionId 1 1 newCid (bytes (List.replicate 16 1))]
+
+#guard retiredCli.cidRemote.isRetired 0
+#guard maySendDatagram cli (auditDg [[.ping]])
+#guard !maySendDatagram retiredCli (auditDg [[.ping]])
+#guard maySendDatagramWhy retiredCli (auditDg [[.ping]]) = ["dcidOk"]
+#guard maySendDatagram retiredCli (auditDg [[.ping]] (dcid := newCid))
+-- A connection ID the peer never issued is not one either (§5.1, line 1668).
+#guard !maySendDatagram cli (auditDg [[.ping]] (dcid := bytes [1,2,3,4,5,6,7,8]))
+
+/-! ### D34-7 — §9.5, line 3603: `Migration`'s connection-ID history is
+consulted with the sequence number WP4 holds for the datagram's bytes -/
+
+private def confirmedCli : State := recvNext cli 0 [.handshakeDone]
+private def issuedCli : State :=
+  recvNext confirmedCli 1 [.newConnectionId 1 0 newCid (bytes (List.replicate 16 1))]
+
+#guard confirmedCli.hs.confirmed
+#guard dcidSeq? issuedCli newCid.toList = some 1
+-- Sequence number 0 has left from local address 0, so it may not leave from 2;
+-- sequence number 1 has left from nowhere yet.
+#guard !maySendDatagram issuedCli (auditDg [[.ping]] (src := ⟨2⟩))
+#guard maySendDatagramWhy issuedCli (auditDg [[.ping]] (src := ⟨2⟩)) = ["dcidOk"]
+#guard maySendDatagram issuedCli (auditDg [[.ping]] (src := ⟨2⟩) (dcid := newCid))
+-- … and once it has (`LocalAction.beginSendOn`), it may not come back to 0.
+#guard !maySendDatagram (loc issuedCli (.beginSendOn ⟨⟨2⟩, peerAddr⟩ 1)) (auditDg [[.ping]] (dcid := newCid))
+
+/-! ### WP13-4 — §19.16, line 8050: a RETIRE_CONNECTION_ID does not name the
+Destination Connection ID of the packet that carries it -/
+
+-- `issuedCli` holds sequence numbers 0 (`peerCid`) and 1 (`newCid`), both
+-- active, so a first retirement of either passes `ConnIds.Remote.MaySend`.
+#guard maySend issuedCli (.retireConnectionId 0) && maySend issuedCli (.retireConnectionId 1)
+#guard !maySendDatagram issuedCli (auditDg [[.retireConnectionId 0]])
+#guard maySendDatagramWhy issuedCli (auditDg [[.retireConnectionId 0]]) = ["retireNotSelf"]
+#guard maySendDatagram issuedCli (auditDg [[.retireConnectionId 1]])
+#guard maySendDatagram issuedCli (auditDg [[.retireConnectionId 0]] (dcid := newCid))
+#guard !maySendDatagram issuedCli (auditDg [[.retireConnectionId 1]] (dcid := newCid))
+-- Every coalesced packet shares the connection ID.
+#guard !maySendDatagram issuedCli (auditDg [[.ping], [.ping, .retireConnectionId 0]])
+-- The usual order: retire 0 (`retiredCli`), then send its frame under 1.
+#guard maySendDatagram retiredCli (auditDg [[.retireConnectionId 0]] (dcid := newCid))
 
 /-! ## 13. The phase gate, and what a closing endpoint may send -/
 

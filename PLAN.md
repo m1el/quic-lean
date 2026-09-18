@@ -338,6 +338,38 @@ Not done here: a fresh fuzzing campaign.  The eight scripts and the existing
 `.fixedBitClear` on a long header has a known extent too and still ends the
 datagram; the audit did not raise it and it is left for triage.
 
+## 4i. Disposition of TRANSPORT_AUDIT_2026-09-18_3.md
+
+Three send-side findings against the working tree after §4h, all in the
+composition (`Endpoint/Send.lean`), all reproduced and all fixed.
+`reviews/Audit3.lean` has its four defect guards turned round; `Examples.lean`
+sections D34-5 to D34-7 are the regression guards.
+
+| Audit item | Status |
+|---|---|
+| D34-5 frames each spend the same connection credit (§4.1) | fixed: `StreamTable.MaySendAll` (per stream, highest offset reached minus `sentHighest`, so retransmissions and overlaps count once) is a conjunct of `MaySendPacket` over `p.frames` and of `MaySendDatagram` over all coalesced packets. Proved: `sendCredit_of_maySendAll` (subsumes the per-frame rule), `maySendAll_singleton` |
+| D34-6 retired DCID still sendable (§5.1.2) | fixed: `Send.DcidOk` resolves `OutDatagram.dcid` to a sequence number through `ConnIds.Remote` (`dcidSeq?`; the handshake's own DCID is sequence 0) and refuses a retired one. `HandshakeHeaderOk` is unchanged, so its allowances cannot bypass it |
+| D34-7 §9.5 history bypassed by the empty `peerCids` (§9.5) | fixed in the same predicate: `DcidOk` applies `Migration.MaySendCidOn` with that sequence number. `Migration.State.peerCids` / `learnPeerCid` are left as they were and are unused by the endpoint |
+
+Behaviour change to know about: a *nonempty DCID the peer never issued* is now
+refused (previously any bytes passed for a 1-RTT packet).  `dcid := none` still
+means "not looked at".
+
+Differential check after the fix: eight scripts, 0 mismatches.  Five-minute
+fuzz (`out/fuzz/refuzz300_audit3.log`, same command as `refuzz300`): 8 662
+runs, 55 075 steps compared, 24 249 send checks, 44 signatures (36 outcome,
+7 maysend, 1 obligation; was 36/5/1).  The two new maysend signatures
+(`b3c10263…`, `f6e91f92…`, one input) are refused by `ackPacketOk` only — the
+existing ACK class under a new frame combination.  Replaying all 43 saved
+inputs (`out/fuzz/audit3-inputs/`) with `DIFF_SHOW=1`: no send is refused by
+`dcidOk` or `StreamTable.maySendAll`.  As the audit says, this cannot show the
+new rules are tight, only that ngtcp2 does not trip them; migration and
+second paths remain outside the campaign.
+
+§19.16 line 8050's send side (`WP13-4`: do not retire the DCID of the carrying
+packet) was done next, on the same lookup: `Send.RetireNotSelf`, with
+`retire_ne_dcid_of_maySendDatagram`; guards in `Examples.lean` section WP13-4.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server

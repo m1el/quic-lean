@@ -107,6 +107,13 @@ that was **found and fixed** while writing the examples.
   sequence number `d.dcid` has in `s.cidLocal.issued`".  Not made here because
   WP12's examples layer is not the place to add a send rule and nothing in the
   eight scripts exercises it.
+* **Done (2026-09-18):** `Endpoint.RetireNotSelf`, a conjunct of
+  `MaySendDatagram`, reported as `retireNotSelf` by `maySendDatagramWhy`.  One
+  correction to the verdict above: the sequence number is looked up in
+  `s.cidRemote` (`Send.dcidSeq?`), not `s.cidLocal.issued` — the Destination
+  Connection ID of a packet we send and the connection ID a
+  RETIRE_CONNECTION_ID we send names are both the *peer's*.  Guards:
+  `Examples.lean`, section WP13-4.
 
 ## WP13-5 — coalesced packets after an undecryptable one (model fixed; ngtcp2 also deviates)
 

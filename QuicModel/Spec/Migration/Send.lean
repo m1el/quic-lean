@@ -103,7 +103,10 @@ def dcidSeqOf (s : State) (d : OutDatagram) : Option Nat := d.dcid.bind s.seqOfC
     have no content — §9.5, line 3630 answers that case with a SHOULD NOT, which
     is `RecommendedMigration`.  `none` (no `dcid` on the datagram, or bytes this
     component has not been told about) means the rule cannot be evaluated and
-    therefore does not forbid the send; see NOTES 16 for what WP12 owes. -/
+    therefore does not forbid the send; see NOTES 16 for what WP12 owes.  WP12
+    pays it without `peerCids`: `Endpoint.DcidOk` finds the sequence number in
+    WP4's `ConnIds.Remote` and applies `MaySendCidOn` itself, so inside the
+    endpoint this lookup is always `none` and the rule is enforced there. -/
 def MaySendCid (s : State) (p : Path) (n? : Option Nat) : Prop :=
   s.peerZeroLen = true ∨
     (match n? with

@@ -92,6 +92,91 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
   cases f <;>
     simp [maySend, MaySend, streamMaySend_iff, sendCredit_iff]
 
+/-! ### 6b. Several frames at once
+
+`MaySend` judges one frame against the state as it stands, so two frames that
+each fit the remaining connection credit both pass it although together they do
+not (audit D34-5).  §4.1, line 1330: "Senders MUST NOT send data in excess of
+either limit", and line 1336 counts the connection limit across all streams, so
+a packet or datagram is judged on the credit all of its frames consume
+together.  What a batch consumes is, per stream, the distance from
+`sentHighest` to the highest offset any of its frames reaches: a retransmission
+or an overlap consumes nothing, so summing frame lengths would be wrong. -/
+
+/-- The stream and end offset of a frame that consumes connection send credit:
+    exactly the frames `MaySend` applies `sendCredit` to. -/
+def creditEnd? : Frame → Option (StreamId × Nat)
+  | .stream id offset _ data => some (⟨id⟩, offset + data.size)
+  | .resetStream id _ fs => some (⟨id⟩, fs)
+  | _ => none
+
+/-- The highest end offset `ends` reaches on stream `id`. -/
+def batchHighest (ends : List (StreamId × Nat)) (id : StreamId) : Nat :=
+  ends.foldr (fun e m => if e.1 = id then max e.2 m else m) 0
+
+/-- The connection credit `ends` consumes together.  Each entry contributes what
+    it adds beyond both what the stream has already sent and what the entries
+    after it reach on the same stream, so every stream is counted once, up to
+    its highest offset, in whatever order the frames come. -/
+def batchIncrease (s : State) : List (StreamId × Nat) → Nat
+  | [] => 0
+  | e :: rest =>
+    (e.2 - max (sentHighest (s.get e.1)) (batchHighest rest e.1)) + batchIncrease s rest
+
+/-- §4.1, line 1330, for all the frames of one packet or datagram. -/
+def MaySendAll (s : State) (fs : List Frame) : Prop :=
+  s.sentTotal + batchIncrease s (fs.filterMap creditEnd?) ≤ s.maxDataPeer
+
+def maySendAll (s : State) (fs : List Frame) : Bool :=
+  decide (s.sentTotal + batchIncrease s (fs.filterMap creditEnd?) ≤ s.maxDataPeer)
+
+theorem maySendAll_iff (s : State) (fs : List Frame) :
+    maySendAll s fs = true ↔ MaySendAll s fs := by simp [maySendAll, MaySendAll]
+
+theorem batchHighest_le_batchIncrease (s : State) (ends : List (StreamId × Nat))
+    (id : StreamId) : batchHighest ends id - sentHighest (s.get id) ≤ batchIncrease s ends := by
+  induction ends with
+  | nil => simp [batchHighest, batchIncrease]
+  | cons e rest ih =>
+    have hb : batchHighest (e :: rest) id =
+        if e.1 = id then max e.2 (batchHighest rest id) else batchHighest rest id := rfl
+    rw [hb]
+    show _ ≤ (e.2 - max (sentHighest (s.get e.1)) (batchHighest rest e.1)) + batchIncrease s rest
+    split
+    · next h => subst h; omega
+    · omega
+
+theorem le_batchHighest {ends : List (StreamId × Nat)} {e : StreamId × Nat} (h : e ∈ ends) :
+    e.2 ≤ batchHighest ends e.1 := by
+  induction ends with
+  | nil => cases h
+  | cons x rest ih =>
+    have hb : batchHighest (x :: rest) e.1 =
+        if x.1 = e.1 then max x.2 (batchHighest rest e.1) else batchHighest rest e.1 := rfl
+    rw [hb]
+    rcases List.mem_cons.mp h with rfl | h
+    · simp only [ite_true]; omega
+    · have := ih h
+      split <;> omega
+
+/-- The batch rule subsumes the per-frame one: every frame of a permitted batch
+    has the connection credit `MaySend` asks of it alone. -/
+theorem sendCredit_of_maySendAll {s : State} {fs : List Frame} (h : MaySendAll s fs)
+    {f : Frame} (hf : f ∈ fs) {id : StreamId} {k : Nat} (he : creditEnd? f = some (id, k)) :
+    sendCredit s id k := by
+  have hm : (id, k) ∈ fs.filterMap creditEnd? := List.mem_filterMap.mpr ⟨f, hf, he⟩
+  have h1 := le_batchHighest hm
+  have h2 := batchHighest_le_batchIncrease s (fs.filterMap creditEnd?) id
+  unfold MaySendAll at h
+  unfold sendCredit
+  simp only at h1
+  omega
+
+/-- For a single frame the batch rule is `sendCredit`, no more. -/
+theorem maySendAll_singleton (s : State) (f : Frame) (id : StreamId) (k : Nat)
+    (he : creditEnd? f = some (id, k)) : MaySendAll s [f] ↔ sendCredit s id k := by
+  simp [MaySendAll, sendCredit, List.filterMap, he, batchIncrease, batchHighest]
+
 /-! ## 7. The component -/
 
 @[reducible] def component : Component where
