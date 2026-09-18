@@ -17,7 +17,7 @@ theorem stream_step_id {st st' : Stream.State} {e : Stream.Event} {fx : List Str
     (h : Stream.Step st e (.ok st' fx)) : st'.id = st.id ∧ st'.role = st.role := by
   cases h <;> exact ⟨rfl, rfl⟩
 
-/-- §4.1, line 1352: the receive-side credit a stream has consumed is its
+/-- §4.1, line 1358: the receive-side credit a stream has consumed is its
     highest received offset, which a frame can push no further than its own end
     offset. -/
 theorem recv_highest_step {rs rs' : Stream.Recv.State} {e : Stream.Recv.Event}
@@ -33,7 +33,7 @@ theorem recv_highest_step {rs rs' : Stream.Recv.State} {e : Stream.Recv.Event}
   | resetOk => exact Nat.le_max_right _ _
   | _ => exact Nat.le_max_left _ _
 
-/-- §4.5, line 1479: the send-side credit a stream has consumed is the highest
+/-- §4.5, line 1481: the send-side credit a stream has consumed is the highest
     offset sent, which only a STREAM or RESET_STREAM frame we transmit moves. -/
 theorem send_sent_step {ss ss' : Stream.Send.State} {e : Stream.Send.Event}
     {fx : List Stream.Send.Effect} (h : Stream.Send.Step ss e (.ok ss' fx)) :
@@ -127,15 +127,15 @@ theorem freshStream_inv (s : State) (id : StreamId) : Stream.Inv (s.freshStream 
 @[simp] theorem openThrough_get (s : State) (id id' : StreamId) :
     (s.openThrough id).get id' = s.get id' := rfl
 
-@[simp] theorem openThrough_connRecvViolation (s : State) (id : StreamId) (st : Stream.State)
-    (e : Stream.Event) :
-    connRecvViolation (s.openThrough id) st e = connRecvViolation s st e := rfl
+@[simp] theorem openThrough_connRecvViolation (s : State) (id : StreamId)
+    (st st' : Stream.State) :
+    connRecvViolation (s.openThrough id) st st' = connRecvViolation s st st' := rfl
 
 @[simp] theorem openThrough_connSendBlocked (s : State) (id : StreamId) (st : Stream.State)
     (e : Stream.Event) :
     connSendBlocked (s.openThrough id) st e = connSendBlocked s st e := rfl
 
-/-- §2.1, line 712: after opening `id`, `id` exists … -/
+/-- §2.1, line 718: after opening `id`, `id` exists … -/
 @[simp] theorem has_openThrough_self (s : State) (id : StreamId) :
     (s.openThrough id).has id = true := by
   simp only [State.has, openThrough_opened, and_self, reduceIte, decide_eq_true_eq]
@@ -173,10 +173,10 @@ theorem afterStep_get_of_ne (s : State) {id id' : StreamId} (st st' : Stream.Sta
 /-- The invariant of a whole connection's stream table.
 
 * the two connection-level totals are within the two advertised limits
-  (§4.1, line 1359 and §4.1, line 1330 — theorem (a));
+  (§4.1, line 1368 and §4.1, line 1330 — theorem (a));
 * neither side has opened more streams than the other allowed (§4.6,
-  line 1553 — theorem (b));
-* no advertised stream limit exceeds 2^60 (§4.6, line 1543);
+  line 1546 — theorem (b));
+* no advertised stream limit exceeds 2^60 (§4.6, line 1537);
 * every stream in the table exists, knows its own ID and our role, and
   satisfies WP2's `Stream.Inv` (theorem (e)). -/
 def Inv (s : State) : Prop :=
@@ -190,7 +190,7 @@ def Inv (s : State) : Prop :=
     s.has id = true ∧ st.id = id ∧ st.role = s.role ∧ Stream.Inv st)
 
 /-- The initial state satisfies the invariant as soon as the two `max_streams`
-    transport parameters are within the 2^60 of §4.6, line 1543 (which is what
+    transport parameters are within the 2^60 of §4.6, line 1537 (which is what
     WP1's `TransportParams.Valid` requires of them). -/
 theorem init_inv (role : Role) (ours theirs : Limits)
     (h1 : ours.maxStreamsBidi ≤ maxStreamsLimit) (h2 : ours.maxStreamsUni ≤ maxStreamsLimit)
@@ -231,22 +231,16 @@ theorem get_of_not_has {s : State} (hi : Inv s) {id : StreamId} (h : s.has id = 
 theorem afterStep_inv {s : State} {id : StreamId} {st st' : Stream.State} {e : Stream.Event}
     {fx : List Stream.Effect} (hi : Inv s) (hh : s.has id = true)
     (hid : st.id = id) (hrole : st.role = s.role) (hst : Stream.Inv st)
-    (hfc : connRecvViolation s st e = false) (hb : connSendBlocked s st e = false)
+    (hfc : connRecvViolation s st st' = false) (hb : connSendBlocked s st e = false)
     (h : Stream.Step st e (.ok st' fx)) : Inv (afterStep s id st st') := by
   obtain ⟨i1, i2, i3, i4, i5, i6, i7⟩ := hi
   have hstep := Stream.step_inv st e st' fx hst h
   have hids := stream_step_id h
-  have hr := recvHighest_step h
   have hsd := sentHighest_step h
   refine ⟨?_, ?_, i3, i4, i5, i6, ?_⟩
   · show s.recvTotal + (recvHighest st' - recvHighest st) ≤ s.maxDataLocal
-    simp only [connRecvViolation] at hfc
-    cases he : recvEnd e with
-    | none => rw [he] at hr; simp only [Option.getD_none] at hr; omega
-    | some k =>
-      rw [he] at hfc hr
-      simp only [Option.getD_some, decide_eq_false_iff_not, Nat.not_lt] at hfc hr
-      omega
+    simp only [connRecvViolation, decide_eq_false_iff_not, Nat.not_lt] at hfc
+    exact hfc
   · show s.sentTotal + (sentHighest st' - sentHighest st) ≤ s.maxDataPeer
     simp only [connSendBlocked] at hb
     cases he : sentEnd e with
@@ -272,10 +266,10 @@ theorem afterStep_inv {s : State} {id : StreamId} {st st' : Stream.State} {e : S
 theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
     (hi : Inv s) (h : Step s e (.ok s' fx)) : Inv s' := by
   cases h with
-  | @existOk id e2 st2 gx hx hb hfc hs =>
+  | @existOk id e2 st2 gx hx hb hs hfc =>
     obtain ⟨hid, hrole, hstinv⟩ := inv_get hi id
     exact afterStep_inv hi hx hid hrole hstinv hfc hb hs
-  | @openOk id e2 st2 gx hx hp hr hl hfc hs =>
+  | @openOk id e2 st2 gx hx hp hr hl hs hfc =>
     have hpeer : id.initiator = s.role.peer := eq_peer_of_ne hr
     have hlt : id.index < s.maxStreamsLocal.get id.dir := Nat.lt_of_not_le hl
     have hbase : Inv (s.openThrough id) := by
@@ -300,6 +294,7 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
         exact ⟨has_openThrough s id id' h1, h2, h3, h4⟩
     exact afterStep_inv hbase (has_openThrough_self s id) rfl rfl (freshStream_inv s id)
       hfc (connSendBlocked_false_of_peerFrame hp) hs
+  | localNotCreatedIgnored => exact hi
   | maxDataStale => exact hi
   | @maxDataRaise v hgt =>
     obtain ⟨i1, i2, i3, i4, i5, i6, i7⟩ := hi

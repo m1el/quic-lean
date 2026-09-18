@@ -14,19 +14,25 @@ per-stream `MaySend` — every frame that names a stream.
 
 Two readings of the text are worth stating up front.
 
-* **A smaller limit may be advertised.**  §4.1, line 1357: "Once a receiver
+* **A smaller limit may be advertised.**  §4.1, line 1364: "Once a receiver
   advertises a limit for the connection or a stream, it is not an error to
   advertise a smaller limit, but the smaller limit has no effect", and §4.6,
-  line 1559: "Once a receiver advertises a stream limit using the MAX_STREAMS
-  frame, advertising a smaller limit has no effect.  A receiver MUST ignore any
-  MAX_STREAMS frame that does not increase the stream limit."  Neither sentence
-  forbids sending it, so `MaySend` does not require an increase — unlike
-  `Spec/Template.lean`, which this file supersedes (see NOTES).
+  line 1551: "Once a receiver advertises a stream limit using the MAX_STREAMS
+  frame, advertising a smaller limit has no effect"; §4.6, line 1552: "A
+  receiver MUST ignore any MAX_STREAMS frame that does not increase the stream
+  limit."  Neither sentence forbids sending it, so `MaySend` does not require an
+  increase — unlike `Spec/Template.lean`, which this file supersedes (see NOTES).
 * **A blocked frame carries the limit in force.**  §13.3, line 5409: "These
   frames always include the limit that is causing blocking at the time that they
-  are transmitted." -/
+  are transmitted."
+* **A frame naming a stream that does not exist is `False`, by modelling choice
+  and not by the text.**  Review finding S-5: nothing in the assigned range
+  forbids sending a frame on a stream the sender has itself opened, so this
+  conjunct is an artefact of the model needing per-stream state before it can
+  say anything.  It is a live obligation on WP13 — see NOTES 4 in
+  `Spec/StreamTable.lean`. -/
 
-/-- §4.6, line 1553 with §4.1, line 1330: what the connection level adds to a
+/-- §4.6, line 1546 with §4.1, line 1330: what the connection level adds to a
     stream's own `MaySend` for a frame that consumes send credit. -/
 def sendCredit (s : State) (id : StreamId) (k : Nat) : Prop :=
   s.sentTotal + (k - sentHighest (s.get id)) ≤ s.maxDataPeer
@@ -35,8 +41,10 @@ def sendCreditB (s : State) (id : StreamId) (k : Nat) : Bool :=
   decide (s.sentTotal + (k - sentHighest (s.get id)) ≤ s.maxDataPeer)
 
 /-- A frame naming a stream may be sent only for a stream that exists, within
-    the peer's stream limit (§4.6, line 1553), and if the stream itself permits
-    it (WP2). -/
+    the peer's stream limit (§4.6, line 1546), and if the stream itself permits
+    it (WP2).  `s.has id = true` is the modelling conjunct of finding S-5, not a
+    sentence of the text: WP13 must synthesise `Event.appOpenStream` before the
+    first frame on a locally-initiated stream. -/
 def streamMaySend (s : State) (id : StreamId) (f : Frame) : Prop :=
   s.has id = true ∧ s.withinPeerStreamLimit id = true ∧ Stream.MaySend (s.get id) f
 
@@ -102,15 +110,16 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
 
 /-! ### The SHOULDs that are about *when*, not *whether*
 
-§4.1, line 1371 and §4.6, line 1569 recommend a blocked frame when actually
-blocked; §4.2's autotuning advice and §4.3 are performance guidance with no
-observable rule.  None of them restricts `MaySend`. -/
+§4.1, line 1376 and §4.6, line 1561 recommend a blocked frame when actually
+blocked, and §4.1, line 1381 recommends repeating it periodically; §4.2's
+autotuning advice and §4.3 are performance guidance with no observable rule.
+None of them restricts `MaySend`. -/
 
 def Recommended (s : State) : Frame → Prop
-  -- §4.1, line 1368: "If a sender has sent data up to the limit, it will be
+  -- §4.1, line 1375: "If a sender has sent data up to the limit, it will be
   -- unable to send new data and is considered blocked."
   | .dataBlocked _ => s.sentTotal = s.maxDataPeer
-  -- §4.6, line 1569: "An endpoint that is unable to open a new stream due to
+  -- §4.6, line 1561: "An endpoint that is unable to open a new stream due to
   -- the peer's limits SHOULD send a STREAMS_BLOCKED frame."
   | .streamsBlocked dir _ => s.opened.get s.role dir = s.maxStreamsPeer.get dir
   | _ => True
