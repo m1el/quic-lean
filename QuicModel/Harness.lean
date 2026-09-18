@@ -237,6 +237,17 @@ is already differentially tested against — makes the list. -/
 @[export quic_h_frames_of_bytes]
 def framesOfBytes (buf : ByteArray) : List Frame := ((decodeFrames buf).1.map (·.1)).toList
 
+/-- Did the whole payload parse?  `conn_driver.h`'s `dump_out_datagram` assumes
+    an 8-byte Destination Connection ID, so a packet ngtcp2 addressed with a
+    connection ID of another length is cut at the wrong offset and its "frames"
+    are noise.  The harness checks this before offering a written datagram to
+    the send-side predicates. -/
+@[export quic_h_frames_decode_ok]
+def framesDecodeOk (buf : ByteArray) : UInt8 :=
+  match (decodeFrames buf).2 with
+  | none => 1
+  | some _ => 0
+
 @[export quic_h_frames_length]
 def framesLength (fs : List Frame) : UInt64 := fs.length.toUInt64
 

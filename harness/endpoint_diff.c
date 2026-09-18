@@ -153,6 +153,7 @@ extern uint8_t quic_endpoint_may_send_datagram(lean_object *s, uint64_t src,
                                                lean_object *packets);
 extern uint8_t quic_endpoint_obligations(lean_object *s, uint64_t now,
                                          uint64_t tolerance);
+extern uint8_t quic_endpoint_phase(lean_object *s);
 extern lean_object *quic_endpoint_state_render(lean_object *s);
 extern uint64_t quic_endpoint_repair_owed(lean_object *s);
 
@@ -177,6 +178,7 @@ extern lean_object *quic_h_local_sent_datagram(uint64_t dest, uint64_t n);
 extern lean_object *quic_h_local_local_error(uint64_t code, uint64_t frame_type);
 extern lean_object *quic_h_frames_of_bytes(lean_object *buf);
 extern uint64_t quic_h_frames_length(lean_object *fs);
+extern uint8_t quic_h_frames_decode_ok(lean_object *buf);
 extern lean_object *quic_h_frames_get(lean_object *fs, uint64_t i);
 extern lean_object *quic_h_out_packet(uint8_t ptype, lean_object *fs);
 extern uint8_t quic_h_ack_eliciting(lean_object *fs);
@@ -289,7 +291,7 @@ static int g_nsoft;
 static int g_nmm;
 static unsigned long g_mm_total;
 static unsigned long g_steps_compared, g_steps_skipped, g_send_checks;
-static unsigned long g_steps_loose, g_steps_subseq;
+static unsigned long g_steps_loose, g_steps_subseq, g_send_unparsed, g_runs_closed;
 static unsigned long g_runs;
 static const uint8_t *g_input;
 static size_t g_inputlen;
@@ -309,10 +311,11 @@ static void mm_summary(void) {
           "\n=== endpoint_diff summary ===\n"
           "runs=%lu  steps compared=%lu (exact; %lu needed the "
           "stream_close/acked_stream_data_offset exclusion, %lu the "
-          "subsequence rule)  steps not compared=%lu  send checks=%lu\n"
+          "subsequence rule)  steps not compared=%lu  send checks=%lu "
+          "(%lu datagrams unparsable)  runs abandoned after the model closed=%lu\n"
           "distinct mismatches=%d  total mismatches=%lu\n",
           g_runs, g_steps_compared, g_steps_loose, g_steps_subseq, g_steps_skipped,
-          g_send_checks, g_nmm, g_mm_total);
+          g_send_checks, g_send_unparsed, g_runs_closed, g_nmm, g_mm_total);
   for (i = 0; i < g_nmm; ++i)
     fprintf(stderr, "  sig=%016" PRIx64 " x%lu\n", g_mm[i].sig, g_mm[i].count);
   if (g_nsoft) {
@@ -1115,6 +1118,7 @@ typedef struct {
   int space;           /* 0 initial, 1 handshake, 2 app */
   int64_t pn;
   lean_object *frames; /* List Frame, owned */
+  int payload_ok;      /* the payload parsed to its last byte */
   uint8_t dcid[NGTCP2_MAX_CIDLEN];
   size_t dcidlen;
   uint8_t scid[NGTCP2_MAX_CIDLEN];
@@ -1177,6 +1181,8 @@ static int parse_out(mstate *m, const uint8_t *pkt, size_t pktlen, outpkt *ps,
     ps[n].ptype = ptype;
     ps[n].space = space;
     ps[n].pn = pn;
+    ps[n].payload_ok = quic_h_frames_decode_ok(
+        model_bytes(p + pnoff + pnlen, pktend - pnoff - pnlen - TAGLEN));
     ps[n].frames = quic_h_frames_of_bytes(
         model_bytes(p + pnoff + pnlen, pktend - pnoff - pnlen - TAGLEN));
     ps[n].dcidlen = hd.dcid.datalen <= NGTCP2_MAX_CIDLEN ? hd.dcid.datalen : 0;
@@ -1204,6 +1210,19 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   if (!m || !m->alive) return;
   np = parse_out(m, buf, len, ps, 8);
   if (np <= 0) return;
+  /* conn_driver.h's unprotection assumes an 8-byte Destination Connection ID
+     (`ngtcp2_pkt_decode_hd_short(..., CIDLEN)`).  When the peer has issued a
+     connection ID of another length, ngtcp2 addresses us with it, the payload
+     is cut at the wrong offset and the "frames" are noise -- the driver's own
+     OUT record shows BADFRAME.  Offering that to the send-side predicates would
+     invent mismatches, so the datagram is skipped and counted. */
+  for (i = 0; i < np; ++i) {
+    if (!ps[i].payload_ok) {
+      ++g_send_unparsed;
+      for (i = 0; i < np; ++i) lean_dec(ps[i].frames);
+      return;
+    }
+  }
   ++g_send_checks;
 
   /* Sec. 12.2: one datagram, so one dcid/scid; take the first packet's. */
@@ -1328,6 +1347,38 @@ static void md_tick(harness *h) {
   int met = 0;
 
   if (!m || !m->alive) return;
+
+  /* If §10.1's idle timeout (or any other rule) has put *every* candidate into
+     the closing, draining or closed phase while ngtcp2 is still running, the
+     two have diverged irrecoverably: a closed endpoint processes nothing and
+     sends nothing, so every later comparison would trivially fail.  Stop
+     tracking this run, record it once, and say so in the summary rather than
+     reporting a hundred consequences of one divergence. */
+  if (!h->fatal) {
+    int all_closed = 1;
+    p = m->cands;
+    if (lean_is_scalar(p)) all_closed = 0;
+    while (!lean_is_scalar(p)) {
+      lean_object *s = l_head(p);
+      lean_inc(s);
+      if (quic_endpoint_phase(s) < 1) {
+        all_closed = 0;
+        break;
+      }
+      p = l_tail(p);
+    }
+    if (all_closed) {
+      char key[128];
+      ++g_runs_closed;
+      snprintf(key, sizeof(key),
+               "model in closing/draining/closed at now=%" PRIu64
+               "us while ngtcp2 runs on",
+               model_now(h));
+      soft_seen(fnv("model-closed"), key);
+      m->alive = 0;
+      return;
+    }
+  }
   p = m->cands;
   while (!lean_is_scalar(p)) {
     lean_object *s = l_head(p);
