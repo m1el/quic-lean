@@ -153,7 +153,8 @@ theorem init_inv {cfg : Config} (h : ConfigOk cfg) : Inv (init cfg) := by
   refine ⟨?_, ?_, trivial, initAck_inv cfg .initial, initAck_inv cfg .handshake,
     initAck_inv cfg .appData, ?_, ?_, AddressValidation.inv_init _ _, ?_, ?_,
     Termination.init_inv _ _ _, ⟨h.vnNotSupported, h.noReserved, h.advertised⟩,
-    ?_, h.minDatagram, ⟨?_, ?_⟩, ⟨?_, rfl, rfl, rfl, rfl, rfl⟩, ⟨rfl, rfl, rfl⟩, ?_⟩
+    ?_, h.minDatagram, ?_, ?_, ?_, ?_, ⟨?_, ?_⟩, ⟨?_, rfl, rfl, rfl, rfl, rfl⟩,
+    ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩, ?_⟩
   -- Handshake
   · refine ⟨?_, ?_, ?_⟩
     · intro hc
@@ -186,6 +187,12 @@ theorem init_inv {cfg : Config} (h : ConfigOk cfg) : Inv (init cfg) := by
       rw [h₁, h₂]
   -- VersionNeg.Client
   · intro hc; simp [init] at hc
+  -- Retransmission: nothing is owed at the start
+  · intro i hi; simp [init] at hi
+  -- Ecn, one instance per space: no counts have been recorded
+  · intro _; exact ⟨rfl, rfl, rfl⟩
+  · intro _; exact ⟨rfl, rfl, rfl⟩
+  · intro _; exact ⟨rfl, rfl, rfl⟩
   -- InvConfirmed: WP11's bit is `false` at the start, whatever the role
   · cases hr : cfg.role <;> simp [init, initHandshake, hr, Handshake.initClient,
       Handshake.initServer, Termination.init]

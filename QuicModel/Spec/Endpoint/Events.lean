@@ -141,6 +141,9 @@ def localEvent (now : Time) (a : LocalAction) (s : State) : List Out :=
   | .localError err ft => stepTerm s (.localError now s.pto err ft)
   | .icmpPtb pmtu => stepDsz s (.icmpPtb pmtu)
   | .pathBelowMinimum alt => stepDsz s (.pathBelowMinimum alt)
+  | .sentPacketFrames sp pn fs => stepRtx s (.sentFrames ⟨sp, pn⟩ fs)
+  | .rtxEvent e => stepRtx s e
+  | .ecnEvent sp e => stepEcn s sp e
 
 theorem localEvent_ne (now : Time) (a : LocalAction) (s : State) :
     localEvent now a s ≠ [] := by
@@ -157,6 +160,8 @@ theorem localEvent_ne (now : Time) (a : LocalAction) (s : State) :
       | exact bindAll_ne (register_ne _ _) (fun _ => stepPvThen_ne _ _ _)
       | exact bindAll_ne (register_ne _ _) (fun _ => stepMig_ne _ _)
       | exact bindAll_ne (register_ne _ _) (fun _ => sentFrame_ne _ _ _ _)
+      | exact stepRtx_ne _ _
+      | exact stepEcn_ne _ _ _
 
 theorem localEvent_inv {s : State} (hs : Inv s) (now : Time) (a : LocalAction) :
     InvOk (localEvent now a s) := by
@@ -173,6 +178,8 @@ theorem localEvent_inv {s : State} (hs : Inv s) (now : Time) (a : LocalAction) :
       | exact invOk_bindAll (register_inv hs _) (fun _ h => stepPvThen_inv h _ _)
       | exact invOk_bindAll (register_inv hs _) (fun _ h => stepMig_inv h _)
       | exact invOk_bindAll (register_inv hs _) (fun _ h => sentFrame_inv h _ _ _)
+      | exact stepRtx_inv hs _
+      | exact stepEcn_inv hs _ _
 
 /-! ## 3e. The clock
 

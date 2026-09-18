@@ -1,4 +1,6 @@
 import QuicModel.Spec.Endpoint.Lemmas
+import QuicModel.Spec.Retransmission
+import QuicModel.Spec.Ecn
 
 /-!
   WP12 "Endpoint", part 1: the configuration, the composed state, the events and
@@ -121,6 +123,12 @@ structure State where
   vnClient : VersionNeg.Client.State
   /-- WP7a §14. -/
   dsz : DatagramSize.State
+  /-- WP14a §13.3 — one instance per connection. -/
+  rtx : Retransmission.State
+  /-- WP14b §13.4 — one instance per packet number space (`Ecn` NOTES 1). -/
+  ecnInitial : Ecn.State
+  ecnHandshake : Ecn.State
+  ecnAppData : Ecn.State
   /-- The bijection `Migration.Path ↔ PathValidation.Path` that `Migration`
       NOTES 1 leaves to WP12: a path gets a fresh handle the first time it is
       seen, so distinct paths never share one. -/
@@ -143,6 +151,20 @@ def setAck (s : State) : PnSpace → Ack.State → State
 
 @[simp] theorem ack_setAck_self (s : State) (sp : PnSpace) (a : Ack.State) :
     (s.setAck sp a).ack sp = a := by cases sp <;> rfl
+
+/-- The `Ecn` instance of a packet number space (§13.4.1, line 5514). -/
+def ecn (s : State) : PnSpace → Ecn.State
+  | .initial => s.ecnInitial
+  | .handshake => s.ecnHandshake
+  | .appData => s.ecnAppData
+
+def setEcn (s : State) : PnSpace → Ecn.State → State
+  | .initial, a => { s with ecnInitial := a }
+  | .handshake, a => { s with ecnHandshake := a }
+  | .appData, a => { s with ecnAppData := a }
+
+@[simp] theorem ecn_setEcn_self (s : State) (sp : PnSpace) (a : Ecn.State) :
+    (s.setEcn sp a).ecn sp = a := by cases sp <;> rfl
 
 /-- The `PathValidation` handle of a `Migration` path, if it has one. -/
 def pathId? (s : State) (p : Migration.Path) : Option Nat := s.pathIds.get? p
@@ -184,6 +206,9 @@ def initAck (cfg : Config) (sp : PnSpace) : Ack.State :=
     largestAckEliciting := none, outstanding := [], ackImmediately := false,
     largestSent := none, maxAckDelay := cfg.maxAckDelay }
 
+/-- One `Ecn` instance, in the space it counts for. -/
+def initEcn (sp : PnSpace) : Ecn.State := { space := sp }
+
 def initPath (cfg : Config) : Migration.Path := ⟨cfg.localAddr, cfg.peerAddr⟩
 
 /-- The connection as it stands once the handshake has produced the parameters
@@ -221,6 +246,10 @@ def init (cfg : Config) : State where
   dsz :=
     { role := cfg.role, peerMaxUdpPayload := none, maxDatagramSize := cfg.maxDatagramSize,
       pathUsable := true, runsPmtuDiscovery := false }
+  rtx := {}
+  ecnInitial := initEcn .initial
+  ecnHandshake := initEcn .handshake
+  ecnAppData := initEcn .appData
   pathIds := [(initPath cfg, 0)]
   nextPathId := 1
 
@@ -296,6 +325,19 @@ inductive LocalAction where
   | icmpPtb (pmtu : Nat)
   /-- §14.2, line 5758: the path cannot carry 1200 bytes. -/
   | pathBelowMinimum (alternativeExists : Bool)
+  /-- §13.3, line 5332: a packet of `sp` numbered `pn` carried `fs`, so the
+      information in it is now in flight.  Fired alongside `sentPacket`; kept
+      separate because `Retransmission` needs the frame list and `Ack` does
+      not. -/
+  | sentPacketFrames (sp : PnSpace) (pn : Nat) (fs : List Frame)
+  /-- §13.3, line 5333: anything else RFC 9002 reports — an acknowledgment, a
+      loss, a stream phase change, a blocked-limit change, history discard. -/
+  | rtxEvent (e : Retransmission.Event)
+  /-- §13.4: anything the IP layer reports.  The ECN codepoint of a received
+      packet is a field of the IP header, not of the QUIC datagram, so it cannot
+      be carried on `Event.datagram`; the harness supplies it here, one event per
+      QUIC packet (§13.4.1, line 5515). -/
+  | ecnEvent (sp : PnSpace) (e : Ecn.Event)
   deriving DecidableEq
 
 /-- TLS as an event source, exactly as WP11 defines it. -/
@@ -334,6 +376,8 @@ inductive Effect where
   | vnServer (e : VersionNeg.Server.Effect)
   | vnClient (e : VersionNeg.Client.Effect)
   | dsz (e : DatagramSize.Effect)
+  | rtx (e : Retransmission.Effect)
+  | ecn (sp : PnSpace) (e : Ecn.Effect)
   /-- A frame the endpoint now owes its peer.  It is *not* a packet going out:
       §13.2 and §13.3 decide when it actually travels, which is out of scope. -/
   | sendPending (f : Frame)
@@ -361,10 +405,13 @@ def InvRole (s : State) : Prop :=
   s.hs.role = s.role ∧ s.st.role = s.role ∧ s.fr.role = s.role ∧
   s.av.role = s.role ∧ s.mig.role = s.role ∧ s.dsz.role = s.role
 
-/-- §12.3, line 4662: each `Ack` instance tracks the space it was built for. -/
+/-- §12.3, line 4662 and §13.4.1, line 5514: each per-space instance tracks the
+    space it was built for. -/
 def InvSpaces (s : State) : Prop :=
   s.ackInitial.space = .initial ∧ s.ackHandshake.space = .handshake ∧
-  s.ackAppData.space = .appData
+  s.ackAppData.space = .appData ∧
+  s.ecnInitial.space = .initial ∧ s.ecnHandshake.space = .handshake ∧
+  s.ecnAppData.space = .appData
 
 /-- The path registry is an injection: fresh handles come from a counter that
     only goes up, so no two paths share one. -/
@@ -391,6 +438,10 @@ structure Inv (s : State) : Prop where
   vnS : VersionNeg.Server.Inv s.vnServer
   vnC : VersionNeg.Client.Inv s.vnClient
   dsz : DatagramSize.Inv s.dsz
+  rtx : Retransmission.Inv s.rtx
+  ecnI : Ecn.Inv s.ecnInitial
+  ecnH : Ecn.Inv s.ecnHandshake
+  ecnA : Ecn.Inv s.ecnAppData
   confirmed : InvConfirmed s
   role : InvRole s
   spaces : InvSpaces s
@@ -405,7 +456,17 @@ theorem Inv.ackOf {s : State} (hi : Inv s) : ∀ sp, Ack.Inv (s.ack sp)
 theorem Inv.spaceOf {s : State} (hi : Inv s) : ∀ sp, (s.ack sp).space = sp
   | .initial => hi.spaces.1
   | .handshake => hi.spaces.2.1
-  | .appData => hi.spaces.2.2
+  | .appData => hi.spaces.2.2.1
+
+theorem Inv.ecnOf {s : State} (hi : Inv s) : ∀ sp, Ecn.Inv (s.ecn sp)
+  | .initial => hi.ecnI
+  | .handshake => hi.ecnH
+  | .appData => hi.ecnA
+
+theorem Inv.ecnSpaceOf {s : State} (hi : Inv s) : ∀ sp, (s.ecn sp).space = sp
+  | .initial => hi.spaces.2.2.2.1
+  | .handshake => hi.spaces.2.2.2.2.1
+  | .appData => hi.spaces.2.2.2.2.2
 
 /-- `Migration` NOTES 1's second obligation: the path status `Migration` mirrors
     agrees with `PathValidation`'s, for every path the registry knows.

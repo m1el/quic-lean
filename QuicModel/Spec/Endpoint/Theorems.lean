@@ -135,6 +135,23 @@ theorem stepVnClient_projects {s s' : State} {e : VersionNeg.Client.Event} {fx :
   obtain ⟨x, gx, rfl, rfl⟩ := liftOutcome_eq_ok he
   exact ⟨gx, (VersionNeg.Client.outcomes_iff _ _ _).mp ho⟩
 
+theorem stepRtx_projects {s s' : State} {e : Retransmission.Event} {fx : List Effect}
+    (h : Outcome.ok s' fx ∈ stepRtx s e) :
+    ∃ gx, Retransmission.Step s.rtx e (.ok s'.rtx gx) := by
+  obtain ⟨o, ho, he⟩ := mem_liftList h
+  obtain ⟨x, gx, rfl, rfl⟩ := liftOutcome_eq_ok he
+  exact ⟨gx, (Retransmission.outcomes_iff _ _ _).mp ho⟩
+
+theorem stepEcn_projects {s s' : State} {sp : PnSpace} {e : Ecn.Event} {fx : List Effect}
+    (h : Outcome.ok s' fx ∈ stepEcn s sp e) :
+    ∃ gx, Ecn.Step (s.ecn sp) e (.ok (s'.ecn sp) gx) := by
+  obtain ⟨o, ho, he⟩ := mem_liftList h
+  obtain ⟨x, gx, rfl, rfl⟩ := liftOutcome_eq_ok he
+  refine ⟨gx, ?_⟩
+  have : (syncConfirmed (s.setEcn sp x)).ecn sp = x := by cases sp <;> rfl
+  rw [this]
+  exact (Ecn.outcomes_iff _ _ _).mp ho
+
 theorem stepDsz_projects {s s' : State} {e : DatagramSize.Event} {fx : List Effect}
     (h : Outcome.ok s' fx ∈ stepDsz s e) :
     ∃ gx, DatagramSize.Step s.dsz e (.ok s'.dsz gx) := by
@@ -167,6 +184,16 @@ endpoint level that side condition is "every datagram passed
 
 theorem maySendDatagram_implies_maySendTo {s : State} {d : OutDatagram}
     (h : MaySendDatagram s d) : AddressValidation.MaySendTo s.av d.dest d.size := h.1
+
+/-- §13.4.2.2, line 5626: a datagram this endpoint may send is ECN-marked only
+    while validation has not failed in any packet number space. -/
+theorem maySendDatagram_ecn {s : State} {d : OutDatagram} (h : MaySendDatagram s d)
+    (hm : d.isEcnMarked = true) (sp : PnSpace) : (s.ecn sp).phase ≠ Ecn.Phase.failed := by
+  have hk := h.2.2.2.2.2.2.1
+  cases sp
+  · exact hk.1 hm
+  · exact hk.2.1 hm
+  · exact hk.2.2 hm
 
 /-- (c).  Every address the limit binds has been sent at most three times what
     was received from it, in every state the endpoint reaches, provided every
@@ -238,6 +265,20 @@ theorem closedPhase_is_term_only (prot : Protection) (now : Time) (av : Bool)
   split
   · rename_i r hr; exact Or.inl (by rw [hr]; rfl)
   · exact Or.inr rfl
+
+/-- §9, line 3325 and §9.3.2, line 3460 (`reviews/wave2.md`, composition note 4):
+    `Migration`'s two MUST-discards take precedence over every other component's
+    `.ok` for the same packet.  They do, because `Migration` is the first gate
+    of `processPayload`: when it drops, the gate short-circuits, so no frame is
+    dispatched and not even `Handshake`'s §7.2 rules run. -/
+theorem migration_discard_wins {now : Time} {mp : Migration.Path} {av : Bool}
+    {ver : Option Nat} {pt : PacketType} {dcid scid : ByteArray} {pn : Nat}
+    {fs : List Frame} {s : State} (hne : fs.isEmpty = false)
+    (hd : stepMig s (.recvPacket mp pn (FrameRules.packetProbing fs) (dcidSeqOf s dcid))
+            = [Outcome.drop]) :
+    processPayload now mp av ver pt dcid scid pn fs s = [Outcome.ok s []] := by
+  simp only [processPayload, hne, Bool.false_eq_true, ↓reduceIte, gate, hd]
+  rfl
 
 /-- (e), second half.  §12.3, line 4693: "If the packet number for sending
     reaches 2^62 - 1, the sender MUST close the connection without sending a

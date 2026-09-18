@@ -21,11 +21,13 @@ import QuicModel.Spec.Endpoint.Dispatch
      §11.1 line 4485's MAY-discard live;
   4. version handling — `VersionNeg.Server` for a server, `VersionNeg.Client`
      for a client;
-  5. for each coalesced packet: `Quic.decodePacket`, then `Handshake`'s key and
-     connection-ID rules (fired **only** after successful unprotection —
-     `Handshake` NOTE 10), then §9's receive rules (`Migration`), then §12.3's
-     duplicate check (`Ack`), then frame by frame §12.4/§12.5 (`FrameRules`) and
-     dispatch to the component that owns the frame's semantics;
+  5. for each coalesced packet: `Quic.decodePacket`, then §9's receive rules
+     (`Migration`) — whose two MUST-discards take precedence over every other
+     component, as `reviews/wave2.md` note 4 requires — then `Handshake`'s key
+     and connection-ID rules (fired **only** after successful unprotection,
+     `Handshake` NOTE 10), then §12.3's duplicate check (`Ack`), then frame by
+     frame §12.4/§12.5 (`FrameRules`) and dispatch to the component that owns
+     the frame's semantics;
   6. after the datagram: §10.1 line 3841's idle-timer restart, which the text
      conditions on the packet having been "received and processed successfully".
 
@@ -474,8 +476,16 @@ def processPayload (now : Time) (mp : Migration.Path) (av : Bool) (ver : Option 
     (pt : PacketType) (dcid scid : ByteArray) (pn : Nat) (fs : List Frame) (s : State) :
     List Out :=
   if fs.isEmpty then stepFr s (.recvPacketFrames pt []) else
-  gate s (stepHs s (.recvHeader pt dcid.toList scid.toList)) (fun s1 =>
-    gate s1 (stepMig s1 (.recvPacket mp pn (FrameRules.packetProbing fs) (dcidSeqOf s1 dcid)))
+  -- §9's two MUST-discards (line 3325 "a client … MUST discard these packets",
+  -- §9.3.2 line 3460 "MUST close the connection silently by discarding all
+  -- connection state") have to take precedence over every other component's
+  -- `.ok` for the same packet, the same way `Termination`'s phase does
+  -- (`reviews/wave2.md`, composition note 4).  That is why `Migration` is asked
+  -- *first*: its `.drop` short-circuits the gate, so no frame is dispatched and
+  -- `Handshake`'s §7.2 rules do not run either.
+  gate s (stepMig s (.recvPacket mp pn (FrameRules.packetProbing fs) (dcidSeqOf s dcid)))
+    (fun s1 =>
+    gate s1 (stepHs s1 (.recvHeader pt dcid.toList scid.toList))
       (fun s2 =>
         match pt.space with
         | none => keep s2
@@ -491,7 +501,7 @@ theorem processPayload_ne (now : Time) (mp : Migration.Path) (av : Bool) (ver : 
   simp only [processPayload]
   split
   · exact stepFr_ne _ _
-  · refine gate_ne (stepHs_ne _ _) (fun _ => gate_ne (stepMig_ne _ _) (fun _ => ?_))
+  · refine gate_ne (stepMig_ne _ _) (fun _ => gate_ne (stepHs_ne _ _) (fun _ => ?_))
     split
     · exact keep_ne _
     · exact gate_ne (stepAck_ne _ _ _) (fun _ =>
@@ -504,8 +514,8 @@ theorem processPayload_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration
   simp only [processPayload]
   split
   · exact stepFr_inv hs _
-  · refine gate_inv hs (stepHs_inv hs _) (fun s1 h1 =>
-      gate_inv h1 (stepMig_inv h1 _) (fun s2 h2 => ?_))
+  · refine gate_inv hs (stepMig_inv hs _) (fun s1 h1 =>
+      gate_inv h1 (stepHs_inv h1 _) (fun s2 h2 => ?_))
     split
     · exact keep_inv h2
     · exact gate_inv h2 (stepAck_inv h2 _ _) (fun s3 h3 =>

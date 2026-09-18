@@ -181,7 +181,7 @@ theorem inv_setHs {s : State} {x : Handshake.State} (hi : Inv s)
     (hx : Handshake.Inv x) (hr : x.role = s.hs.role) :
     Inv (syncConfirmed { s with hs := x }) :=
   ⟨hx, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩,
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩,
    ⟨hr.trans hi.role.1, hi.role.2.1, hi.role.2.2.1, hi.role.2.2.2.1, hi.role.2.2.2.2.1,
     hi.role.2.2.2.2.2⟩,
    hi.spaces, hi.paths⟩
@@ -190,7 +190,7 @@ theorem inv_setSt {s : State} {x : StreamTable.State} (hi : Inv s)
     (hx : StreamTable.Inv x) (hr : x.role = s.st.role) :
     Inv (syncConfirmed { s with st := x }) :=
   ⟨hi.hs, hx, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩,
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩,
    ⟨hi.role.1, hr.trans hi.role.2.1, hi.role.2.2.1, hi.role.2.2.2.1, hi.role.2.2.2.2.1,
     hi.role.2.2.2.2.2⟩,
    hi.spaces, hi.paths⟩
@@ -198,7 +198,7 @@ theorem inv_setSt {s : State} {x : StreamTable.State} (hi : Inv s)
 theorem inv_setFr {s : State} {x : FrameRules.State} (hi : Inv s)
     (hr : x.role = s.fr.role) : Inv (syncConfirmed { s with fr := x }) :=
   ⟨hi.hs, hi.st, trivial, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩,
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩,
    ⟨hi.role.1, hi.role.2.1, hr.trans hi.role.2.2.1, hi.role.2.2.2.1, hi.role.2.2.2.2.1,
     hi.role.2.2.2.2.2⟩,
    hi.spaces, hi.paths⟩
@@ -209,27 +209,28 @@ theorem inv_setAck {s : State} {x : Ack.State} (hi : Inv s) (sp : PnSpace)
   cases sp <;>
     exact ⟨hi.hs, hi.st, hi.fr, by first | exact hx | exact hi.ackI,
       by first | exact hx | exact hi.ackH, by first | exact hx | exact hi.ackA,
-      hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig, hi.term, hi.vnS, hi.vnC, hi.dsz,
-      ⟨rfl, rfl⟩, hi.role,
+      hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig, hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx,
+      hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩, hi.role,
       ⟨by first | exact hsp | exact hi.spaces.1, by first | exact hsp | exact hi.spaces.2.1,
-       by first | exact hsp | exact hi.spaces.2.2⟩,
+       by first | exact hsp | exact hi.spaces.2.2.1, hi.spaces.2.2.2.1,
+       hi.spaces.2.2.2.2.1, hi.spaces.2.2.2.2.2⟩,
       hi.paths⟩
 
 theorem inv_setCidLocal {s : State} {x : ConnIds.Local.State} (hi : Inv s)
     (hx : ConnIds.Local.Inv x) : Inv (syncConfirmed { s with cidLocal := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hx, hi.cidR, hi.av, hi.pv, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
 
 theorem inv_setCidRemote {s : State} {x : ConnIds.Remote.State} (hi : Inv s)
     (hx : ConnIds.Remote.Inv x) : Inv (syncConfirmed { s with cidRemote := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hx, hi.av, hi.pv, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
 
 theorem inv_setAv {s : State} {x : AddressValidation.State} (hi : Inv s)
     (hx : AddressValidation.Inv x) (hr : x.role = s.av.role) :
     Inv (syncConfirmed { s with av := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hx, hi.pv, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩,
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩,
    ⟨hi.role.1, hi.role.2.1, hi.role.2.2.1, hr.trans hi.role.2.2.2.1, hi.role.2.2.2.2.1,
     hi.role.2.2.2.2.2⟩,
    hi.spaces, hi.paths⟩
@@ -237,13 +238,13 @@ theorem inv_setAv {s : State} {x : AddressValidation.State} (hi : Inv s)
 theorem inv_setPv {s : State} {x : PathValidation.State} (hi : Inv s)
     (hx : PathValidation.Inv x) : Inv (syncConfirmed { s with pv := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hx, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
 
 theorem inv_setMig {s : State} {x : Migration.State} (hi : Inv s)
     (hx : Migration.Inv x) (hr : x.role = s.mig.role) :
     Inv (syncConfirmed { s with mig := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hx,
-   hi.term, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩,
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩,
    ⟨hi.role.1, hi.role.2.1, hi.role.2.2.1, hi.role.2.2.2.1, hr.trans hi.role.2.2.2.2.1,
     hi.role.2.2.2.2.2⟩,
    hi.spaces, hi.paths⟩
@@ -251,23 +252,43 @@ theorem inv_setMig {s : State} {x : Migration.State} (hi : Inv s)
 theorem inv_setTerm {s : State} {x : Termination.State} (hi : Inv s)
     (hx : Termination.Inv x) : Inv (syncConfirmed { s with term := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
-   hx, hi.vnS, hi.vnC, hi.dsz, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
+   hx, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
 
 theorem inv_setVnServer {s : State} {x : VersionNeg.Server.State} (hi : Inv s)
     (hx : VersionNeg.Server.Inv x) : Inv (syncConfirmed { s with vnServer := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
-   hi.term, hx, hi.vnC, hi.dsz, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
+   hi.term, hx, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
 
 theorem inv_setVnClient {s : State} {x : VersionNeg.Client.State} (hi : Inv s)
     (hx : VersionNeg.Client.Inv x) : Inv (syncConfirmed { s with vnClient := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
-   hi.term, hi.vnS, hx, hi.dsz, ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
+   hi.term, hi.vnS, hx, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩, hi.role,
+   hi.spaces, hi.paths⟩
+
+theorem inv_setRtx {s : State} {x : Retransmission.State} (hi : Inv s)
+    (hx : Retransmission.Inv x) : Inv (syncConfirmed { s with rtx := x }) :=
+  ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
+   hi.term, hi.vnS, hi.vnC, hi.dsz, hx, hi.ecnI, hi.ecnH, hi.ecnA,
+   ⟨rfl, rfl⟩, hi.role, hi.spaces, hi.paths⟩
+
+theorem inv_setEcn {s : State} {x : Ecn.State} (hi : Inv s) (sp : PnSpace)
+    (hx : Ecn.Inv x) (hsp : x.space = sp) : Inv (syncConfirmed (s.setEcn sp x)) := by
+  cases sp <;>
+    exact ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv,
+      hi.mig, hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx,
+      by first | exact hx | exact hi.ecnI, by first | exact hx | exact hi.ecnH,
+      by first | exact hx | exact hi.ecnA, ⟨rfl, rfl⟩, hi.role,
+      ⟨hi.spaces.1, hi.spaces.2.1, hi.spaces.2.2.1,
+       by first | exact hsp | exact hi.spaces.2.2.2.1,
+       by first | exact hsp | exact hi.spaces.2.2.2.2.1,
+       by first | exact hsp | exact hi.spaces.2.2.2.2.2⟩,
+      hi.paths⟩
 
 theorem inv_setDsz {s : State} {x : DatagramSize.State} (hi : Inv s)
     (hx : DatagramSize.Inv x) (hr : x.role = s.dsz.role) :
     Inv (syncConfirmed { s with dsz := x }) :=
   ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv, hi.mig,
-   hi.term, hi.vnS, hi.vnC, hx, ⟨rfl, rfl⟩,
+   hi.term, hi.vnS, hi.vnC, hx, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA, ⟨rfl, rfl⟩,
    ⟨hi.role.1, hi.role.2.1, hi.role.2.2.1, hi.role.2.2.2.1, hi.role.2.2.2.2.1,
     hr.trans hi.role.2.2.2.2.2⟩,
    hi.spaces, hi.paths⟩
@@ -317,7 +338,7 @@ theorem inv_register {s : State} (hi : Inv s) (p : Migration.Path) :
   split
   · exact hi
   · exact ⟨hi.hs, hi.st, hi.fr, hi.ackI, hi.ackH, hi.ackA, hi.cidL, hi.cidR, hi.av, hi.pv,
-      hi.mig, hi.term, hi.vnS, hi.vnC, hi.dsz, hi.confirmed, hi.role, hi.spaces,
-      invPaths_insert hb hinj⟩
+      hi.mig, hi.term, hi.vnS, hi.vnC, hi.dsz, hi.rtx, hi.ecnI, hi.ecnH, hi.ecnA,
+      hi.confirmed, hi.role, hi.spaces, invPaths_insert hb hinj⟩
 
 end Quic.Spec.Endpoint

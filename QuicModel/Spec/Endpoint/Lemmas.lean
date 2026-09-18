@@ -6,6 +6,7 @@ import QuicModel.Spec.ConnIds
 import QuicModel.Spec.DatagramSize
 import QuicModel.Spec.VersionNegotiation
 import QuicModel.Spec.Ack
+import QuicModel.Spec.Ecn
 
 /-!
   WP12 "Endpoint", part 0: the facts about *other* components that composition
@@ -86,6 +87,17 @@ theorem ack_space_const {s s' : Ack.State} {e : Ack.Event} {fx : List Ack.Effect
   cases h with
   | ackSent => exact Ack.State.afterAckSent_space ..
   | _ => rfl
+
+/-- Each `Ecn` instance stays in its packet number space (§13.4.1, line 5514). -/
+theorem ecn_space_const {s s' : Ecn.State} {e : Ecn.Event} {fx : List Ecn.Effect}
+    (h : Ecn.Step s e (.ok s' fx)) : s'.space = s.space := by
+  cases h <;>
+    first
+      | rfl
+      | (unfold Ecn.State.recordRecv; split <;> rfl)
+      | (unfold Ecn.State.fail; split <;> rfl)
+      | (simp only [Ecn.State.recordRecv, Ecn.State.fail]; repeat' split
+         all_goals rfl)
 
 /-! ## Handshake confirmation only ever turns on
 

@@ -70,38 +70,50 @@ def resetsSettled (s : State) : Bool := resetsOwed s == []
 theorem resetsSettled_iff (s : State) : resetsSettled s = true ↔ ResetsSettled s := by
   simp [resetsSettled, ResetsSettled]
 
-/-! ### §13.3 retransmission (WP14) and §8.2.1 line 3163 (second validation)
+/-! ### §13.3, line 5445 (WP14a) and §13.4.1, line 5504 (WP14b)
 
-Neither predicate exists to be conjoined yet:
+Both are, like §13.2.1's, obligations to *send* something, so both are stated
+over a run and neither is a per-state predicate.  §8.2.1 line 3163's second,
+expanded path validation is deliberately absent: `PathValidation` NOTES 3
+records that it and §8.2.3 line 3221 are obligations to start *another*
+validation at an unspecified later time, that a liveness obligation with no
+deadline cannot be stated as a `Step` constraint, and that it needs the size of
+the datagram a challenge was sent in to be carried in `Challenge`.  There is
+nothing to conjoin, and this file does not invent one. -/
 
-* `QuicModel/Spec/Retransmission.lean` and `QuicModel/Spec/Ecn.lean` were **not
-  on master** when this package was written (WP14 was still running), so
-  `Retransmission.Owes` has no definition to import.  `RetransmissionHook` is
-  the shape the conjunct takes; adding it is one clause of `Obligations` and one
-  import.
-* `PathValidation` deliberately exports no second-validation predicate: its
-  NOTES 3 records that §8.2.1 line 3163 and §8.2.3 line 3221 are obligations to
-  start *another* validation at an unspecified later time, that a liveness
-  obligation with no deadline cannot be stated as a `Step` constraint, and that
-  it needs the size of the datagram a challenge was sent in to be carried in
-  `Challenge`.  So there is nothing to conjoin, and this file does not invent
-  one. -/
+/-- §13.3, line 5445: the information this endpoint still owes a
+    retransmission of, restricted to the kinds §13.3 says are sent *until
+    acknowledged* (`Retransmission.MustRetransmit`). -/
+def repairOwed (s : State) : List Retransmission.Info :=
+  s.rtx.owed.filter Retransmission.MustRetransmit
 
-/-- The hook WP14's `Retransmission.Owes` fills.  `True` while the component is
-    absent, so that `Obligations` is exactly the conjunction of what exists. -/
-def RetransmissionHook (_ : State) (_ : Time) : Prop := True
+def RepairSettled (s : State) : Prop := repairOwed s = []
+
+def repairSettled (s : State) : Bool := repairOwed s == []
+
+theorem repairSettled_iff (s : State) : repairSettled s = true ↔ RepairSettled s := by
+  simp [repairSettled, RepairSettled]
+
+/-- §13.4.1, line 5504: counts have been received and not yet reported, in some
+    packet number space. -/
+def ecnFeedbackOwed (s : State) : Bool :=
+  Ecn.feedbackOwed s.ecnInitial || Ecn.feedbackOwed s.ecnHandshake ||
+  Ecn.feedbackOwed s.ecnAppData
 
 /-! ### The whole obligation -/
 
-/-- What must hold at every point of a conforming timed run. -/
+/-- What must hold at every point of a conforming timed run.  Only §13.2.1's
+    deadline is a *per-state* obligation: the others fix no time by which the
+    frame must go out, so they are conditions on the end of the run
+    (`ObligationsMet`). -/
 def Obligations (s : State) (now tolerance : Time) : Prop :=
-  (∀ sp, Ack.ackOverdue (s.ack sp) now tolerance = false) ∧ RetransmissionHook s now
+  ∀ sp, Ack.ackOverdue (s.ack sp) now tolerance = false
 
 def obligations (s : State) (now tolerance : Time) : Bool := !ackOverdue s now tolerance
 
 theorem obligations_iff (s : State) (now tolerance : Time) :
     obligations s now tolerance = true ↔ Obligations s now tolerance := by
-  simp only [obligations, Obligations, RetransmissionHook, and_true, Bool.not_eq_true']
+  simp only [obligations, Obligations, Bool.not_eq_true']
   exact ackOverdue_iff s now tolerance
 
 /-- A timed run is a sequence of observations, one after each event. -/
@@ -111,13 +123,13 @@ abbrev Run := List (State × Time)
     is ever overdue, and nothing is still owed at the end. -/
 def ObligationsMet (run : Run) (tolerance : Time) : Prop :=
   (∀ p ∈ run, Obligations p.1 p.2 tolerance) ∧
-    ∀ p, run.getLast? = some p → ResetsSettled p.1
+    ∀ p, run.getLast? = some p → ResetsSettled p.1 ∧ RepairSettled p.1
 
 def obligationsMet (run : Run) (tolerance : Time) : Bool :=
   run.all (fun p => obligations p.1 p.2 tolerance) &&
     (match run.getLast? with
      | none => true
-     | some p => resetsSettled p.1)
+     | some p => resetsSettled p.1 && repairSettled p.1)
 
 theorem obligationsMet_iff (run : Run) (tolerance : Time) :
     obligationsMet run tolerance = true ↔ ObligationsMet run tolerance := by
@@ -126,18 +138,42 @@ theorem obligationsMet_iff (run : Run) (tolerance : Time) :
   · rintro ⟨h1, h2⟩
     refine ⟨fun p hp => (obligations_iff _ _ _).mp (h1 p hp), fun p hp => ?_⟩
     rw [hp] at h2
-    exact (resetsSettled_iff _).mp h2
+    simp only [Bool.and_eq_true] at h2
+    exact ⟨(resetsSettled_iff _).mp h2.1, (repairSettled_iff _).mp h2.2⟩
   · rintro ⟨h1, h2⟩
     refine ⟨fun p hp => (obligations_iff _ _ _).mpr (h1 p hp), ?_⟩
     cases hl : run.getLast? with
     | none => rfl
-    | some p => exact (resetsSettled_iff _).mpr (h2 p hl)
+    | some p =>
+      obtain ⟨hr, hp⟩ := h2 p hl
+      simp only [Bool.and_eq_true]
+      exact ⟨(resetsSettled_iff _).mpr hr, (repairSettled_iff _).mpr hp⟩
 
 /-- The exported form WP13 calls: `ackOverdue` is the only obligation the
     harness can observe from outside, because it is the only one whose deadline
     the trace carries. -/
 theorem ackOverdue_sound {run : Run} {tolerance : Time} (h : ObligationsMet run tolerance)
     {p : State × Time} (hp : p ∈ run) : ackOverdue p.1 p.2 tolerance = false :=
-  (ackOverdue_iff _ _ _).mpr (h.1 p hp).1
+  (ackOverdue_iff _ _ _).mpr (h.1 p hp)
+
+/-! ### The two component-level run obligations, over the projected run
+
+`Retransmission.RepairObligationMet` and `Ecn.FeedbackObligationMet` are stated
+over runs of *their* states; the endpoint's run projects onto them.  `Ecn`'s
+also needs the ACK frames the endpoint sent in each space, which the harness
+records from the `OUT` lines of the trace. -/
+
+def rtxRun (run : Run) : List Retransmission.State := run.map (fun p => p.1.rtx)
+
+def ecnRun (sp : PnSpace) (run : List (State × Frame)) : List (Ecn.State × Frame) :=
+  run.map (fun p => (p.1.ecn sp, p.2))
+
+/-- §13.3, line 5445 over a whole run. -/
+def RepairObligationMet (run : Run) : Prop :=
+  Retransmission.RepairObligationMet (rtxRun run)
+
+/-- §13.4.1, line 5504 over a whole run, per packet number space. -/
+def FeedbackObligationMet (run : List (State × Frame)) : Prop :=
+  ∀ sp, Ecn.FeedbackObligationMet (ecnRun sp run)
 
 end Quic.Spec.Endpoint

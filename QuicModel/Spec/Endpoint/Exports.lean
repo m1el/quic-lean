@@ -62,6 +62,7 @@ def Effect.cbName : Effect → Option String
   | .cidLocal (.cidRetiredByPeer _) => some "remove_connection_id"
   | .vnClient .abandon => some "recv_version_negotiation"
   | .vnClient (.attemptVersion _) => some "version_negotiation"
+  | .ecn _ .ecnValidationFailed => some "path_validation"
   | _ => none
 
 private def lvlName : Handshake.CryptoLevel → String
@@ -134,6 +135,12 @@ def Effect.render : Effect → String
   | .vnClient (.attemptVersion v) => s!"version_negotiation version={v}"
   | .dsz .deliver => "dsz_deliver"
   | .dsz .ceaseSending => "cease_sending"
+  | .rtx (.repair _) => "repair"
+  | .rtx (.ceaseSending _) => "cease_repair"
+  | .rtx .congestionControlAction => "congestion_control_action"
+  | .ecn sp .ecnValidationFailed => s!"ecn_validation_failed space={spaceName sp}"
+  | .ecn sp .disableEcn => s!"disable_ecn space={spaceName sp}"
+  | .ecn sp .ecnValidated => s!"ecn_validated space={spaceName sp}"
   | .sendPending f => s!"send_pending {f.dump}"
   | .skippedRest => "skipped_rest"
 
@@ -273,10 +280,11 @@ packet proves nothing (PLAN §4a, "send side is one-directional"). -/
 
 @[export quic_endpoint_may_send_datagram]
 def maySendDatagramC (s : State) (src dest : UInt64) (size : UInt64) (isPmtuProbe : UInt8)
-    (dcid scid : ByteArray) (packets : List OutPacket) : UInt8 :=
+    (isEcnMarked : UInt8) (dcid scid : ByteArray) (packets : List OutPacket) : UInt8 :=
   if maySendDatagram s
       { size := size.toNat, packets, dest := ⟨dest.toNat⟩, isPmtuProbe := isPmtuProbe != 0,
-        src := ⟨src.toNat⟩, dcid := some dcid.toList, scid := some scid.toList } then 1 else 0
+        isEcnMarked := isEcnMarked != 0, src := ⟨src.toNat⟩, dcid := some dcid.toList,
+        scid := some scid.toList } then 1 else 0
 
 @[export quic_endpoint_may_send_packet]
 def maySendPacketC (s : State) (p : OutPacket) : UInt8 := if maySendPacket s p then 1 else 0
@@ -298,6 +306,21 @@ def obligationsC (s : State) (now tolerance : UInt64) : UInt8 :=
 
 @[export quic_endpoint_resets_owed]
 def resetsOwedC (s : State) : List UInt64 := (resetsOwed s).map (fun i => i.val.toUInt64)
+
+/-- §13.3, line 5445: how many pieces of information are still owed a
+    retransmission.  `0` at the end of a conforming run. -/
+@[export quic_endpoint_repair_owed]
+def repairOwedC (s : State) : UInt64 := (repairOwed s).length.toUInt64
+
+/-- §13.4.1, line 5504: ECN counts received and not yet reported. -/
+@[export quic_endpoint_ecn_feedback_owed]
+def ecnFeedbackOwedC (s : State) : UInt8 := if ecnFeedbackOwed s then 1 else 0
+
+/-- §13.4.2.2, line 5626: may the endpoint still set the ECT codepoint? -/
+@[export quic_endpoint_may_mark_ecn]
+def mayMarkEcnC (s : State) (marked : UInt8) : UInt8 :=
+  if Ecn.mayMarkEcn s.ecnInitial (marked != 0) && Ecn.mayMarkEcn s.ecnHandshake (marked != 0) &&
+      Ecn.mayMarkEcn s.ecnAppData (marked != 0) then 1 else 0
 
 /-! ## Reading the state, for triage -/
 

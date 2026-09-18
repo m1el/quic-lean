@@ -226,6 +226,36 @@ theorem stepDsz_inv {s : State} (hi : Inv s) (e : DatagramSize.Event) :
   have hstep := (DatagramSize.outcomes_iff _ _ _).mp ho
   exact inv_setDsz hi (DatagramSize.step_inv _ _ _ _ hi.dsz hstep) (datagramSize_role_const hstep)
 
+def stepRtx (s : State) (e : Retransmission.Event) : List Out :=
+  liftList (fun x => syncConfirmed { s with rtx := x }) Effect.rtx
+    (Retransmission.outcomes s.rtx e)
+
+theorem stepRtx_ne (s : State) (e : Retransmission.Event) : stepRtx s e ≠ [] :=
+  liftList_ne (Retransmission.outcomes_ne _ _)
+
+theorem stepRtx_inv {s : State} (hi : Inv s) (e : Retransmission.Event) :
+    InvOk (stepRtx s e) := by
+  intro s' fx hm
+  obtain ⟨o, ho, he⟩ := mem_liftList hm
+  obtain ⟨x, gx, rfl, rfl⟩ := liftOutcome_eq_ok he
+  have hstep := (Retransmission.outcomes_iff _ _ _).mp ho
+  exact inv_setRtx hi (Retransmission.step_inv _ _ _ _ hi.rtx hstep)
+
+def stepEcn (s : State) (sp : PnSpace) (e : Ecn.Event) : List Out :=
+  liftList (fun x => syncConfirmed (s.setEcn sp x)) (Effect.ecn sp) (Ecn.outcomes (s.ecn sp) e)
+
+theorem stepEcn_ne (s : State) (sp : PnSpace) (e : Ecn.Event) : stepEcn s sp e ≠ [] :=
+  liftList_ne (Ecn.outcomes_ne _ _)
+
+theorem stepEcn_inv {s : State} (hi : Inv s) (sp : PnSpace) (e : Ecn.Event) :
+    InvOk (stepEcn s sp e) := by
+  intro s' fx hm
+  obtain ⟨o, ho, he⟩ := mem_liftList hm
+  obtain ⟨x, gx, rfl, rfl⟩ := liftOutcome_eq_ok he
+  have hstep := (Ecn.outcomes_iff _ _ _).mp ho
+  exact inv_setEcn hi sp (Ecn.step_inv _ _ _ _ (hi.ecnOf sp) hstep)
+    ((ecn_space_const hstep).trans (hi.ecnSpaceOf sp))
+
 /-! ### Adding an alternative at the top level
 
 §5.2.2 line 1936's CONNECTION_REFUSED, §11.1 line 4485's "MAY discard an invalid

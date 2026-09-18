@@ -35,17 +35,19 @@ open Quic.Spec
 def MaySend (s : State) (f : Frame) : Prop :=
   Handshake.MaySend s.hs f ∧ StreamTable.MaySend s.st f ∧
   ConnIds.Local.MaySend s.cidLocal f ∧ ConnIds.Remote.MaySend s.cidRemote f ∧
-  PathValidation.MaySend s.pv f ∧ Termination.MaySend s.term f
+  PathValidation.MaySend s.pv f ∧ Termination.MaySend s.term f ∧
+  Retransmission.MaySend s.rtx f
 
 def maySend (s : State) (f : Frame) : Bool :=
   Handshake.maySend s.hs f && StreamTable.maySend s.st f &&
   ConnIds.Local.maySend s.cidLocal f && ConnIds.Remote.maySend s.cidRemote f &&
-  PathValidation.maySend s.pv f && Termination.maySend s.term f
+  PathValidation.maySend s.pv f && Termination.maySend s.term f &&
+  Retransmission.maySend s.rtx f
 
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
   simp only [maySend, MaySend, Bool.and_eq_true, Handshake.maySend_iff, StreamTable.maySend_iff,
     ConnIds.Local.maySend_iff, ConnIds.Remote.maySend_iff, PathValidation.maySend_iff,
-    Termination.maySend_iff, and_assoc]
+    Termination.maySend_iff, Retransmission.maySend_iff, and_assoc]
 
 instance instDecidableMaySend (s : State) (f : Frame) : Decidable (MaySend s f) :=
   decidable_of_iff _ (maySend_iff s f)
@@ -66,26 +68,41 @@ theorem ackPacketOk_iff (s : State) (p : OutPacket) :
     ackPacketOk s p = true ↔ AckPacketOk s p := by
   simp only [ackPacketOk, AckPacketOk, Bool.and_eq_true, Ack.maySendPacket_iff, and_assoc]
 
+/-- §13.4.1, line 5509: the ECN counts an ACK frame reports are the ones of its
+    own packet number space, so all three instances apply exactly as `Ack`'s
+    do. -/
+def EcnPacketOk (s : State) (p : OutPacket) : Prop :=
+  Ecn.MaySendPacket s.ecnInitial p ∧ Ecn.MaySendPacket s.ecnHandshake p ∧
+  Ecn.MaySendPacket s.ecnAppData p
+
+def ecnPacketOk (s : State) (p : OutPacket) : Bool :=
+  Ecn.maySendPacket s.ecnInitial p && Ecn.maySendPacket s.ecnHandshake p &&
+  Ecn.maySendPacket s.ecnAppData p
+
+theorem ecnPacketOk_iff (s : State) (p : OutPacket) :
+    ecnPacketOk s p = true ↔ EcnPacketOk s p := by
+  simp only [ecnPacketOk, EcnPacketOk, Bool.and_eq_true, Ecn.maySendPacket_iff, and_assoc]
+
 def MaySendPacket (s : State) (p : OutPacket) : Prop :=
   FrameRules.MaySendPacket s.fr p ∧ Handshake.MaySendPacket s.hs p ∧
   Termination.MaySendPacket s.term p ∧ Migration.MaySendPacket s.mig p ∧
-  AckPacketOk s p ∧ ∀ f ∈ p.frames, MaySend s f
+  AckPacketOk s p ∧ EcnPacketOk s p ∧ ∀ f ∈ p.frames, MaySend s f
 
 def maySendPacket (s : State) (p : OutPacket) : Bool :=
   FrameRules.maySendPacket s.fr p && Handshake.maySendPacket s.hs p &&
   Termination.maySendPacket s.term p && Migration.maySendPacket s.mig p &&
-  ackPacketOk s p && p.frames.all (maySend s)
+  ackPacketOk s p && ecnPacketOk s p && p.frames.all (maySend s)
 
 theorem maySendPacket_iff (s : State) (p : OutPacket) :
     maySendPacket s p = true ↔ MaySendPacket s p := by
   simp only [maySendPacket, MaySendPacket, Bool.and_eq_true, FrameRules.maySendPacket_iff,
     Handshake.maySendPacket_iff, Termination.maySendPacket_iff, Migration.maySendPacket_iff,
-    ackPacketOk_iff, List.all_eq_true, and_assoc]
+    ackPacketOk_iff, ecnPacketOk_iff, List.all_eq_true, and_assoc]
   constructor
-  · rintro ⟨h1, h2, h3, h4, h5, h6⟩
-    exact ⟨h1, h2, h3, h4, h5, fun f hf => (maySend_iff s f).mp (h6 f hf)⟩
-  · rintro ⟨h1, h2, h3, h4, h5, h6⟩
-    exact ⟨h1, h2, h3, h4, h5, fun f hf => (maySend_iff s f).mpr (h6 f hf)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, fun f hf => (maySend_iff s f).mp (h7 f hf)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, fun f hf => (maySend_iff s f).mpr (h7 f hf)⟩
 
 instance instDecidableMaySendPacket (s : State) (p : OutPacket) : Decidable (MaySendPacket s p) :=
   decidable_of_iff _ (maySendPacket_iff s p)
@@ -128,6 +145,23 @@ theorem pathResponsesOnPath_iff (s : State) (d : OutDatagram) :
   · intro h p hp f hf
     exact (frameResponseOk_iff _ _ f).mpr (h p hp f hf)
 
+/-- §13.4.2.2, line 5626: "If validation fails, then the endpoint MUST disable
+    ECN.  It stops setting the ECT codepoint in IP packets that it sends."
+    `Ecn.MayMarkEcn` is per packet number space and `Spec.OutDatagram.isEcnMarked`
+    is per datagram, so the datagram may be marked only if every instance allows
+    it (`Ecn` NOTES 1 and 6). -/
+def EcnMarkOk (s : State) (d : OutDatagram) : Prop :=
+  Ecn.MayMarkEcn s.ecnInitial d.isEcnMarked ∧ Ecn.MayMarkEcn s.ecnHandshake d.isEcnMarked ∧
+  Ecn.MayMarkEcn s.ecnAppData d.isEcnMarked
+
+def ecnMarkOk (s : State) (d : OutDatagram) : Bool :=
+  Ecn.mayMarkEcn s.ecnInitial d.isEcnMarked && Ecn.mayMarkEcn s.ecnHandshake d.isEcnMarked &&
+  Ecn.mayMarkEcn s.ecnAppData d.isEcnMarked
+
+theorem ecnMarkOk_iff (s : State) (d : OutDatagram) :
+    ecnMarkOk s d = true ↔ EcnMarkOk s d := by
+  simp only [ecnMarkOk, EcnMarkOk, Bool.and_eq_true, Ecn.mayMarkEcn_iff, and_assoc]
+
 /-- Everything the model knows about a datagram this endpoint may send. -/
 def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
   -- §8, line 2735 / §8.1, line 2773: the anti-amplification budget
@@ -143,6 +177,9 @@ def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
   Migration.MaySendDatagramOn s.av s.mig d ∧
   -- §8.2.2, line 3183
   PathResponsesOnPath s d ∧
+  -- §13.4.2.2, line 5626: once ECN validation has failed on this path the ECT
+  -- codepoint may not be set again.  One instance per space, so all three.
+  EcnMarkOk s d ∧
   -- every packet coalesced in it
   ∀ p ∈ d.packets, MaySendPacket s p
 
@@ -153,19 +190,20 @@ def maySendDatagram (s : State) (d : OutDatagram) : Bool :=
   PathValidation.maySendDatagramOn s.av d &&
   decide (Migration.MaySendDatagramOn s.av s.mig d) &&
   pathResponsesOnPath s d &&
+  ecnMarkOk s d &&
   d.packets.all (maySendPacket s)
 
 theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
     maySendDatagram s d = true ↔ MaySendDatagram s d := by
   simp only [maySendDatagram, MaySendDatagram, Bool.and_eq_true, AddressValidation.maySendTo_iff,
     DatagramSize.maySendDatagram_iff, Migration.maySendDatagram_iff,
-    PathValidation.maySendDatagramOn_iff, pathResponsesOnPath_iff, decide_eq_true_eq,
-    List.all_eq_true, and_assoc]
+    PathValidation.maySendDatagramOn_iff, pathResponsesOnPath_iff, ecnMarkOk_iff,
+    decide_eq_true_eq, List.all_eq_true, and_assoc]
   constructor
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, fun p hp => (maySendPacket_iff s p).mp (h7 p hp)⟩
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, fun p hp => (maySendPacket_iff s p).mpr (h7 p hp)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, fun p hp => (maySendPacket_iff s p).mp (h8 p hp)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, fun p hp => (maySendPacket_iff s p).mpr (h8 p hp)⟩
 
 instance instDecidableMaySendDatagram (s : State) (d : OutDatagram) :
     Decidable (MaySendDatagram s d) := decidable_of_iff _ (maySendDatagram_iff s d)
@@ -211,7 +249,7 @@ def maySendStatelessReset (preventsLooping : Bool) (triggerSize resetSize : Nat)
     send no frame at all, whatever the other components think. -/
 theorem maySend_false_of_draining_or_closed {s : State} (f : Frame)
     (hp : s.term.phase = .draining ∨ s.term.phase = .closed) : ¬ MaySend s f := by
-  rintro ⟨-, -, -, -, -, h⟩
+  rintro ⟨-, -, -, -, -, h, -⟩
   exact Termination.maySend_false_of_draining_or_closed _ f hp h
 
 /-- §12.3, line 4693: once a packet number space is spent, no packet of that
@@ -219,7 +257,7 @@ theorem maySend_false_of_draining_or_closed {s : State} (f : Frame)
 theorem not_maySendPacket_of_pnExhausted {s : State} {p : OutPacket} {sp : PnSpace}
     (hsp : p.ptype.space = some sp) (hspace : (s.ack sp).space = sp)
     (hx : Ack.pnExhausted (s.ack sp) = true) : ¬ MaySendPacket s p := by
-  rintro ⟨-, -, -, -, ⟨hi, hh, ha⟩, -⟩
+  rintro ⟨-, -, -, -, ⟨hi, hh, ha⟩, -, -⟩
   have : Ack.MaySendPacket (s.ack sp) p := by cases sp <;> assumption
   exact Ack.not_maySendPacket_of_exhausted hx (by rw [hsp, hspace]) this
 
