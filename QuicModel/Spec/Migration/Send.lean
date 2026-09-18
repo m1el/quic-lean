@@ -98,14 +98,15 @@ theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
     but it MUST protect against potential attacks as described in Section 9.3.1
     and Section 9.3.2"; §9.3.1, line 3431: "Until a peer's address is deemed
     valid, an endpoint limits the amount of data it sends to that address; see
-    Section 8."  The limit itself is `AddressValidation.MaySendDatagram`, not
-    duplicated here: `av` is WP5's state and `s.tx.path.peer` the address of the
-    path the datagram leaves on.  §9.3.1, line 3436 ("If an endpoint skips
-    validation of a peer address as described above, it does not need to limit
-    its sending rate") is already in WP5's predicate, which is satisfied
-    outright once the address is marked validated. -/
+    Section 8."  The limit itself is `AddressValidation.MaySendTo` (the
+    per-address form behind WP5's `MaySendDatagram` field), not duplicated here:
+    `av` is WP5's state and `s.tx.path.peer` the address of the path the
+    datagram leaves on.  §9.3.1, line 3436 ("If an endpoint skips validation of
+    a peer address as described above, it does not need to limit its sending
+    rate") is already in WP5's predicate, which is satisfied outright once the
+    address is marked validated. -/
 def MaySendDatagramOn (av : AddressValidation.State) (s : State) (d : OutDatagram) : Prop :=
-  MaySendDatagram s d ∧ AddressValidation.MaySendDatagram av s.tx.path.peer d.size
+  MaySendDatagram s d ∧ AddressValidation.MaySendTo av s.tx.path.peer d.size
 
 instance (av : AddressValidation.State) (s : State) (d : OutDatagram) :
     Decidable (MaySendDatagramOn av s d) := inferInstanceAs (Decidable (_ ∧ _))

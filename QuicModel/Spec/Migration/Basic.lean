@@ -17,9 +17,11 @@ namespace Quic.Spec.Migration
 
 /-- The peer's transport address, shared with `AddressValidation` so that WP12
     can look up the anti-amplification budget of a path's peer address without a
-    translation table (§8.2, line 3075: "an address is the two-tuple of IP
-    address and port"). -/
-abbrev PeerAddr := AddressValidation.Addr
+    translation table (§8.2, line 3074: "an address is the two-tuple of IP
+    address and port").  WP5 dropped its own copy of the type in favour of
+    `Spec.Addr` (which `Spec.OutDatagram.dest` also uses), so this names exactly
+    the type `AddressValidation.State` is keyed by. -/
+abbrev PeerAddr := Spec.Addr
 
 /-- One of our own transport addresses.  Opaque: the model never inspects it,
     and equality of handles means equality of the two-tuple.  §9.5, line 3603
