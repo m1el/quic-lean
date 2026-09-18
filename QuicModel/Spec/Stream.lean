@@ -4,7 +4,7 @@ import QuicModel.Spec.Stream.Recv
 /-
   WP2 Stream, part 3 of 3: one whole stream, as seen by one endpoint.
 
-  §3, line 866: "Unidirectional streams use either the sending or receiving
+  §3, line 832: "Unidirectional streams use either the sending or receiving
   state machine depending on the stream type and endpoint role.  Bidirectional
   streams use both state machines at both endpoints."  So a stream is the two
   halves of `Spec/Stream/Send.lean` and `Spec/Stream/Recv.lean`, present or not
@@ -22,8 +22,9 @@ namespace Quic.Spec.Stream
 
 /-! ## 1. State, events, effects -/
 
-/-- §3, line 866 and §2.1, Table 1: the endpoint has a sending part for a
-    bidirectional stream, or for a unidirectional stream it initiated itself. -/
+/-- §3, line 832 and §2.1, Table 1 (line 714): the endpoint has a sending part
+    for a bidirectional stream, or for a unidirectional stream it initiated
+    itself. -/
 def hasSend (id : StreamId) (role : Role) : Bool :=
   match id.dir with
   | .bidi => true
@@ -289,10 +290,11 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
 
 /-! ## 6. Send side: §3.3 permitted frame types
 
-§3.3, line 1105: "The sender of a stream sends just three frame types that
-affect the state of a stream at either sender or receiver: STREAM,
-STREAM_DATA_BLOCKED and RESET_STREAM"; line 1120: "The receiver of a stream
-sends MAX_STREAM_DATA and STOP_SENDING frames."  A half that does not exist may
+§3.3, line 1141: "The sender of a stream sends just three frame types that
+affect the state of a stream at either sender or receiver: STREAM
+(Section 19.8), STREAM_DATA_BLOCKED (Section 19.13), and RESET_STREAM
+(Section 19.4)"; line 1153: "The receiver of a stream sends MAX_STREAM_DATA
+(Section 19.10) and STOP_SENDING frames."  A half that does not exist may
 not be spoken for at all. -/
 
 /-- Frames that belong to the sending part of stream `id`. -/
@@ -333,6 +335,42 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
     · revert h1; cases s.send <;> simp [Send.maySend_iff]
     · revert h2; cases s.recv <;> simp [Recv.maySend_iff]
 
+/-! ### Recommendations about what to send
+
+Neither half's `MaySend` may be stricter than the text, so the SHOULDs that
+constrain a frame rather than forbid it live in `RecommendedSend` on each half
+(§3.3, line 1156 and §13.3, line 5393 for MAX_STREAM_DATA; §3.5, lines 1263 and
+1269; §4.1, line 1376).  The whole stream's recommendation is their conjunction,
+exactly as `MaySend` is. -/
+def RecommendedSend (s : State) (f : Frame) : Prop :=
+  (match s.send with
+   | some ss => Send.RecommendedSend ss f
+   | none => governedBySend s.id f = false) ∧
+  (match s.recv with
+   | some rs => Recv.RecommendedSend rs f
+   | none => governedByRecv s.id f = false)
+
+def recommendedSend (s : State) (f : Frame) : Bool :=
+  (match s.send with
+   | some ss => Send.recommendedSend ss f
+   | none => !governedBySend s.id f) &&
+  (match s.recv with
+   | some rs => Recv.recommendedSend rs f
+   | none => !governedByRecv s.id f)
+
+theorem recommendedSend_iff (s : State) (f : Frame) :
+    recommendedSend s f = true ↔ RecommendedSend s f := by
+  simp only [recommendedSend, RecommendedSend, Bool.and_eq_true]
+  constructor
+  · rintro ⟨h1, h2⟩
+    constructor
+    · revert h1; cases s.send <;> simp [Send.recommendedSend_iff]
+    · revert h2; cases s.recv <;> simp [Recv.recommendedSend_iff]
+  · rintro ⟨h1, h2⟩
+    constructor
+    · revert h1; cases s.send <;> simp [Send.recommendedSend_iff]
+    · revert h2; cases s.recv <;> simp [Recv.recommendedSend_iff]
+
 /-! ## 7. The component -/
 
 @[reducible] def component : Component where
@@ -351,7 +389,70 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
 
 /-! ## 8. Named theorems -/
 
-/-- **(a) The final size is immutable**, on both halves (§4.5, line 1516). -/
+/-! ### §4.5's recommendation, lifted to the whole stream
+
+The receiving half's `Recv.Recommended` records which *outcome* §4.5 asks for
+when a frame contradicts a known final size: the FINAL_SIZE_ERROR, not carrying
+on as if nothing were wrong.  The sending half has no outcome-level
+recommendation — all of its SHOULDs constrain a frame, and live in
+`RecommendedSend` — so a `.send` event is always recommended here.
+
+`Recv.Recommended` looks only at the event and at whether the outcome is `.ok`,
+so the composite can state the same condition without naming the half's new
+state; `recv_recommended_ok` is that fact. -/
+def Recommended (s : State) : Event → Out → Prop
+  | .recv e, .ok _ _ =>
+      match s.recv with
+      | some rs => Recv.Recommended rs e (.ok rs [])
+      | none => True
+  | _, _ => True
+
+theorem recv_recommended_ok (rs : Recv.State) (e : Recv.Event) (a b : Recv.State)
+    (fx gx : List Recv.Effect) :
+    Recv.Recommended rs e (.ok a fx) ↔ Recv.Recommended rs e (.ok b gx) := by
+  cases e <;> exact Iff.rfl
+
+private theorem head_map {α β : Type} (f : α → β) (l : List α) (h₁ : l ≠ [])
+    (h₂ : l.map f ≠ []) : (l.map f).head h₂ = f (l.head h₁) := by
+  cases l with
+  | nil => exact absurd rfl h₁
+  | cons a t => rfl
+
+/-- The composite's reference implementation is the half's, lifted. -/
+theorem step_recv {s : State} {rs : Recv.State} (h : s.recv = some rs) (e : Recv.Event) :
+    component.step s (.recv e) = liftRecv s (Recv.component.step rs e) := by
+  simp only [Component.step, component, outcomes, h, Recv.component]
+  exact head_map _ _ (Recv.outcomes_ne rs e) _
+
+theorem step_send {s : State} {ss : Send.State} (h : s.send = some ss) (e : Send.Event) :
+    component.step s (.send e) = liftSend s (Send.component.step ss e) := by
+  simp only [Component.step, component, outcomes, h, Send.component]
+  exact head_map _ _ (Send.outcomes_ne ss e) _
+
+/-- The reference implementation takes §4.5's advice on the whole stream too. -/
+theorem step_recommended (s : State) (e : Event) : Recommended s e (component.step s e) := by
+  cases e with
+  | send e => trivial
+  | recv e =>
+    cases hr : s.recv with
+    | none =>
+      cases hh : component.step s (.recv e) with
+      | ok s' fx => simp only [Recommended, hr]
+      | error c => trivial
+      | drop => trivial
+    | some rs =>
+      have hs := step_recv hr e
+      have hrec := Recv.step_recommended rs e
+      cases hstep : Recv.component.step rs e with
+      | ok rs' fx =>
+        rw [hstep] at hs hrec
+        rw [hs]
+        simp only [liftRecv, Recommended, hr]
+        exact (recv_recommended_ok rs e rs' rs fx []).mp hrec
+      | error c => rw [hstep] at hs; rw [hs]; trivial
+      | drop => rw [hstep] at hs; rw [hs]; trivial
+
+/-- **(a) The final size is immutable**, on both halves (§4.5, line 1517). -/
 theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect}
     (h : Step s e (.ok s' fx)) :
     (∀ ss ss' f, s.send = some ss → s'.send = some ss' → ss.finalSize = some f →
@@ -384,16 +485,24 @@ theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect}
       subst ha; subst hb
       exact Recv.finalSize_immutable hs hf
 
-/-- **(b) Data received never exceeds the credit advertised** (§4.1, line 1359). -/
+/-- **(b) Data received never exceeds the credit advertised** (§4.1, line 1368). -/
 theorem highest_le_maxData {s₀ s : State} {rs : Recv.State}
     (h0 : Inv s₀) (h : component.Reachable s₀ s) (hr : s.recv = some rs) :
     rs.highest ≤ rs.maxData :=
   ((component.inv_of_reachable h0 h).2.2.2 rs hr).2.2.1
 
-/-- **(c) Terminal states absorb**, on both halves (§3.1, §3.2). -/
+/-- **(c) Terminal states absorb** — each half's *phase* does (§3.1, lines 975
+    and 990; §3.2, lines 1102 and 1135).  Flow-control accounting keeps running
+    on both halves, so neither half's state freezes entirely: the receiving part
+    still counts late STREAM frames (§3.5, line 1250) and the sending part still
+    records a raised peer limit (§4.1, line 1349, permitted in every phase
+    because §3.1, line 971 only *allows* ignoring it).
+    `Send.terminal_absorbing_state` says exactly how much of a terminal sending
+    part can still move — nothing but `maxData`, and only upwards. -/
 theorem terminal_absorbing {s s' : State} {e : Event} {fx : List Effect}
     (h : Step s e (.ok s' fx)) :
-    (∀ ss ss', s.send = some ss → s'.send = some ss' → ss.phase.terminal = true → ss' = ss) ∧
+    (∀ ss ss', s.send = some ss → s'.send = some ss' → ss.phase.terminal = true →
+      ss'.phase = ss.phase) ∧
     (∀ rs rs', s.recv = some rs → s'.recv = some rs' → rs.phase.terminal = true →
       rs'.phase = rs.phase) := by
   cases h with
@@ -459,8 +568,8 @@ theorem step_follows_diagram {s s' : State} {e : Event} {fx : List Effect}
 
 /-! ### §3.3 Permitted frame types, as theorems -/
 
-/-- §3.3, line 1112: "A sender MUST NOT send any of these frames from a terminal
-    state ('Data Recvd' or 'Reset Recvd')." -/
+/-- §3.3, line 1146: "A sender MUST NOT send any of these frames from a terminal
+    state ("Data Recvd" or "Reset Recvd")." -/
 theorem no_send_from_terminal {s : State} {ss : Send.State} {f : Frame}
     (hh : s.send = some ss) (hid : ss.id = s.id) (ht : ss.phase.terminal = true)
     (hf : governedBySend s.id f = true) : maySend s f = false := by
@@ -472,8 +581,8 @@ theorem no_send_from_terminal {s : State} {ss : Send.State} {f : Frame}
     simp_all [governedBySend, Send.maySend, Send.maySendStream, Send.maySendBlocked,
       Send.maySendReset]
 
-/-- §3.3, line 1114: "A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED
-    frame for a stream in the 'Reset Sent' state or any terminal state." -/
+/-- §3.3, line 1147: "A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED
+    frame for a stream in the "Reset Sent" state or any terminal state." -/
 theorem no_data_after_reset {s : State} {ss : Send.State} {offset : Nat} {fin : Bool}
     {data : ByteArray} (hh : s.send = some ss) (hid : ss.id = s.id)
     (ht : ss.phase.mayCarryData = false) :
@@ -483,19 +592,33 @@ theorem no_data_after_reset {s : State} {ss : Send.State} {offset : Nat} {fin : 
   · simp [maySend, hh, hid, Send.maySend, Send.maySendStream, ht]
   · intro v; simp [maySend, hh, hid, Send.maySend, Send.maySendBlocked, ht]
 
-/-- §3.3, line 1121: "The receiver only sends MAX_STREAM_DATA in the 'Recv'
-    state." -/
-theorem maxStreamData_only_in_recv {s : State} {rs : Recv.State} {v : Nat}
+/-- §3.3, line 1156: "The receiver only sends MAX_STREAM_DATA in the "Recv"
+    state", restated as a SHOULD by §13.3, line 5393.  This is advice, so it is
+    stated about `recommendedSend`, not about `maySend`: the frame is permitted
+    in every phase (`maxStreamData_always_permitted` below), because §13.3,
+    line 5390 requires a lost MAX_STREAM_DATA to be re-sent and §3.1, line 970
+    expects such frames to arrive after the FIN. -/
+theorem maxStreamData_recommended_only_in_recv {s : State} {rs : Recv.State} {v : Nat}
     (hh : s.recv = some rs) (hid : rs.id = s.id)
-    (h : maySend s (.maxStreamData s.id.val v) = true) : rs.phase = .recv := by
-  simp only [maySend, hh, Bool.and_eq_true] at h
+    (h : recommendedSend s (.maxStreamData s.id.val v) = true) : rs.phase = .recv := by
+  simp only [recommendedSend, hh, Bool.and_eq_true] at h
   have h2 := h.2
-  simp only [Recv.maySend, hid, reduceIte, Recv.maySendMaxStreamData] at h2
+  simp only [Recv.recommendedSend, hid, reduceIte, Recv.recommendedMaxStreamData] at h2
   cases hp : rs.phase <;> simp_all [Recv.Phase.isRecv]
 
-/-- §3.3, line 1123: "A receiver MAY send STOP_SENDING in any state where it has
-    not received a RESET_STREAM frame; that is states other than 'Reset Recvd'
-    or 'Reset Read'." -/
+/-- …and it is never forbidden: review finding W2-2.  A stream with a receiving
+    part always permits MAX_STREAM_DATA for itself. -/
+theorem maxStreamData_always_permitted {s : State} {rs : Recv.State} {v : Nat}
+    (hh : s.recv = some rs) : maySend s (.maxStreamData s.id.val v) = true := by
+  simp only [maySend, hh, Bool.and_eq_true]
+  refine ⟨?_, rfl⟩
+  cases hsend : s.send with
+  | none => simp [governedBySend]
+  | some ss => simp [Send.maySend]
+
+/-- §3.3, line 1157: "receiver MAY send STOP_SENDING in any state where it has
+    not received a RESET_STREAM frame; that is states other than "Reset Recvd"
+    or "Reset Read"." -/
 theorem stopSending_not_after_reset {s : State} {rs : Recv.State} {code : Nat}
     (hh : s.recv = some rs) (hid : rs.id = s.id) (ht : rs.phase.mayStopSending = false) :
     maySend s (.stopSending s.id.val code) = false := by
@@ -516,13 +639,13 @@ theorem nothing_sent_on_send_only {s : State} {f : Frame}
 
 /-! ### §3.4 Bidirectional stream states -/
 
-/-- §3.4, Table 2: a composite state for a bidirectional stream.  `openStream`
-    is Table 2's "open" (`open` is a Lean keyword). -/
+/-- §3.4, Table 2 (line 1220): a composite state for a bidirectional stream.
+    `openStream` is Table 2's "open" (`open` is a Lean keyword). -/
 inductive Composite where
   | idle | openStream | halfClosedRemote | halfClosedLocal | closed
   deriving DecidableEq, Repr
 
-/-- §3.4, Table 2, rows 2–9.  The sending part contributes only whether it is
+/-- §3.4, Table 2 (line 1220), rows 2–9.  The sending part contributes only whether it is
     still able to carry data ("Ready"/"Send"/"Data Sent") and the receiving part
     only whether it is still waiting for data ("Recv"/"Size Known"). -/
 def Composite.of (a : Send.Phase) (b : Recv.Phase) : Composite :=
@@ -532,14 +655,14 @@ def Composite.of (a : Send.Phase) (b : Recv.Phase) : Composite :=
   | false, true => .halfClosedLocal
   | false, false => .closed
 
-/-- §3.4, Note (*1): "A stream is considered 'idle' if it has not yet been
-    created, or if the receiving part of the stream is in the 'Recv' state
+/-- §3.4, Note (*1), line 1222: "A stream is considered "idle" if it has not yet
+    been created, or if the receiving part of the stream is in the "Recv" state
     without yet having received any frames." -/
 def Recv.untouched (rs : Recv.State) : Bool :=
   rs.ranges.isEmpty && decide (rs.highest = 0) && rs.finalSize.isNone && rs.stopSending.isNone
 
 /-- The composite state of a bidirectional stream; `none` for a unidirectional
-    one, which has only one half (§3.4, line 1133). -/
+    one, which has only one half (§3.4, line 1164). -/
 def State.composite (s : State) : Option Composite :=
   match s.send, s.recv with
   | some ss, some rs =>
@@ -547,8 +670,8 @@ def State.composite (s : State) : Option Composite :=
             else Composite.of ss.phase rs.phase)
   | _, _ => none
 
-/-- §3.4, line 1140: "The simplest model presents the stream as 'open' when
-    either sending or receiving parts are in a non-terminal state and 'closed'
+/-- §3.4, line 1168: "The simplest model presents the stream as "open" when
+    either sending or receiving parts are in a non-terminal state and "closed"
     when both sending and receiving streams are in terminal states."  This one
     also covers unidirectional streams. -/
 def State.simpleClosed (s : State) : Bool :=
@@ -611,7 +734,7 @@ example : component.step uniS (.send (.recvMaxStreamData 200)) = .error .streamS
 example : component.step uniS (.send (.recvStopSending 3)) = .error .streamStateError := by
   decide
 
--- §3.4, line 1133: a unidirectional stream has no composite state …
+-- §3.4, line 1164: a unidirectional stream has no composite state …
 example : uniC.composite = none := by decide
 -- … while a fresh bidirectional stream is "idle" (Table 2, Note *1) …
 example : biC.composite = some .idle := by decide
@@ -621,7 +744,7 @@ example :
       some .openStream := by
   decide
 
--- §4.4, line 1466: "For a bidirectional stream, RESET_STREAM has no effect on
+-- §4.4, line 1471: "For a bidirectional stream, RESET_STREAM has no effect on
 -- data flow in the opposite direction."  Resetting our sending part leaves the
 -- receiving part exactly where it was.
 example :
@@ -631,6 +754,23 @@ example :
 example : component.maySend uniC (.maxStreamData 4 100) = true := by decide
 -- but MAX_STREAM_DATA for *this* send-only stream may not be sent.
 example : component.maySend uniC (.maxStreamData 2 100) = false := by decide
+
+-- Review finding W2-2, at the composite: MAX_STREAM_DATA for a stream that has
+-- a receiving part is permitted whatever phase that part is in — a lost one is
+-- retransmitted after the peer's FIN (§13.3, line 5390) — while §3.3, line 1156
+-- and §13.3, line 5393 survive as advice.
+private def biCsize : State :=
+  { biC with recv := some { Recv.init (StreamId.make .client .bidi 0) .client 100 with
+      phase := .sizeKnown, highest := 10, ranges := [(5, 10)], finalSize := some 10 } }
+example : component.maySend biCsize (.maxStreamData 0 200) = true := by decide
+example : recommendedSend biCsize (.maxStreamData 0 200) = false := by decide
+example : recommendedSend biC (.maxStreamData 0 200) = true := by decide
+-- Review finding W2-6, at the composite: once a RESET_STREAM has gone out, a
+-- repeat must carry the same error code (§13.3, line 5359).
+private def biCreset : State :=
+  (component.step biC (.send (.sentResetStream 7 0))).next biC
+example : component.maySend biCreset (.resetStream 0 7 0) = true := by decide
+example : component.maySend biCreset (.resetStream 0 99 0) = false := by decide
 
 -- Following an implementation from the outside, through both halves.
 private def biCrecvd : Recv.State :=
@@ -650,28 +790,36 @@ direction rules of §19.4/§19.5/§19.8/§19.10/§19.13.  §3.1, §3.2, §3.5, �
 §4.4 and §4.5 are covered in `Spec/Stream/Send.lean` and `Spec/Stream/Recv.lean`,
 each of which carries its own coverage table.
 
+Citations name the line on which the quoted text begins.  Where a sentence's
+first word dangles at the end of the previous line, the citation is the line the
+quotation itself starts on (§3.3, lines 1150 and 1157 are the two cases here).
+
 | Text (line) | Sentence | Encoded as |
 |---|---|---|
-| §2 (641–736) | streams are an ordered byte-stream abstraction, created by either endpoint | descriptive; the model is one stream seen by one endpoint |
-| §2.1 (680) | a stream ID MUST NOT be reused | out of scope: WP9 |
-| §2.1 (697) | the two low bits give initiator and directionality | `Spec.StreamId` (WP0), used by `hasSend`/`hasRecv` |
-| §2.1 (712) | a stream ID used out of order opens all lower-numbered streams | out of scope: WP9 |
-| §2.3 (777) | implementations SHOULD offer stream prioritization | out of scope: not observable behaviour |
-| §3 (866) | unidirectional streams use one state machine, bidirectional both | `hasSend`, `hasRecv`, `State` |
-| §3 (879) | the state machines are informative; other state machines are allowed | `Step` is what constrains; the phases are a presentation |
-| §3 (892) | one event can cause a transition through several states | `Send.Reaches` / `Recv.Reaches` are the reflexive-transitive closures |
-| §3.3 (1105) | the sender sends STREAM, STREAM_DATA_BLOCKED, RESET_STREAM | `governedBySend` |
-| §3.3 (1112) | MUST NOT send any of them from a terminal state | `no_send_from_terminal` |
-| §3.3 (1114) | MUST NOT send STREAM / STREAM_DATA_BLOCKED after RESET_STREAM | `no_data_after_reset` |
-| §3.3 (1116) | a receiver could receive any of the three in any state | `Recv.Step` has an outcome for every phase |
-| §3.3 (1120) | the receiver sends MAX_STREAM_DATA and STOP_SENDING | `governedByRecv` |
-| §3.3 (1121) | MAX_STREAM_DATA only in "Recv" | `maxStreamData_only_in_recv` |
-| §3.3 (1123) | STOP_SENDING in any state other than "Reset Recvd"/"Reset Read" | `stopSending_not_after_reset` |
-| §3.3 (1127) | a sender could receive either of those two in any state | `Send.Step.maxStreamDataIgnored`, `Send.Step.stopSendingLate` |
-| §3.4 (1130) | a bidirectional stream is composed of sending and receiving parts | `State` |
-| §3.4 (1140) | the simplest model: open unless both parts are terminal | `State.simpleClosed` |
-| §3.4 (Table 2) | the HTTP/2-like composite mapping | `Composite.of`, `State.composite`, `composite_of_iff` |
-| §3.4 (Note *1) | idle = nothing received yet | `Recv.untouched` |
+| §2 (641–823) | streams are an ordered byte-stream abstraction, created by either endpoint | descriptive; the model is one stream seen by one endpoint |
+| §2.1 (688) | a stream ID MUST NOT be reused | out of scope: WP9 |
+| §2.1 (699) | the two low bits give initiator and directionality | `Spec.StreamId` (WP0), used by `hasSend`/`hasRecv` |
+| §2.1 (714) | Table 1: the four stream types | `hasSend`/`hasRecv`, probed for all four types × both roles |
+| §2.1 (718) | a stream ID used out of order opens all lower-numbered streams | out of scope: WP9 |
+| §2.2 (744) | implementations MAY deliver data out of order | out of scope: an API choice; see `Spec/Stream/Recv.lean` |
+| §2.3 (774) | implementations SHOULD provide ways to indicate stream priority | advice, not checkable here: it is about an API and a scheduler, and QUIC "does not provide a mechanism for exchanging prioritization information" (§2.3, line 770), so no frame and no outcome depends on it |
+| §3 (832) | unidirectional streams use one state machine, bidirectional both | `hasSend`, `hasRecv`, `State` |
+| §3 (849) | the state machines are largely informative; other state machines are allowed | `Step` is what constrains; the phases are a presentation |
+| §3 (859) | one event can cause a transition through several states | `Send.Reaches` / `Recv.Reaches` are the reflexive-transitive closures |
+| §3.3 (1141) | the sender sends STREAM, STREAM_DATA_BLOCKED, RESET_STREAM | `governedBySend` |
+| §3.3 (1146) | MUST NOT send any of them from a terminal state | `no_send_from_terminal` |
+| §3.3 (1147) | MUST NOT send STREAM / STREAM_DATA_BLOCKED after RESET_STREAM | `no_data_after_reset` |
+| §3.3 (1150) | a receiver could receive any of the three in any state | `Recv.Step` has an outcome for every phase |
+| §3.3 (1153) | the receiver sends MAX_STREAM_DATA and STOP_SENDING | `governedByRecv` |
+| §3.3 (1156) | the receiver only sends MAX_STREAM_DATA in "Recv" | `maxStreamData_recommended_only_in_recv` (advice; `maxStreamData_always_permitted` is the other half) |
+| §3.3 (1157) | STOP_SENDING in any state other than "Reset Recvd"/"Reset Read" | `stopSending_not_after_reset` |
+| §3.3 (1161) | a sender could receive either of those two in any state | `Send.Step.maxStreamDataStale`/`Raise`/`Ignored`, `Send.Step.stopSendingLate` |
+| §3.4 (1166) | a bidirectional stream is composed of sending and receiving parts | `State` |
+| §3.4 (1168) | the simplest model: open unless both parts are terminal | `State.simpleClosed` |
+| §3.4 (1220) | Table 2, the HTTP/2-like composite mapping | `Composite.of`, `State.composite`, `composite_of_iff` |
+| §3.4 (1222) | Note (*1): idle = nothing received yet | `Recv.untouched` (see NOTES: known to be imprecise) |
+| §13.3 (5390) | a lost MAX_STREAM_DATA is re-sent | `maxStreamData_always_permitted` |
+| §13.3 (5393) | SHOULD stop sending MAX_STREAM_DATA after "Size Known"/"Reset Recvd" | `Recv.RecommendedSend`, lifted here as `RecommendedSend` |
 | §19.4 (7431) | RESET_STREAM for a send-only stream MUST be STREAM_STATE_ERROR | `Step.recvMissing` |
 | §19.5 (7476) | STOP_SENDING for a receive-only stream MUST be STREAM_STATE_ERROR | `Step.sendMissing` |
 | §19.5 (7474) | STOP_SENDING for a locally-initiated stream not yet created | out of scope: WP9 (stream creation) |
@@ -699,16 +847,40 @@ NOTES
   frame for a half that does not exist is a connection error; an application
   call on a half that does not exist (the application asking to write to a
   receive-only stream) simply cannot happen and is `.drop`.
+* **Three exports, not one.**  `MaySend` says what the text permits to be sent,
+  `RecommendedSend` what it asks for, and `Recommended` which *outcome* §4.5
+  asks for when a frame is processed.  Both recommendation predicates are the
+  conjunction of the halves', so a composition step (WP12) can conjoin them the
+  same way it conjoins `MaySend`.  Nothing is ever rejected for ignoring a
+  recommendation: `Recv.maySend_of_recommendedSend` is the statement that advice
+  is never stricter than permission on the receiving half, and on the sending
+  half `RecommendedSend` constrains only frames `MaySend` already discusses.
+* **Terminal states freeze the phase, not the whole half.**  Theorem (c) used to
+  claim that a terminal *sending* part freezes entirely.  That is no longer so
+  and, for the receiving half, never was: a late STREAM frame below the final
+  size still moves `ranges` and `highest` in "Data Read" (§3.5, line 1250 keeps
+  counting it for flow control), and a late MAX_STREAM_DATA may still raise
+  `maxData` in "Data Recvd" (§3.1, line 971 permits ignoring it, and permission
+  is not obligation).  `terminal_absorbing` therefore states the phase form for
+  both halves, and `Send.terminal_absorbing_state` gives the exact remainder for
+  the sending half.  Nothing observable escapes: `no_send_from_terminal` still
+  refuses every frame from a terminal sending part.
 * **Table 2 is not "both halves terminal".**  §3.4's mapping calls
   (Reset Sent, Data Recvd) "closed" although "Reset Sent" is not a terminal
   state of §3.1, so `Composite.of a b = .closed` is strictly weaker than
   `State.simpleClosed`; `composite_closed_of_terminal` is the implication that
   does hold, and the text itself says the mapping "is just one possibility".
-* **"Idle" cannot be read off the phases alone** (Note *1 says "without yet
-  having received any frames"), so `State.composite` also looks at whether the
-  receiving part has any record of a frame.  A STREAM_DATA_BLOCKED, or an empty
-  STREAM frame at offset 0, leaves no trace in the receiving state, so a stream
-  that has received only those still counts as idle here.
+* **"Idle" cannot be read off the phases alone** (Note *1, line 1222, says
+  "without yet having received any frames"), so `State.composite` also looks at
+  whether the receiving part has any record of a frame.  `Recv.untouched` is an
+  approximation of "no frame received" and is known to be wrong in both
+  directions (review finding W2-9): a STREAM_DATA_BLOCKED, or an empty STREAM
+  frame at offset 0, leaves no trace and still counts as idle, while *sending* a
+  STOP_SENDING — no frame received — sets `stopSending` and so leaves the idle
+  state.  Fixing it needs an explicit "a frame has arrived" flag in
+  `Recv.State`; it is recorded here rather than fixed because `composite` is
+  presentational (§3.4's mapping "is just one possibility") and no `Step`,
+  `MaySend` or theorem depends on it.
 * **Stream creation is WP9.**  This file assumes the stream exists; the other
   half of §19.5/§19.8/§19.10's STREAM_STATE_ERROR sentences — "for a
   locally-initiated stream that has not yet been created" — needs the stream
