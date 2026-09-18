@@ -260,9 +260,20 @@ inductive Event where
   /-- TLS raises an alert; §19.6's carrier maps it to CRYPTO_ERROR 0x100+alert
       (§20.1, line 8339). -/
   | tlsAlert (alert : UInt8)
-  /-- The header of a packet that arrived: its type and its two connection ID
-      fields (§17.2).  Short-header packets have no Source Connection ID; the
-      field is ignored for them. -/
+  /-- A packet that arrived and whose protection **was successfully removed**:
+      its type and its two connection ID fields (§17.2).  Short-header packets
+      have no Source Connection ID; the field is ignored for them.
+
+      The "successfully" is load-bearing and is a contract on whoever fires the
+      event (WP12): every rule below is conditioned on the packet having been
+      processed, not merely seen.  §7.2, line 2332 says "After processing the first
+      Initial packet, each endpoint sets the Destination Connection ID field in
+      subsequent packets it sends to the value of the Source Connection ID field
+      that it received"; line 2371, "Once a client has received a valid Initial
+      packet from the server"; §17.2.3, line 6476, "once it starts processing
+      1-RTT packets from the server".  Each of those qualifiers is the contract.  A packet whose AEAD
+      fails is not this event at all; it never reaches this component, and so it
+      changes nothing.  See NOTE 10. -/
   | recvHeader (pt : PacketType) (dcid scid : Cid)
   /-- A CRYPTO frame at `lvl` carrying the byte range `[off, off + len)`. -/
   | recvCrypto (lvl : CryptoLevel) (off len : Nat)
@@ -433,10 +444,10 @@ def cryptoOutcomes (s : State) (lvl : CryptoLevel) (off len : Nat) : List Out :=
   else if maxCryptoOffset < off + len then
     [.error .frameEncodingError, .error .cryptoBufferExceeded]
   -- §7.5, line 2716: "all CRYPTO frames received in the future", acknowledged
-  -- but not delivered (line 2719).  The same sentence's other alternative, "or
-  -- it MAY close the connection with a CRYPTO_BUFFER_EXCEEDED error code", is
-  -- offered per frame, so electing to discard on one frame does not forfeit it
-  -- on the next (NOTE 18).
+  -- but not delivered (line 2719).  The same sentence's other alternative --
+  -- line 2716 again, "or it MAY close the connection with a
+  -- CRYPTO_BUFFER_EXCEEDED error code" -- is offered per frame, so electing to
+  -- discard on one frame does not forfeit it on the next (NOTE 18).
   else if (s.stream lvl).discarding then [.ok s [], .error .cryptoBufferExceeded]
   else if s.bufLimit < bufferedBytes ((s.stream lvl).recv off len).buf then
     -- Three outcomes are permitted past the limit, and buffering anyway is one
@@ -524,7 +535,9 @@ inductive HdrStep : State → PacketType → Cid → Cid → Out → Prop
       HdrStep s .oneRtt d c (.ok s.sawOneRtt [])
   /-- A client is never the recipient of a 0-RTT packet (§17.2.3, line 6415: a
       0-RTT packet carries early data "from the client to the server as part of
-      the first flight"). -/
+      the first flight"), so this arm is unreachable: nothing gives a client
+      0-RTT *read* keys.  `.drop` is a convention for a state the text does not
+      describe, not a rule read out of it (NOTE 19). -/
   | cliZeroRtt {s d c} (hk : s.readKeyFor .zeroRtt = .present) (hr : s.role = .client) :
       HdrStep s .zeroRtt d c .drop
   /-- Version Negotiation is WP7's (§6). -/
