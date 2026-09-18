@@ -1131,8 +1131,8 @@ typedef struct {
 /* Unprotects the datagram with the stub crypto, exactly as conn_trace's
    dump_out_datagram does, and fills |ps| with up to |cap| packets.  Returns the
    number found, or -1 if the datagram does not parse. */
-static int parse_out(mstate *m, const uint8_t *pkt, size_t pktlen, outpkt *ps,
-                     int cap) {
+static int parse_out(mstate *m, size_t dcidlen, const uint8_t *pkt, size_t pktlen,
+                     outpkt *ps, int cap) {
   const uint8_t *p = pkt;
   size_t left = pktlen;
   int n = 0;
@@ -1159,7 +1159,7 @@ static int parse_out(mstate *m, const uint8_t *pkt, size_t pktlen, outpkt *ps,
               : hd.type == NGTCP2_PKT_0RTT      ? PT_0RTT
                                                 : PT_1RTT;
     } else {
-      hdlen = ngtcp2_pkt_decode_hd_short(&hd, p, left, CIDLEN);
+      hdlen = ngtcp2_pkt_decode_hd_short(&hd, p, left, dcidlen);
       if (hdlen < 0) return n ? n : -1;
       pktend = left;
       space = 2;
@@ -1211,7 +1211,7 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   lean_object *p;
 
   if (!m || !m->alive) return;
-  np = parse_out(m, buf, len, ps, 8);
+  np = parse_out(m, h->conn->dcid.current.cid.datalen, buf, len, ps, 8);
   if (np <= 0) return;
   /* conn_driver.h's unprotection assumes an 8-byte Destination Connection ID
      (`ngtcp2_pkt_decode_hd_short(..., CIDLEN)`).  When the peer has issued a

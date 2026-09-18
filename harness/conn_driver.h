@@ -1007,7 +1007,14 @@ static void dump_out_datagram(harness *h, const uint8_t *pkt, size_t pktlen) {
               : hd.type == NGTCP2_PKT_HANDSHAKE ? 1
                                                 : 2;
     } else {
-      hdlen = ngtcp2_pkt_decode_hd_short(&hd, p, left, CIDLEN);
+      /* The Destination Connection ID of a packet we write is the one the peer
+         told us to use, which need not be CIDLEN bytes long: a NEW_CONNECTION_ID
+         with a longer CID and a Retire Prior To that retires the current one
+         makes ngtcp2 switch to it.  Assuming CIDLEN then reads the packet number,
+         the header-protection sample and the payload at the wrong offset, and
+         the OUT record is noise (WP13-15). */
+      hdlen = ngtcp2_pkt_decode_hd_short(&hd, p, left,
+                                         h->conn->dcid.current.cid.datalen);
       if (hdlen < 0) { TR(h, "OUT parse=hd_short_err\n"); return; }
       pktend = left;
       space = 2;
