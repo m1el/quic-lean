@@ -273,7 +273,13 @@ inductive Event where
       packet from the server"; §17.2.3, line 6476, "once it starts processing
       1-RTT packets from the server".  Each of those qualifiers is the contract.  A packet whose AEAD
       fails is not this event at all; it never reaches this component, and so it
-      changes nothing.  See NOTE 10. -/
+      changes nothing.
+
+      This is a **hard requirement on the endpoint that fires the event**, not a
+      stylistic note: with the read keys present every §7.2 arm below is a
+      singleton, so a `recvHeader` synthesised from a packet whose protection
+      has not been removed would make a forged packet *mandate* a connection ID
+      change or a key discard.  See NOTE 10 and its examples. -/
   | recvHeader (pt : PacketType) (dcid scid : Cid)
   /-- A CRYPTO frame at `lvl` carrying the byte range `[off, off + len)`. -/
   | recvCrypto (lvl : CryptoLevel) (off len : Nat)
@@ -359,7 +365,7 @@ def cidOutcomes (s : State) (pt : PacketType) (dcid scid : Cid) : List Out :=
   -- §7.3, line 2402 records that packet's Destination Connection ID.
   | .server, .initial =>
     if s.sawPeerInitial then
-      -- line 2381: "if subsequent Initial packets include a different Source
+      -- line 2382: "if subsequent Initial packets include a different Source
       -- Connection ID, they MUST be discarded."
       if s.peerScid = some scid then [.ok s []] else [.drop]
     else [.ok { (s.adoptScid scid) with originalDcid := some dcid } [.dcidChanged scid]]
@@ -554,7 +560,7 @@ inductive HdrStep : State → PacketType → Cid → Cid → Out → Prop
   | srvInitialSame {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .server)
       (hs : s.sawPeerInitial = true) (hc : s.peerScid = some c) :
       HdrStep s .initial d c (.ok s [])
-  /-- §7.2, line 2381: "if subsequent Initial packets include a different Source
+  /-- §7.2, line 2382: "if subsequent Initial packets include a different Source
       Connection ID, they MUST be discarded." -/
   | srvInitialOther {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .server)
       (hs : s.sawPeerInitial = true) (hc : s.peerScid ≠ some c) :
@@ -723,9 +729,22 @@ inductive Step : State → Event → Out → Prop
   | doneClient {s} (hr : s.role = .client) (hc : s.complete = true) :
       Step s .recvHandshakeDone (.ok { s with confirmed := true } [.handshakeConfirmed])
   /-- The frame cannot legitimately precede the client's own completion (§19.20,
-      line 8207); the text gives no rule, so it has no effect here. -/
+      line 8207); the text gives the *receiver* no rule, so ignoring it is
+      permitted and it has no effect here. -/
   | doneEarly {s} (hr : s.role = .client) (hc : s.complete = false) :
       Step s .recvHandshakeDone (.ok s [])
+  /-- The other outcome the silence leaves open.  A HANDSHAKE_DONE frame before
+      the client's handshake completes means the peer broke §19.20, line 8207
+      ("Servers MUST NOT send a HANDSHAKE_DONE frame before completing the
+      handshake"), and §11.1, line 4446: "Errors that result in the connection
+      being unusable, such as an obvious violation of protocol semantics … MUST
+      be signaled using a CONNECTION_CLOSE frame"; §11, line 4434: "an endpoint
+      MAY use any applicable error code when it detects an error condition; a
+      generic error code (such as PROTOCOL_VIOLATION or INTERNAL_ERROR) can
+      always be used".  Closing is therefore permitted, and so is ignoring:
+      neither is mandated (NOTE 7). -/
+  | doneEarlyClose {s} (hr : s.role = .client) (hc : s.complete = false) :
+      Step s .recvHandshakeDone (.error .protocolViolation)
   /-- §19.20, line 8208: "A server MUST treat receipt of a HANDSHAKE_DONE frame
       as a connection error of type PROTOCOL_VIOLATION" — WP3's `mustReject`
       already rejects it, so this component adds nothing. -/
@@ -779,7 +798,8 @@ def outcomes (s : State) : Event → List Out
     match s.role with
     | .server => [.ok s []]
     | .client =>
-      if s.complete then [.ok { s with confirmed := true } [.handshakeConfirmed]] else [.ok s []]
+      if s.complete then [.ok { s with confirmed := true } [.handshakeConfirmed]]
+      else [.ok s [], .error .protocolViolation]
   | .sentPacket pt =>
     if s.role = .client ∧ pt = .handshake ∧ s.write.get .initial ≠ .discarded then
       [.ok (s.discardKeys .initial) [.keysDiscarded .initial]]

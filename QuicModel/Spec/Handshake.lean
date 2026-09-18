@@ -531,49 +531,45 @@ theorem first_crypto_at_zero {s : State} {p : OutPacket} {l : CryptoLevel} {off 
 
 /-! ### §7.2 on the send side
 
-`Spec.OutPacket` carries only a packet type and a frame list, so the rules about
-the connection ID *fields* of a packet we send cannot live in `MaySendPacket`.
-They are this predicate instead; see the NOTES for the `Core` change that would
-fold it in. -/
+`SendHeader` (in `Handshake/Component.lean`) is now the definition the
+component's `MaySendDatagram` field is built from, over `Spec.OutDatagram`'s
+`dcid`/`scid`; these are the two MUSTs of the client's first flight, stated on
+the field itself. -/
 
-/-- §7.2, lines 2333–2383, for a long-header packet we are about to send:
+/-- **(h)** §7.2, line 2340: "This Destination Connection ID MUST be at least 8
+    bytes in length", and line 2341: "Until a packet is received from the
+    server, the client MUST use the same Destination Connection ID value on all
+    packets in this connection" — for every long-header packet of a datagram a
+    client may send in its first flight.  Line 2357 gives the third conjunct:
+    the Source Connection ID is the one the client chose. -/
+theorem maySendDatagram_firstFlight {s : State} {d : OutDatagram} {dcid scid : Cid}
+    {p : OutPacket} (hf : s.firstFlight = true) (hd : d.dcid = some dcid)
+    (hs : d.scid = some scid) (h : MaySendDatagram s d) (hp : p ∈ d.packets)
+    (hlong : p.ptype = .initial ∨ p.ptype = .zeroRtt ∨ p.ptype = .handshake) :
+    scid = s.localScid ∧ s.dcidSent = some dcid ∧ 8 ≤ dcid.length := by
+  simp only [MaySendDatagram, MaySendDatagramOn, hd, hs] at h
+  have hh := h p hp
+  have hdc : DcidAllowed s none dcid ∧ scid = s.localScid ∧ (s.firstFlight = true → 8 ≤ dcid.length) := by
+    rcases hlong with hpt | hpt | hpt <;>
+      · rw [hpt] at hh
+        exact ⟨hh.2.1, hh.1, hh.2.2⟩
+  refine ⟨hdc.2.1, ?_, hdc.2.2 hf⟩
+  rcases hdc.1 with h1 | h1
+  · exact h1
+  · exact absurd hf (by rw [h1.1]; simp)
 
-* line 2357: "The client populates the Source Connection ID field with a value
-  of its choosing" — and keeps it (§17.2.5.2, line 6641: "The client MUST NOT
-  change the Source Connection ID");
-* line 2337: "the client populates the Destination Connection ID field with an
-  unpredictable value.  This Destination Connection ID MUST be at least 8 bytes
-  in length.  Until a packet is received from the server, the client MUST use
-  the same Destination Connection ID value on all packets in this connection";
-* line 2333: otherwise the Destination Connection ID is the peer's Source
-  Connection ID, as recorded in `dcidSent`.
-
-1-RTT packets have no Source Connection ID and may use a connection ID from a
-NEW_CONNECTION_ID frame (line 2380), which is WP4's and WP10's. -/
-def State.firstFlight (s : State) : Bool :=
-  (s.role == .client) && !s.sawPeerInitial && !s.retrySeen
-
-def SendHeader (s : State) (pt : PacketType) (dcid scid : Cid) : Prop :=
-  match pt with
-  | .initial | .zeroRtt | .handshake =>
-    scid = s.localScid ∧ s.dcidSent = some dcid ∧ (s.firstFlight = true → 8 ≤ dcid.length)
-  | _ => True
-
-def sendHeader (s : State) (pt : PacketType) (dcid scid : Cid) : Bool :=
-  match pt with
-  | .initial | .zeroRtt | .handshake =>
-    (scid == s.localScid) && (s.dcidSent == some dcid) &&
-      (!s.firstFlight || decide (8 ≤ dcid.length))
-  | _ => true
-
-theorem bool_imp {b : Bool} {q : Prop} [Decidable q] :
-    ((!b) || decide q) = true ↔ (b = true → q) := by cases b <;> simp
-
-theorem sendHeader_iff (s : State) (pt : PacketType) (dcid scid : Cid) :
-    sendHeader s pt dcid scid = true ↔ SendHeader s pt dcid scid := by
-  cases pt <;>
-    simp only [sendHeader, SendHeader, Bool.and_eq_true, beq_iff_eq, bool_imp, and_assoc,
-      iff_self]
+/-- §7.2, line 2380: "Any further changes to the Destination Connection ID are
+    only permitted if the values are taken from NEW_CONNECTION_ID frames."  Once
+    the first flight is over the rule is exactly that, so with WP4's set supplied
+    a datagram may carry either the adopted connection ID or one the peer
+    issued, and nothing else. -/
+theorem sendHeader_after_firstFlight {s : State} {pt : PacketType} {dcid scid : Cid}
+    {cids : List Cid} (hf : s.firstFlight = false)
+    (hlong : pt = .initial ∨ pt = .zeroRtt ∨ pt = .handshake) :
+    SendHeader s pt dcid scid (some cids) ↔
+      (scid = s.localScid ∧ (s.dcidSent = some dcid ∨ dcid ∈ cids)) := by
+  rcases hlong with rfl | rfl | rfl <;>
+    simp [SendHeader, DcidAllowed, hf]
 
 /-! ## 9. Examples (scenarios from the text) -/
 
@@ -583,6 +579,10 @@ private def C1 : Cid := [0xc1]
 private def S1 : Cid := [0x51]
 private def S2 : Cid := [0x52]
 private def S3 : Cid := [0x53]
+/-- A connection ID the server issued later, in a NEW_CONNECTION_ID frame. -/
+private def S4 : Cid := [0x54]
+/-- An eight-byte first Destination Connection ID (§7.2, line 2340). -/
+private def S1big : Cid := List.replicate 8 0x51
 
 /-- Figure 7: the client sends `Initial: DCID=S1, SCID=C1`. -/
 private def cli0 : State := initClient C1 S1
@@ -593,13 +593,52 @@ private def srv0 : State := initServer S3
 -- least 8 bytes; S1 is one byte, so this is a bad header …
 example : sendHeader cli0 .initial S1 C1 = false := by decide
 -- … whereas the same client with an 8-byte value may send it.
-example : sendHeader (initClient C1 (List.replicate 8 0x51)) .initial (List.replicate 8 0x51) C1
+private def cli0big : State := initClient C1 S1big
+example : sendHeader cli0big .initial S1big C1 = true := by decide
+-- §7.2, line 2341: until a packet is received from the server the client uses
+-- the same value; another 8-byte value is not permitted …
+example : sendHeader cli0big .initial (List.replicate 8 0x99) C1 = false := by decide
+-- … and the Source Connection ID is the one the client chose (line 2357).
+example : sendHeader cli0big .initial S1big S2 = false := by decide
+
+-- The same rules as the component's `MaySendDatagram` field, which is what
+-- WP12 and the harness drive (K-1).  One datagram of long-header packets:
+private def dgram (pts : List PacketType) (dcid scid : Cid) : OutDatagram :=
+  { size := 1200, packets := pts.map (fun pt => ⟨pt, [.ping]⟩),
+    dcid := some dcid, scid := some scid }
+example : component.maySendDatagram cli0 (dgram [.initial] S1 C1) = false := by decide
+example : component.maySendDatagram cli0big (dgram [.initial, .zeroRtt] S1big C1)
     = true := by decide
+-- §7.2, line 2361: a 0-RTT packet of the first flight uses the same pair.
+example : component.maySendDatagram cli0big (dgram [.zeroRtt] (List.replicate 8 0x99) C1)
+    = false := by decide
+-- `Core`: `none` means "the rule being checked does not look at them", so a
+-- datagram that carries no connection IDs is not judged on them.
+example : component.maySendDatagram cli0 { size := 1200, packets := [⟨.initial, [.ping]⟩] }
+    = true := by decide
+
+-- Line 2380 does not reopen the first flight: a client that has heard nothing
+-- from the server may use no other value, whatever the peer has issued.
+example : maySendDatagramOn (some [S4]) cli0big (dgram [.initial] S4 C1) = false := by decide
 
 -- Figure 7: `<- Initial: DCID=C1, SCID=S3`.  The client adopts S3.
 private def cli1 : State := cli0.adoptScid S3
 example : component.step cli0 (.recvHeader .initial C1 S3) = .ok cli1 [.dcidChanged S3] := by decide
 example : cli1.dcidSent = some S3 ∧ cli1.dcidChanges = 1 := by decide
+
+-- §7.2, line 2380, and K-3: after the first flight the Destination Connection
+-- ID may also be one the peer issued in a NEW_CONNECTION_ID frame, so with the
+-- set unknown the rule accepts S4 …
+example : sendHeader cli1 .handshake S4 C1 = true := by decide
+example : component.maySendDatagram cli1 (dgram [.handshake] S4 C1) = true := by decide
+-- … with the set supplied and empty it does not …
+example : maySendDatagramOn (some []) cli1 (dgram [.handshake] S4 C1) = false := by decide
+-- … and with S4 among the connection IDs the server issued, it does again.
+example : maySendDatagramOn (some [S4]) cli1 (dgram [.handshake] S4 C1) = true := by decide
+-- The adopted connection ID is always permitted (line 2333).
+example : maySendDatagramOn (some []) cli1 (dgram [.handshake] S3 C1) = true := by decide
+-- Short headers carry no Source Connection ID and no §7.2 rule of this file.
+example : component.maySendDatagram cli1 (dgram [.oneRtt] S4 C1) = true := by decide
 
 -- §7.2, line 2371: "Once a client has received a valid Initial packet from the
 -- server, it MUST discard any subsequent packet it receives on that connection
@@ -740,6 +779,27 @@ example : component.outcomes cli0 (.recvCrypto .initial (2 ^ 62 - 1) 1)
     = [.error .frameEncodingError, .error .cryptoBufferExceeded] := by decide
 example : component.accepts cli0 (.recvCrypto .initial (2 ^ 62 - 2) 1)
     (.error .frameEncodingError) = false := by decide
+
+-- NOTE 10 / K-2: why the `recvHeader` contract is a hard requirement on the
+-- endpoint.  With the read keys present, a server Initial *mandates* the change
+-- of Destination Connection ID: leaving the state alone is not permitted, and
+-- neither is dropping the packet (§7.2, line 2332 and line 2371).  A
+-- `recvHeader` fired before protection was removed would therefore let one
+-- forged packet dictate the client's connection ID.
+example : cli0.read.get .initial = .present := by decide
+example : component.outcomes cli0 (.recvHeader .initial C1 S3)
+    = [.ok (cli0.adoptScid S3) [.dcidChanged S3]] := by decide
+example : component.accepts cli0 (.recvHeader .initial C1 S3) (.ok cli0 []) = false := by decide
+example : component.accepts cli0 (.recvHeader .initial C1 S3) .drop = false := by decide
+
+-- §19.20 / K-4: a client that receives HANDSHAKE_DONE before its own handshake
+-- completes.  The text gives the receiver no rule, so both ignoring it and
+-- closing the connection are permitted, and nothing else is.
+example : cli1.complete = false := by decide
+example : component.outcomes cli1 .recvHandshakeDone
+    = [.ok cli1 [], .error .protocolViolation] := by decide
+example : component.step cli1 .recvHandshakeDone = .ok cli1 [] := by decide
+example : component.accepts cli1 .recvHandshakeDone .drop = false := by decide
 
 -- §19.20: only a server whose handshake is complete may send HANDSHAKE_DONE.
 example : component.maySend srv1 .handshakeDone = false := by decide
