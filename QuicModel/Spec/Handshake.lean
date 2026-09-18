@@ -549,7 +549,8 @@ theorem maySendDatagram_firstFlight {s : State} {d : OutDatagram} {dcid scid : C
     scid = s.localScid ∧ s.dcidSent = some dcid ∧ 8 ≤ dcid.length := by
   simp only [MaySendDatagram, MaySendDatagramOn, hd, hs] at h
   have hh := h p hp
-  have hdc : DcidAllowed s none dcid ∧ scid = s.localScid ∧ (s.firstFlight = true → 8 ≤ dcid.length) := by
+  have hdc : DcidAllowed s none dcid ∧ scid = s.localScid ∧
+      (s.firstFlight = true → 8 ≤ dcid.length) := by
     rcases hlong with hpt | hpt | hpt <;>
       · rw [hpt] at hh
         exact ⟨hh.2.1, hh.1, hh.2.2⟩
