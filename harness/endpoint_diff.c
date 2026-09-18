@@ -141,6 +141,7 @@ extern uint64_t quic_endpoint_outcome_error(lean_object *o);
 extern uint8_t quic_endpoint_outcome_is_drop(lean_object *o);
 extern lean_object *quic_endpoint_outcome_state(lean_object *s, lean_object *o);
 extern lean_object *quic_endpoint_outcome_render(lean_object *o);
+extern lean_object *quic_endpoint_outcome_cbs(lean_object *o);
 extern lean_object *quic_endpoint_track_trace(lean_object *ss, lean_object *e,
                                               uint8_t is_error, uint64_t code,
                                               lean_object *cbs);
@@ -274,6 +275,7 @@ static int g_summary_done;
 static int g_nmm;
 static unsigned long g_mm_total;
 static unsigned long g_steps_compared, g_steps_skipped, g_send_checks;
+static unsigned long g_steps_loose;
 static unsigned long g_runs;
 static const uint8_t *g_input;
 static size_t g_inputlen;
@@ -291,11 +293,12 @@ static void mm_summary(void) {
   g_summary_done = 1;
   fprintf(stderr,
           "\n=== endpoint_diff summary ===\n"
-          "runs=%lu  steps compared=%lu  steps not compared=%lu  "
+          "runs=%lu  steps compared=%lu (%lu only after excluding "
+          "stream_close/acked_stream_data_offset)  steps not compared=%lu  "
           "send checks=%lu\n"
           "distinct mismatches=%d  total mismatches=%lu\n",
-          g_runs, g_steps_compared, g_steps_skipped, g_send_checks, g_nmm,
-          g_mm_total);
+          g_runs, g_steps_compared, g_steps_loose, g_steps_skipped, g_send_checks,
+          g_nmm, g_mm_total);
   for (i = 0; i < g_nmm; ++i)
     fprintf(stderr, "  sig=%016" PRIx64 " x%lu\n", g_mm[i].sig, g_mm[i].count);
 }
@@ -419,15 +422,14 @@ static const char *map_cb(const char *name) {
       "extend_max_local_streams_bidi", "extend_max_local_streams_uni",
       "handshake_completed", "handshake_confirmed", "recv_crypto_data",
       "recv_new_token", "recv_retry", "path_validation", "dcid_status",
-      "get_new_connection_id", "remove_connection_id",
-      "recv_version_negotiation", "version_negotiation", NULL};
+      "remove_connection_id", "recv_version_negotiation", "version_negotiation",
+      NULL};
   size_t i;
   for (i = 0; keep[i]; ++i)
     if (strcmp(name, keep[i]) == 0) return keep[i];
   /* ngtcp2's versioned callbacks are the same model effect */
   if (strcmp(name, "stream_close2") == 0) return "stream_close";
   if (strcmp(name, "dcid_status2") == 0) return "dcid_status";
-  if (strcmp(name, "get_new_connection_id2") == 0) return "get_new_connection_id";
   /* everything else: no model effect (update_key, recv_rx_key, recv_tx_key,
      tls_early_data_rejected, client_initial, recv_client_initial,
      recv_datagram, ack_datagram, lost_datagram, begin_path_validation,
@@ -564,6 +566,126 @@ static void set_cands(mstate *m, lean_object *next) {
   m->cands = next;
 }
 
+/* ------------------------------------------------ the loose second chance */
+
+/* Callback names the two sides *have* and that name the same transport state,
+   but at different moments of the trace, so a per-step comparison of the lists
+   is meaningless.  Both entries have a TRIAGE.md number and neither hides an
+   error code or a frame:
+     stream_close              TRIAGE WP13-1 (the model's Stream.Recv
+                               allDataReceived is the receive half reaching Data
+                               Recvd; ngtcp2 waits for both halves)
+     acked_stream_data_offset  TRIAGE WP13-6 (nothing in Endpoint routes a
+                               received ACK to StreamTable, so the model can
+                               never produce Stream.Send.allDataAcked) */
+static int cb_excluded(const char *n) {
+  return strcmp(n, "stream_close") == 0 ||
+         strcmp(n, "acked_stream_data_offset") == 0;
+}
+
+/* The observed names, filtered; returns how many were kept (at most |cap|). */
+static int observed_names(harness *h, const char **out, int cap) {
+  const char *p = h->tr.p + h->cb_mark, *end = h->tr.p + h->tr.len;
+  int n = 0;
+  static char pool[64][64];
+  while (p < end && n < cap) {
+    const char *eol = strchr(p, '\n');
+    if (!eol || eol > end) eol = end;
+    if ((size_t)(eol - p) > 4 && strncmp(p, "CB  ", 4) == 0) {
+      char name[64];
+      const char *b = p + 4, *q = b, *mapped;
+      while (q < eol && *q != ' ' && *q != '\n') ++q;
+      if ((size_t)(q - b) < sizeof(name)) {
+        memcpy(name, b, (size_t)(q - b));
+        name[q - b] = 0;
+        mapped = map_cb(name);
+        if (mapped && !cb_excluded(mapped) && n < 64) {
+          snprintf(pool[n], sizeof(pool[n]), "%s", mapped);
+          out[n] = pool[n];
+          ++n;
+        }
+      }
+    }
+    p = eol + 1;
+  }
+  return n;
+}
+
+/* `Obs.matchesSpec`, re-stated in C so that the excluded names can be dropped
+   from *both* sides.  Returns 1 when the outcome |o| looks like what ngtcp2
+   did. */
+static int outcome_matches(lean_object *o, int is_error, uint64_t code,
+                           const char **names, int nnames) {
+  uint64_t err;
+  uint8_t isdrop;
+  lean_inc(o);
+  err = quic_endpoint_outcome_error(o);
+  if (is_error) {
+    /* §11, line 4434: a generic code may stand in for a specific one. */
+    return err != 0xffffffffULL && (err == code || code == 0xa || code == 0x1);
+  }
+  if (err != 0xffffffffULL) return 0;
+  lean_inc(o);
+  isdrop = quic_endpoint_outcome_is_drop(o);
+  if (isdrop) return nnames == 0;
+  {
+    lean_object *cbs;
+    int i = 0;
+    lean_inc(o);
+    cbs = quic_endpoint_outcome_cbs(o);
+    {
+      lean_object *q = cbs;
+      while (!lean_is_scalar(q)) {
+        const char *nm = lean_string_cstr(l_head(q));
+        if (!cb_excluded(nm)) {
+          if (i >= nnames || strcmp(nm, names[i]) != 0) {
+            lean_dec(cbs);
+            return 0;
+          }
+          ++i;
+        }
+        q = l_tail(q);
+      }
+    }
+    lean_dec(cbs);
+    return i == nnames;
+  }
+}
+
+/* The candidates that survive the loose comparison.  Owned result, possibly
+   the empty list. */
+static lean_object *track_loose(harness *h, mstate *m, const evspec *e,
+                                int is_error, uint64_t code) {
+  const char *names[64];
+  int nnames = observed_names(h, names, 64);
+  lean_object *out = l_nil(), **tailp = &out;
+  lean_object *p = m->cands;
+  int kept = 0;
+
+  while (!lean_is_scalar(p)) {
+    lean_object *s = l_head(p);
+    lean_object *os = ev_outcomes(e, s), *q = os;
+    while (!lean_is_scalar(q)) {
+      lean_object *o = l_head(q);
+      if (kept < m->max_cands && outcome_matches(o, is_error, code, names, nnames)) {
+        lean_object *c;
+        lean_inc(s);
+        lean_inc(o);
+        c = lean_alloc_ctor(1, 2, 0);
+        lean_ctor_set(c, 0, quic_endpoint_outcome_state(s, o));
+        lean_ctor_set(c, 1, l_nil());
+        *tailp = c;
+        tailp = (lean_object **)lean_ctor_obj_cptr(c) + 1;
+        ++kept;
+      }
+      q = l_tail(q);
+    }
+    lean_dec(os);
+    p = l_tail(p);
+  }
+  return out;
+}
+
 /* A step ngtcp2 reported on: narrow the candidate set with the model's own
    `trackSet` + `Obs.matchesSpec` (Exports.lean's `quic_endpoint_track_trace`).
    |is_error| < 0 means "the error is not a QUIC transport error", which is not
@@ -592,6 +714,17 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
                                    cbs ? cbs : l_nil());
   if (!lean_is_scalar(next)) {
     set_cands(m, l_take(next, m->max_cands));
+    return;
+  }
+  lean_dec(next);
+
+  /* Second chance: the same comparison with the two callbacks that name the
+     same transport state at a different moment of the trace removed from both
+     sides (TRIAGE WP13-1, WP13-6). */
+  next = track_loose(h, m, e, is_error, code);
+  if (!lean_is_scalar(next)) {
+    ++g_steps_loose;
+    set_cands(m, next);
     return;
   }
   lean_dec(next);
