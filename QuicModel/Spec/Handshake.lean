@@ -784,6 +784,16 @@ example : (TransportError.cryptoError 0x2f).code = 0x12f := by decide
 -- Following an implementation we cannot see inside: the harness sees only that
 -- something was dropped.
 example : component.track cli1 (.recvHeader .initial C1 S2) .drop = some cli1 := by decide
+-- NOTE 16: `Effect.cryptoDiscarding` is what keeps the two §7.5 `ok` outcomes
+-- apart, so an endpoint that starts discarding can be followed exactly …
+example : component.track cliSmallDone (.recvCrypto .initial 1 9)
+      (.ok [.cryptoDiscarding .initial])
+    = some (cliSmallDone.setStream .initial
+              { cliSmallDone.stream .initial with discarding := true }) := by decide
+-- … and a harness that sees only "processed, nothing visible" is left with the
+-- one candidate that buffered the frame anyway.
+example : (component.trackSet [cliSmallDone] (.recvCrypto .initial 1 9)
+      (Obs.ok []).matchesLoosely).length = 1 := by decide
 -- A "processed with no visible effect" observation on a packet whose keys are
 -- missing leaves two candidate states — here they coincide.
 example : component.trackSet [cli0] (.recvHeader .handshake C1 S3) (Obs.ok []).matchesLoosely
