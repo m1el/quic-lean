@@ -51,11 +51,21 @@ Three steps, each of which the text makes a separate rule: decode the sequence
 (§18), ignore unknown identifiers and interpret the rest (§7.4.2, §18.2), then
 check the values against the sender's role (§7.4, §18.2, §4.6). -/
 
-/-- Interpret and check.  `none` is "TRANSPORT_PARAMETER_ERROR". -/
-def validate (sender : Role) (raw : Raw) : Option TransportParams :=
-  match interpret raw with
+/-- Check an interpreted record against §7.4 / §18.2.  `none` is
+    "TRANSPORT_PARAMETER_ERROR". -/
+def checkValid (sender : Role) : Option TransportParams → Option TransportParams
   | some tp => if validB sender tp then some tp else none
   | none => none
+
+/-- Interpret and check, taking the **last** copy of a repeated parameter. -/
+def validate (sender : Role) (raw : Raw) : Option TransportParams :=
+  checkValid sender (interpret raw)
+
+/-- Interpret and check, taking the **first** copy of a repeated parameter
+    (§7.4, line 2540 leaves the choice open — NOTES 2).  Equal to `validate`
+    unless a known parameter repeats. -/
+def validateFirst (sender : Role) (raw : Raw) : Option TransportParams :=
+  checkValid sender (interpretFirst raw)
 
 /-- §7.4, line 2539: "An endpoint MUST NOT send a parameter more than once in a
     given transport parameters extension."  Only known parameters are counted:
@@ -63,9 +73,9 @@ def validate (sender : Role) (raw : Raw) : Option TransportParams :=
     "the parameter" it would duplicate does not exist for this endpoint. -/
 def duplicated (raw : Raw) : Bool := !decide (knownIds raw).Nodup
 
-theorem validate_valid {sender : Role} {raw : Raw} {tp : TransportParams}
-    (h : validate sender raw = some tp) : Valid sender tp := by
-  simp only [validate] at h
+theorem checkValid_valid {sender : Role} {o : Option TransportParams} {tp : TransportParams}
+    (h : checkValid sender o = some tp) : Valid sender tp := by
+  simp only [checkValid] at h
   split at h
   · split at h
     · simp only [Option.some.injEq] at h
@@ -74,37 +84,68 @@ theorem validate_valid {sender : Role} {raw : Raw} {tp : TransportParams}
     · exact absurd h (by simp)
   · exact absurd h (by simp)
 
+theorem validate_valid {sender : Role} {raw : Raw} {tp : TransportParams}
+    (h : validate sender raw = some tp) : Valid sender tp := checkValid_valid h
+
+theorem validateFirst_valid {sender : Role} {raw : Raw} {tp : TransportParams}
+    (h : validateFirst sender raw = some tp) : Valid sender tp := checkValid_valid h
+
+/-- With no repeated known parameter the two readings coincide, so the extra
+    outcome added below appears only where §7.4 is silent. -/
+theorem validateFirst_eq_validate {sender : Role} {raw : Raw}
+    (hnd : duplicated raw = false) : validateFirst sender raw = validate sender raw := by
+  have h : (knownIds raw).Nodup := by
+    simpa [duplicated] using hnd
+  simp only [validateFirst, validate, interpretFirst_eq_interpret h]
+
 /-! ## 2. The specification -/
 
 inductive Step : State → Event → Out → Prop
   /-- §18, Figures 20 and 21: the extension is a sequence of
       (identifier, length, value) tuples.  Bytes that are not such a sequence —
       a truncated tuple, or a Length that runs past the end — carry no valid
-      parameter, so §7.4, line 2536 applies: "An endpoint MUST treat receipt of
+      parameter, so §7.4, line 2535 applies: "An endpoint MUST treat receipt of
       a transport parameter with an invalid value as a connection error of type
       TRANSPORT_PARAMETER_ERROR." -/
   | malformed {s b err} (h : decodeRaw b = .error err) :
       Step s (.recvParams b) (.error .transportParameterError)
-  /-- §7.4, line 2536: same sentence, for a sequence that decodes but whose
+  /-- §7.4, line 2535: same sentence, for a sequence that decodes but whose
       values break one of the rules collected in `Valid` — §18.2's ranges and
       role restrictions and §4.6's 2^60 stream limit. -/
   | invalid {s b raw} (h : decodeRaw b = .ok raw) (hv : validate s.sender raw = none) :
       Step s (.recvParams b) (.error .transportParameterError)
   /-- §7.4, line 2540: "An endpoint SHOULD treat receipt of duplicate transport
       parameters as a connection error of type TRANSPORT_PARAMETER_ERROR."
-      A SHOULD, so this is an alternative to `accept` for the same input and not
-      a replacement for it. -/
+      A SHOULD, so this is an alternative to `accept`/`acceptFirst` for the same
+      input and not a replacement for them.  It is the *recommended* one
+      (`Recommended`, `step_recommended`). -/
   | duplicate {s b raw tp} (h : decodeRaw b = .ok raw)
       (hv : validate s.sender raw = some tp) (hd : duplicated raw = true) :
       Step s (.recvParams b) (.error .transportParameterError)
-  /-- §7.4, line 2526: "Once the handshake completes, the transport parameters
+  /-- §7.4, line 2528: "Once the handshake completes, the transport parameters
       declared by the peer are available.  Each endpoint validates the values
-      provided by its peer." -/
+      provided by its peer."
+
+      With a repeated parameter this is the *last copy wins* reading; §7.4 does
+      not say which copy applies (NOTES 2). -/
   | accept {s b raw tp} (h : decodeRaw b = .ok raw) (hv : validate s.sender raw = some tp) :
       Step s (.recvParams b) (.ok { s with peer := some tp } [.paramsApplied tp])
+  /-- Same sentence, the *first copy wins* reading of a repeated parameter —
+      what an "insert if absent" decoder produces.  §7.4, line 2540 is a SHOULD,
+      so an endpoint that does not treat the duplicate as an error must pick a
+      copy, and the text names neither; both choices are therefore permitted
+      (NOTES 2).  Offered only when the last-copy reading is itself acceptable,
+      so that no record the strict reading rejects gets in through this door. -/
+  | acceptFirst {s b raw tp tp₁} (h : decodeRaw b = .ok raw)
+      (hv : validate s.sender raw = some tp) (hd : duplicated raw = true)
+      (hv₁ : validateFirst s.sender raw = some tp₁) :
+      Step s (.recvParams b) (.ok { s with peer := some tp₁ } [.paramsApplied tp₁])
 
 /-! ## 3. Executable form -/
 
+/-- Preferred first: the error §7.4 line 2540 recommends, then the last-copy
+    record, then the first-copy record (which is the same record, and so a
+    harmless repeat in the list, unless the parameter really repeats). -/
 def outcomes (s : State) : Event → List Out
   | .recvParams b =>
     match decodeRaw b with
@@ -114,7 +155,12 @@ def outcomes (s : State) : Event → List Out
       | none => [.error .transportParameterError]
       | some tp =>
         if duplicated raw then
-          [.error .transportParameterError, .ok { s with peer := some tp } [.paramsApplied tp]]
+          match validateFirst s.sender raw with
+          | none =>
+            [.error .transportParameterError, .ok { s with peer := some tp } [.paramsApplied tp]]
+          | some tp₁ =>
+            [.error .transportParameterError, .ok { s with peer := some tp } [.paramsApplied tp],
+              .ok { s with peer := some tp₁ } [.paramsApplied tp₁]]
         else [.ok { s with peer := some tp } [.paramsApplied tp]]
 
 /-! ## 4. The two forms agree -/
@@ -130,19 +176,31 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
       · split at h
         · simp only [List.mem_singleton] at h; subst h; exact .invalid ‹_› ‹_›
         · split at h
-          · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-            rcases h with h | h <;> subst h
-            · exact .duplicate ‹_› ‹_› ‹_›
-            · exact .accept ‹_› ‹_›
+          · split at h
+            · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+              rcases h with h | h <;> subst h
+              · exact .duplicate ‹_› ‹_› ‹_›
+              · exact .accept ‹_› ‹_›
+            · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+              rcases h with h | h | h <;> subst h
+              · exact .duplicate ‹_› ‹_› ‹_›
+              · exact .accept ‹_› ‹_›
+              · exact .acceptFirst ‹_› ‹_› ‹_› ‹_›
           · simp only [List.mem_singleton] at h; subst h; exact .accept ‹_› ‹_›
   · intro h
     cases h with
     | malformed hd => simp [outcomes, hd]
     | invalid hd hv => simp [outcomes, hd, hv]
-    | duplicate hd hv hdup => simp [outcomes, hd, hv, hdup]
+    | duplicate hd hv hdup =>
+      simp only [outcomes, hd, hv, hdup, ↓reduceIte]
+      split <;> simp
     | accept hd hv =>
       simp only [outcomes, hd, hv]
-      split <;> simp
+      split
+      · split <;> simp
+      · simp
+    | acceptFirst hd hv hdup hv₁ =>
+      simp [outcomes, hd, hv, hdup, hv₁]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
   cases e <;> simp only [outcomes] <;> repeat' split
@@ -162,6 +220,12 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
     simp only [Option.some.injEq] at htp
     subst htp
     exact validate_valid hv
+  | acceptFirst hd hv hdup hv₁ =>
+    intro tp' htp
+    simp only [State.sender] at hv₁ ⊢
+    simp only [Option.some.injEq] at htp
+    subst htp
+    exact validateFirst_valid hv₁
 
 /-! ## 6. Send side
 
@@ -179,6 +243,73 @@ def maySend (_ : State) (_ : Frame) : Bool := true
 
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
   simp [maySend, MaySend]
+
+/-! ### Recommended (the SHOULDs of the range)
+
+Three sentences in the assigned range use SHOULD: §7.4 line 2540 (duplicates),
+§7.4.1 line 2638 (0-RTT limits non-zero) and §18.2 line 7040 (max_ack_delay
+covers alarm slack).  The first picks between outcomes this component models
+and is `Recommended` below; the other two constrain the parameters an endpoint
+*sends*, and are `RecommendedParams`.  All three are advice: nothing in `Step`
+or `MaySend` is conditioned on them. -/
+
+/-- The two SHOULDs about the parameters an endpoint puts in its own extension.
+
+    `zeroRtt` says the endpoint means the peer to be able to use 0-RTT with
+    these values; `plannedAckDelay` is the acknowledgement delay it actually
+    intends to apply and `alarmSlack` how late its alarms fire.  The last two
+    are properties of the implementation's clock, not of the connection, so
+    they are arguments rather than state (NOTES 12). -/
+def RecommendedParams (zeroRtt : Bool) (plannedAckDelay alarmSlack : Nat)
+    (tp : TransportParams) : Prop :=
+  -- §7.4.1, line 2638: "The applicable subset of transport parameters that
+  -- permit sending of application data SHOULD be set to non-zero values for
+  -- 0-RTT.  This includes initial_max_data and either initial_max_streams_bidi
+  -- and initial_max_stream_data_bidi_remote, or initial_max_streams_uni and
+  -- initial_max_stream_data_uni."
+  (zeroRtt = true →
+      0 < tp.initialMaxData ∧
+      ((0 < tp.initialMaxStreamsBidi ∧ 0 < tp.initialMaxStreamDataBidiRemote) ∨
+       (0 < tp.initialMaxStreamsUni ∧ 0 < tp.initialMaxStreamDataUni))) ∧
+  -- §18.2, line 7040: "This value SHOULD include the receiver's expected delays
+  -- in alarms firing.  For example, if a receiver sets a timer for 5ms and
+  -- alarms commonly fire up to 1ms late, then it should send a max_ack_delay of
+  -- 6ms."
+  plannedAckDelay + alarmSlack ≤ tp.maxAckDelay
+
+def recommendedParams (zeroRtt : Bool) (plannedAckDelay alarmSlack : Nat)
+    (tp : TransportParams) : Bool :=
+  (!zeroRtt ||
+    (decide (0 < tp.initialMaxData) &&
+      ((decide (0 < tp.initialMaxStreamsBidi) &&
+          decide (0 < tp.initialMaxStreamDataBidiRemote)) ||
+       (decide (0 < tp.initialMaxStreamsUni) &&
+          decide (0 < tp.initialMaxStreamDataUni))))) &&
+  decide (plannedAckDelay + alarmSlack ≤ tp.maxAckDelay)
+
+theorem recommendedParams_iff (zeroRtt : Bool) (plannedAckDelay alarmSlack : Nat)
+    (tp : TransportParams) :
+    recommendedParams zeroRtt plannedAckDelay alarmSlack tp = true ↔
+      RecommendedParams zeroRtt plannedAckDelay alarmSlack tp := by
+  cases zeroRtt <;> simp [recommendedParams, RecommendedParams, and_assoc]
+
+instance (zeroRtt : Bool) (plannedAckDelay alarmSlack : Nat) (tp : TransportParams) :
+    Decidable (RecommendedParams zeroRtt plannedAckDelay alarmSlack tp) :=
+  decidable_of_iff _ (recommendedParams_iff zeroRtt plannedAckDelay alarmSlack tp)
+
+/-- §7.4, line 2540: "An endpoint SHOULD treat receipt of duplicate transport
+    parameters as a connection error of type TRANSPORT_PARAMETER_ERROR."
+
+    The only SHOULD in range that picks among the outcomes of `Step`: when a
+    known parameter repeats, the recommended outcome is the error.  Advice only
+    — `Step.accept` and `Step.acceptFirst` remain permitted; `step_recommended`
+    shows the reference implementation takes the advice. -/
+def Recommended (_s : State) (e : Event) (o : Out) : Prop :=
+  match e with
+  | .recvParams b =>
+    match decodeRaw b with
+    | .ok raw => duplicated raw = true → o = .error .transportParameterError
+    | .error _ => True
 
 /-! ## 7. The component -/
 
@@ -214,6 +345,42 @@ theorem step_congr {s : State} {e₁ e₂ : Event} (h : outcomes s e₁ = outcom
     component.step s e₁ = component.step s e₂ :=
   Option.some.inj (by rw [← head?_outcomes, ← head?_outcomes, h])
 
+/-- Once duplicates are present the preferred outcome is the error, whatever
+    the parameters say — this is what makes the reference implementation
+    order independent, and what `step_recommended` needs. -/
+theorem step_of_duplicated {s : State} {b : ByteArray} {raw : Raw}
+    (hd : decodeRaw b = .ok raw) (hdup : duplicated raw = true) :
+    component.step s (.recvParams b) = .error .transportParameterError := by
+  cases hv : validate s.sender raw with
+  | none =>
+    have ho : outcomes s (.recvParams b) = [.error .transportParameterError] := by
+      simp only [outcomes, hd, hv]
+    exact step_eq_of_outcomes ho
+  | some tp =>
+    cases hv₁ : validateFirst s.sender raw with
+    | none =>
+      have ho : outcomes s (.recvParams b) =
+          [.error .transportParameterError,
+            .ok { s with peer := some tp } [.paramsApplied tp]] := by
+        simp only [outcomes, hd, hv, hdup, ↓reduceIte, hv₁]
+      exact step_eq_of_outcomes ho
+    | some tp₁ =>
+      have ho : outcomes s (.recvParams b) =
+          [.error .transportParameterError,
+            .ok { s with peer := some tp } [.paramsApplied tp],
+            .ok { s with peer := some tp₁ } [.paramsApplied tp₁]] := by
+        simp only [outcomes, hd, hv, hdup, ↓reduceIte, hv₁]
+      exact step_eq_of_outcomes ho
+
+/-- The reference implementation takes the advice of §7.4, line 2540. -/
+theorem step_recommended (s : State) (e : Event) : Recommended s e (component.step s e) := by
+  cases e with
+  | recvParams b =>
+    simp only [Recommended]
+    split
+    · next raw hraw => exact fun hdup => step_of_duplicated hraw hdup
+    · trivial
+
 /-- **(b)** Anything accepted satisfies the validity predicate, and the
     application is told exactly what was accepted. -/
 theorem step_ok_valid {s : State} {e : Event} {s' : State} {fx : List Effect}
@@ -221,11 +388,14 @@ theorem step_ok_valid {s : State} {e : Event} {s' : State} {fx : List Effect}
     ∃ tp, s'.peer = some tp ∧ Valid s.sender tp ∧ fx = [.paramsApplied tp] := by
   cases h with
   | accept hd hv => exact ⟨_, rfl, validate_valid hv, rfl⟩
+  | acceptFirst hd hv hdup hv₁ => exact ⟨_, rfl, validateFirst_valid hv₁, rfl⟩
 
 /-- Accepting never changes our own role, so `Inv` is about a fixed sender. -/
 theorem step_role {s : State} {e : Event} {s' : State} {fx : List Effect}
     (h : Step s e (.ok s' fx)) : s'.role = s.role := by
-  cases h with | accept _ _ => rfl
+  cases h with
+  | accept _ _ => rfl
+  | acceptFirst _ _ _ _ => rfl
 
 theorem duplicated_toRaw (tp : TransportParams) : duplicated (toRaw tp) = false := by
   simp only [duplicated, Bool.not_eq_eq_eq_not, Bool.not_false, decide_eq_true_eq]
@@ -238,7 +408,8 @@ theorem outcomes_encodeParams (role : Role) (tp : TransportParams) (hwf : tp.WF)
   have hdec : decodeRaw (encodeParams tp) = .ok (toRaw tp) :=
     decodeRaw_encodeRaw _ (rawWF_toRaw tp hwf)
   have hval : validate role.peer (toRaw tp) = some tp := by
-    simp only [validate, interpret_toRaw tp hwf, (validB_iff _ _).mpr hv, ↓reduceIte]
+    simp only [validate, checkValid, interpret_toRaw tp hwf, (validB_iff _ _).mpr hv,
+      ↓reduceIte]
   simp only [outcomes, State.sender, hdec, hval, duplicated_toRaw tp, Bool.false_eq_true,
     ↓reduceIte]
 
@@ -249,23 +420,6 @@ theorem step_encodeParams (role : Role) (tp : TransportParams) (hwf : tp.WF)
     component.step ⟨role, peer₀⟩ (.recvParams (encodeParams tp))
       = .ok ⟨role, some tp⟩ [.paramsApplied tp] :=
   step_eq_of_outcomes (outcomes_encodeParams role tp hwf hv peer₀)
-
-/-- Once duplicates are present the preferred outcome is the error, whatever
-    the parameters say — this is what makes the reference implementation
-    order independent. -/
-theorem step_of_duplicated {s : State} {b : ByteArray} {raw : Raw}
-    (hd : decodeRaw b = .ok raw) (hdup : duplicated raw = true) :
-    component.step s (.recvParams b) = .error .transportParameterError := by
-  cases hv : validate s.sender raw with
-  | none =>
-    have ho : outcomes s (.recvParams b) = [.error .transportParameterError] := by
-      simp only [outcomes, hd, hv]
-    exact step_eq_of_outcomes ho
-  | some tp =>
-    have ho : outcomes s (.recvParams b) =
-        [.error .transportParameterError, .ok { s with peer := some tp } [.paramsApplied tp]] := by
-      simp only [outcomes, hd, hv, hdup, ↓reduceIte]
-    exact step_eq_of_outcomes ho
 
 theorem duplicated_perm {l₁ l₂ : Raw} (h : l₁.Perm l₂) : duplicated l₁ = duplicated l₂ := by
   have : (knownIds l₁).Perm (knownIds l₂) := (knownEntries_perm h).map Prod.fst
@@ -288,7 +442,8 @@ theorem step_perm (s : State) {raw₁ raw₂ : Raw} (hp : raw₁.Perm raw₂) (h
     have hdup₂ : duplicated raw₂ = false := by rw [← duplicated_perm hp]; exact hdup₁
     have hint : interpret raw₁ = interpret raw₂ := interpret_perm hp hnd
     refine step_congr ?_
-    simp only [outcomes, h₁, h₂, validate, hint, hdup₁, hdup₂]
+    simp only [outcomes, h₁, h₂, validate, hint, hdup₁, hdup₂, Bool.false_eq_true,
+      ↓reduceIte]
   · have hdup₁ : duplicated raw₁ = true := by simp [duplicated, hnd]
     have hdup₂ : duplicated raw₂ = true := by rw [← duplicated_perm hp]; exact hdup₁
     rw [step_of_duplicated h₁ hdup₁, step_of_duplicated h₂ hdup₂]

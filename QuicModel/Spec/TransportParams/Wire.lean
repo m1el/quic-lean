@@ -85,17 +85,17 @@ theorem code_of_ofCode? {n : Nat} {p : ParamId} (h : ofCode? n = some p) : p.cod
     | (injection h with h; subst h; rfl)
     | simp at h
 
-/-- §18.2: "A client MUST NOT include any server-only transport parameter:
-    original_destination_connection_id, preferred_address,
+/-- §18.2, line 7149: "A client MUST NOT include any server-only transport
+    parameter: original_destination_connection_id, preferred_address,
     retry_source_connection_id, or stateless_reset_token." -/
 def serverOnly : ParamId → Bool
   | .originalDestinationConnectionId | .preferredAddress
   | .retrySourceConnectionId | .statelessResetToken => true
   | _ => false
 
-/-- §18.1: "Transport parameters with an identifier of the form 31 * N + 27 for
-    integer values of N are reserved to exercise the requirement that unknown
-    transport parameters be ignored." -/
+/-- §18.1, line 6914: "Transport parameters with an identifier of the form
+    "31 * N + 27" for integer values of N are reserved to exercise the
+    requirement that unknown transport parameters be ignored." -/
 def IsReserved (n : Nat) : Prop := n % 31 = 27
 
 instance (n : Nat) : Decidable (IsReserved n) := by unfold IsReserved; infer_instance
@@ -110,9 +110,9 @@ end ParamId
 
 /-! ## The preferred address (§18.2, Figure 22) -/
 
-/-- Figure 22: IPv4 Address (32), IPv4 Port (16), IPv6 Address (128),
-    IPv6 Port (16), Connection ID Length (8), Connection ID (..),
-    Stateless Reset Token (128). -/
+/-- §18.2, line 7099, Figure 22: IPv4 Address (32), IPv4 Port (16),
+    IPv6 Address (128), IPv6 Port (16), Connection ID Length (8),
+    Connection ID (..), Stateless Reset Token (128). -/
 structure PreferredAddress where
   ipv4 : ByteArray
   ipv4Port : Nat
@@ -129,19 +129,19 @@ def PreferredAddress.WF (pa : PreferredAddress) : Prop :=
 
 /-! ## The parameter record (§18.2)
 
-"Transport parameters have a default value of 0 if the transport parameter is
-absent unless otherwise stated." -/
+§18.2, line 6926: "Transport parameters have a default value of 0 if the
+transport parameter is absent unless otherwise stated." -/
 
 structure TransportParams where
   /-- 0x00, server only; §7.3. -/
   originalDestinationConnectionId : Option ByteArray := none
-  /-- 0x01, milliseconds; "Idle timeout is disabled when both endpoints omit
-      this transport parameter or specify a value of 0." -/
+  /-- 0x01, milliseconds; §18.2, line 6939: "Idle timeout is disabled when
+      both endpoints omit this transport parameter or specify a value of 0." -/
   maxIdleTimeout : Nat := 0
   /-- 0x02, 16 bytes, server only. -/
   statelessResetToken : Option ByteArray := none
-  /-- 0x03; "The default for this parameter is the maximum permitted UDP
-      payload of 65527.  Values below 1200 are invalid." -/
+  /-- 0x03; §18.2, line 6963: "The default for this parameter is the maximum
+      permitted UDP payload of 65527.  Values below 1200 are invalid." -/
   maxUdpPayloadSize : Nat := 65527
   /-- 0x04 -/
   initialMaxData : Nat := 0
@@ -155,17 +155,21 @@ structure TransportParams where
   initialMaxStreamsBidi : Nat := 0
   /-- 0x09 -/
   initialMaxStreamsUni : Nat := 0
-  /-- 0x0a; "If this value is absent, a default value of 3 is assumed …
-      Values above 20 are invalid." -/
+  /-- 0x0a; §18.2, line 7034: "If this value is absent, a default value of 3
+      is assumed (indicating a multiplier of 8).  Values above 20 are
+      invalid." -/
   ackDelayExponent : Nat := 3
-  /-- 0x0b, milliseconds; "If this value is absent, a default of 25
-      milliseconds is assumed.  Values of 2^14 or greater are invalid." -/
+  /-- 0x0b, milliseconds; §18.2, line 7044: "If this value is absent, a
+      default of 25 milliseconds is assumed.  Values of 2^14 or greater are
+      invalid." -/
   maxAckDelay : Nat := 25
-  /-- 0x0c; "This parameter is a zero-length value" — presence is the value. -/
+  /-- 0x0c; §18.2, line 7062: "This parameter is a zero-length value." —
+      presence is the value. -/
   disableActiveMigration : Bool := false
   /-- 0x0d, server only. -/
   preferredAddress : Option PreferredAddress := none
-  /-- 0x0e; "If this transport parameter is absent, a default of 2 is assumed." -/
+  /-- 0x0e; §18.2, line 7127: "If this transport parameter is absent, a
+      default of 2 is assumed." -/
   activeConnectionIdLimit : Nat := 2
   /-- 0x0f; §7.3. -/
   initialSourceConnectionId : Option ByteArray := none
@@ -196,15 +200,15 @@ theorem exactly_of_parses {α : Type} {p : P α} {enc : ByteArray} {a : α}
   rw [hz, Nat.zero_add] at h
   simp only [exactly, h, ↓reduceIte]
 
-/-- §18.2: "Those transport parameters that are identified as integers use a
-    variable-length integer encoding; see Section 16." -/
+/-- §18.2, line 6924: "Those transport parameters that are identified as
+    integers use a variable-length integer encoding; see Section 16." -/
 def varintValue? (v : ByteArray) : Option Nat := exactly P.varint v
 
 theorem varintValue?_encodeVarint {n : Nat} (h : n ≤ maxVarint) :
     varintValue? (encodeVarint n) = some n :=
   exactly_of_parses (parses_varint n h)
 
-/-- Figure 22, as a parser. -/
+/-- §18.2, line 7099, Figure 22, as a parser. -/
 def preferredAddressP : P PreferredAddress := do
   let ipv4 ← P.take 4
   let p4 ← P.uintBE 2
@@ -254,6 +258,11 @@ theorem decodePreferredAddress_encode (pa : PreferredAddress) (h : pa.WF) :
   exactly_of_parses (parses_preferredAddress pa h)
 
 /-! ## The sequence of parameters (§18, Figures 20 and 21)
+
+§18, line 6895: "Each transport parameter is encoded as an (identifier, length,
+value) tuple, as shown in Figure 21"; line 6906: "The Transport Parameter
+Length field contains the length of the Transport Parameter Value field in
+bytes."
 
     Transport Parameter { ID (i), Length (i), Value (..) }
 
@@ -430,7 +439,7 @@ theorem decodeRaw_encodeRaw (raw : Raw) (h : RawWF raw) : decodeRaw (encodeRaw r
 
 /-! ## Interpreting the raw sequence (§18.2)
 
-§7.4.2, line 2664: "An endpoint MUST ignore transport parameters that it does
+§7.4.2, line 2670: "An endpoint MUST ignore transport parameters that it does
 not support."  `knownEntries` is where that happens: an entry whose identifier
 is not one of the seventeen of §18.2 — including every reserved `31*N+27`
 identifier of §18.1 — is dropped before anything else looks at it. -/
@@ -485,11 +494,64 @@ def setParam (tp : TransportParams) : ParamId → ByteArray → Option Transport
   | .retrySourceConnectionId, v => some { tp with retrySourceConnectionId := some v }
 
 /-- Apply known entries left to right, starting from the §18.2 defaults.
-    A later copy of a parameter overwrites an earlier one; §7.4 says duplicates
-    SHOULD be an error, and the component treats them as one. -/
+    A later copy of a parameter overwrites an earlier one — the *last copy
+    wins*.  §7.4, line 2540 says duplicates SHOULD be an error; an endpoint
+    that does not take that advice has to pick a copy, and the text does not
+    say which, so `applyEntriesFirst` below is the other reading and the
+    component permits both. -/
 def applyEntries : List (ParamId × ByteArray) → TransportParams → Option TransportParams
   | [], tp => some tp
   | (p, v) :: l, tp => (setParam tp p v).bind (applyEntries l)
+
+/-- The other reading of a repeated parameter: the *first copy wins*, which is
+    what an "insert if absent" decoder produces.  `seen` collects the
+    identifiers already applied.
+
+    A later copy's value is still parsed, and a malformed one still makes the
+    whole extension invalid: §7.4, line 2535 ("An endpoint MUST treat receipt
+    of a transport parameter with an invalid value as a connection error of
+    type TRANSPORT_PARAMETER_ERROR") is a MUST about *receipt*, and a copy that
+    does not apply has still been received.  Only the field update is
+    suppressed. -/
+def applyEntriesFirst : List (ParamId × ByteArray) → List ParamId → TransportParams →
+    Option TransportParams
+  | [], _, tp => some tp
+  | (p, v) :: l, seen, tp =>
+    match setParam tp p v with
+    | none => none
+    | some tp' => applyEntriesFirst l (p :: seen) (if p ∈ seen then tp else tp')
+
+/-- With no repeated identifier the two folds agree; they differ only on the
+    duplicates §7.4 leaves unspecified. -/
+theorem applyEntriesFirst_eq :
+    ∀ (l : List (ParamId × ByteArray)) (seen : List ParamId) (tp : TransportParams),
+      (l.map Prod.fst).Nodup → (∀ e ∈ l, e.1 ∉ seen) →
+      applyEntriesFirst l seen tp = applyEntries l tp := by
+  intro l
+  induction l with
+  | nil => intro _ _ _ _; rfl
+  | cons a l ih =>
+    obtain ⟨p, v⟩ := a
+    intro seen tp hnd hs
+    have hp : p ∉ seen := hs (p, v) (by simp)
+    simp only [List.map_cons, List.nodup_cons] at hnd
+    have hs' : ∀ e ∈ l, e.1 ∉ p :: seen := by
+      intro e he
+      simp only [List.mem_cons, not_or]
+      exact ⟨fun h => hnd.1 (List.mem_map.mpr ⟨e, he, h⟩), hs e (List.mem_cons_of_mem _ he)⟩
+    cases hsp : setParam tp p v with
+    | none =>
+      have hL : applyEntriesFirst ((p, v) :: l) seen tp = none := by
+        simp [applyEntriesFirst, hsp]
+      have hR : applyEntries ((p, v) :: l) tp = none := by simp [applyEntries, hsp]
+      rw [hL, hR]
+    | some tp' =>
+      have hL : applyEntriesFirst ((p, v) :: l) seen tp = applyEntriesFirst l (p :: seen) tp' := by
+        simp [applyEntriesFirst, hsp, hp]
+      have hR : applyEntries ((p, v) :: l) tp = applyEntries l tp' := by
+        simp [applyEntries, hsp]
+      rw [hL, hR]
+      exact ih (p :: seen) tp' hnd.2 hs'
 
 theorem applyEntries_append (l₁ l₂ : List (ParamId × ByteArray)) (tp : TransportParams) :
     applyEntries (l₁ ++ l₂) tp = (applyEntries l₁ tp).bind (applyEntries l₂) := by
@@ -500,8 +562,18 @@ theorem applyEntries_append (l₁ l₂ : List (ParamId × ByteArray)) (tp : Tran
     cases h : setParam tp p v <;> simp [applyEntries, h, ih]
 
 /-- The parameters a sequence of raw entries denotes, or `none` if any value is
-    malformed. -/
+    malformed.  A repeated known parameter takes its **last** copy. -/
 def interpret (raw : Raw) : Option TransportParams := applyEntries (knownEntries raw) defaults
+
+/-- The same, taking the **first** copy of a repeated known parameter. -/
+def interpretFirst (raw : Raw) : Option TransportParams :=
+  applyEntriesFirst (knownEntries raw) [] defaults
+
+/-- The two readings of §7.4's unspecified duplicate handling coincide whenever
+    no known parameter actually repeats. -/
+theorem interpretFirst_eq_interpret {raw : Raw} (hnd : (knownIds raw).Nodup) :
+    interpretFirst raw = interpret raw :=
+  applyEntriesFirst_eq _ [] defaults hnd (by simp)
 
 /-! ## Encoding a parameter record
 
