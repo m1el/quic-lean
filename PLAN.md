@@ -128,7 +128,7 @@ merged.
 
 | WP | Content | Text (lines) |
 |---|---|---|
-| 14 Reliability | §13.3 retransmission of information: per frame type, what is re-sent and when it MUST NOT be (e.g. no STREAM data after RESET_STREAM, blocked frames carry the current limit, PATH_RESPONSE not retransmitted, CONNECTION_CLOSE handling) as `MaySend`/`Recommended` over an abstract "declared lost" event; §13.4 ECN: the transport-level MUSTs of ECN counting and validation (counts non-decreasing, validation failure disables ECN), with RFC 9002 state abstract | 5325–5639 |
+| 14 Reliability (merged) | §13.3 retransmission of information: per frame type, what is re-sent and when it MUST NOT be (e.g. no STREAM data after RESET_STREAM, blocked frames carry the current limit, PATH_RESPONSE not retransmitted, CONNECTION_CLOSE handling) as `MaySend`/`Recommended` over an abstract "declared lost" event; §13.4 ECN: the transport-level MUSTs of ECN counting and validation (counts non-decreasing, validation failure disables ECN), with RFC 9002 state abstract | 5325–5639 |
 
 ### Review agents
 
@@ -233,7 +233,7 @@ HIGH and MEDIUM findings, all accepted unless noted:
 | VN-1 CID check applied to the §6.2 abandon path | WP7 fix run | merged (5408e38) |
 | T-4 §11 generic error codes | `Core`: `Obs.matchesSpec` | done |
 | `Spec.OutDatagram` lacked destination and probe flag | `Core` | done |
-| `Spec.OutDatagram` has no *local* address, so §8.2.2 line 3183 (PATH_RESPONSE on the path the challenge arrived on) cannot be a field rule; PathValidation and Migration each export a two-state `av → OutDatagram → Prop` rule needing AddressValidation's state | WP12 (decide: add a local address to `OutDatagram`, or conjoin by hand) | recorded |
+| (resolved: `OutDatagram` now has `src`, `dcid`, `scid`, `isEcnMarked`) `Spec.OutDatagram` had no *local* address, so §8.2.2 line 3183 (PATH_RESPONSE on the path the challenge arrived on) cannot be a field rule; PathValidation and Migration each export a two-state `av → OutDatagram → Prop` rule needing AddressValidation's state | WP12 (decide: add a local address to `OutDatagram`, or conjoin by hand) | recorded |
 | AV-4 CONNECTION_REFUSED (§5.2.2); T-4 second half, §11.1 "MAY discard an invalid Initial even where an error is mandated"; VN-2 "MUST drop under all other circumstances"; T-3 closing-state amplification rules (§10.2.1 lines 3993, 4008); conflicting `.drop` readings between PathValidation and Termination | WP12 | recorded: composition must take the *union* for connection-level refusals and let Termination's phase gate every other component |
 
 ## 4d. Review of Wave 1, batch A (`reviews/wave1-a.md`): disposition
@@ -247,9 +247,24 @@ forbidden behaviour. All accepted.
 | W2-1 RESET_STREAM: FINAL_SIZE_ERROR must also be permitted when both rules fire (ngtcp2 checks final size first); W2-2 MAX_STREAM_DATA after FIN is a SHOULD; W2-3 STREAM_DATA_BLOCKED has no bounds or errors; W2-4 "can safely ignore" made mandatory; W2-5..8 | WP2 fix run | merged; two ngtcp2 behaviours on STREAM_DATA_BLOCKED deliberately not encoded (Recv NOTES) → WP13 triage |
 | W2-6 §13.3 "content of a RESET_STREAM MUST NOT change when sent again" | WP2 fix run (merged); WP14 coverage | WP14 running |
 | W3-1 minimum-packet-number drop (§12.3) not permitted; W3-4 `MaySendPacket` for empty packets and frame/packet-type legality; W3-5/6 coverage | WP3 fix run | merged (4c98db1) |
-| W1-1 duplicate parameters: first-copy-wins also conforms; W1-2 dropped SHOULDs; citation drift | WP1 fix run | running |
+| W1-1 duplicate parameters: first-copy-wins also conforms; W1-2 dropped SHOULDs; citation drift | WP1 fix run | merged; W1-3 ruling kept (§18.2 line 7125 is unconditional) |
 | Ruling on `Recommended` vs "advice only" | BRIEF.md | done |
 | Composition notes: `assembling` duplicated in FrameRules and Ack (both needed); `Send.written` means the harness must synthesise `appWrite`; grow-only state vs pruning implementations | WP12 / WP13 | recorded |
+
+## 4e. Review of Wave 2 (`reviews/wave2.md`): disposition
+
+| Finding | Owner | Status |
+|---|---|---|
+| S-1 HIGH connection credit charged from the frame's end offset, deleting the §4.5 "ignore" outcome and mis-accounting §4.5 line 1495 | WP9 fix run | dispatched |
+| S-2 STREAM_STATE_ERROR mandated for all five frames on an uncreated local *bidirectional* stream; S-3, S-4 coverage; S-5 `MaySend` false on non-existent streams (WP13 must synthesise `appOpenStream`); S-6 ~20 wrong citations incl. four error-code rules | WP9 fix run | dispatched |
+| M-1 HIGH a retired connection ID may be reused from a second local address (`dcidOn` overwritten; §9.5 line 3603) | WP10 fix run | running |
+| M-2 send rules read the state's send context instead of `OutDatagram.src/dest/dcid/scid`; M-3 `recvCase` narrows §9.3 line 3379; M-4 citations; witness for the theorem-(c) counterexample should be the reachable route | WP10 fix run | running |
+| K-1 fold Handshake's `SendHeader` into `MaySendDatagram` (now expressible); K-3, K-4, K-5 | WP11 small fix run | queued |
+| K-2 `recvHeader` only after successful unprotection is a hard requirement | WP12 | in the WP12 brief |
+| Three copies of "handshake confirmed"; `.drop` precedence for Migration's MUST-discards; events WP13 must synthesise | WP12 / WP13 | recorded |
+
+Both WP10 theorems reported false as written were confirmed against the text
+by the reviewer (reachable, conformant counterexamples).
 
 ## 5. Risks
 

@@ -211,6 +211,8 @@ structure OutDatagram where
       `none` when the rule being checked does not look at them. -/
   dcid : Option CidBytes := none
   scid : Option CidBytes := none
+  /-- The IP header carries an ECT codepoint (§13.4; `Ecn.MayMarkEcn`). -/
+  isEcnMarked : Bool := false
   deriving DecidableEq
 
 /-- The usual pattern for an API that cannot tell "processed, nothing visible"
