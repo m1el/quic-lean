@@ -15,8 +15,9 @@ import QuicModel.Spec.Stream
 -/
 namespace Quic.Spec.StreamTable
 
-/-- §4.6, line 1543 / §19.11, line 7802: "This value cannot exceed 2^60, as it
-    is not possible to encode stream IDs larger than 2^62-1." -/
+/-- §19.11, line 7802: "This value cannot exceed 2^60, as it is not possible to
+    encode stream IDs larger than 2^62-1."  §4.6, line 1537 says the same of
+    both the frame and the transport parameter. -/
 def maxStreamsLimit : Nat := 2 ^ 60
 
 /-! ## 1. State, events, effects -/
@@ -41,7 +42,7 @@ structure Limits where
   maxStreamsUni : Nat
   deriving DecidableEq, Repr
 
-/-- §4.6, line 1535: "Separate limits apply to unidirectional and bidirectional
+/-- §4.6, line 1534: "Separate limits apply to unidirectional and bidirectional
     streams."  A per-direction pair of counters. -/
 structure Counts where
   bidi : Nat
@@ -99,7 +100,7 @@ theorem role_ne_peer (r : Role) : ¬ r = r.peer := by cases r <;> simp [Role.pee
 `streams` holds the state of every stream that has taken a step; a stream that
 exists but has no entry is at its initial state (`freshStream`), which is what
 `get` returns.  Whether a stream *exists* is decided by the high-water marks
-`opened`, not by the table: §2.1, line 712 opens every
+`opened`, not by the table: §2.1, line 718 opens every
 lower-numbered stream of a type implicitly, and §2.1, line 687 forbids reusing a
 stream ID, so "exists" is exactly "its index is below the high-water mark for
 its type" — see the NOTES in `Spec/StreamTable.lean`. -/
@@ -112,21 +113,23 @@ structure State where
   theirs : Limits
   /-- Per-stream state, for streams that have taken a step. -/
   streams : Map StreamId Stream.State
-  /-- §2.1, line 712: the high-water mark of each of the four stream types —
+  /-- §2.1, line 718: the high-water mark of each of the four stream types —
       how many streams of that type have ever been opened. -/
   opened : Opened
   /-- §4.6: the cumulative stream limit we have advertised to the peer. -/
   maxStreamsLocal : Counts
   /-- §4.6: the cumulative stream limit the peer has advertised to us. -/
   maxStreamsPeer : Counts
-  /-- §4.1, line 1349: the connection-level limit we have advertised (MAX_DATA
+  /-- §4.1, line 1356: the connection-level limit we have advertised (MAX_DATA
       we have sent; initially our `initial_max_data`). -/
   maxDataLocal : Nat
-  /-- §19.9, line 7710: "A receiver maintains a cumulative sum of bytes received
+  /-- §4.1, line 1358: "A receiver maintains a cumulative sum of bytes received
       on all streams" — the sum of the highest received offsets over all
-      streams, including closed and reset ones (§4.5, line 1495: "The receiver
-      MUST use the final size of the stream to account for all bytes sent on the
-      stream in its connection level flow controller"). -/
+      streams, including closed and reset ones (§19.9, line 7710: "The sum of the
+      final sizes on all streams - including streams in terminal states - MUST
+      NOT exceed the value advertised by a receiver"; §4.5, line 1495: "The
+      receiver MUST use the final size of the stream to account for all bytes
+      sent on the stream in its connection level flow controller"). -/
   recvTotal : Nat
   /-- The connection-level limit the peer has advertised to us. -/
   maxDataPeer : Nat
@@ -134,8 +137,9 @@ structure State where
   sentTotal : Nat
   deriving DecidableEq, Repr
 
-/-- §4.6, line 1535 and §4.1, line 1331: "A receiver sets initial limits for all
-    streams through transport parameters during the handshake." -/
+/-- §4.1, line 1332: "A receiver sets initial limits for all streams through
+    transport parameters during the handshake"; §4.6, line 1531: "Initial limits
+    are set in the transport parameters." -/
 def init (role : Role) (ours theirs : Limits) : State :=
   { role, ours, theirs, streams := [],
     opened := ⟨⟨0, 0⟩, ⟨0, 0⟩⟩,
@@ -169,7 +173,7 @@ def sendMaxOf (s : State) (id : StreamId) : Nat :=
 def freshStream (s : State) (id : StreamId) : Stream.State :=
   Stream.init id s.role (s.sendMaxOf id) (s.recvMaxOf id)
 
-/-- §2.1, line 712: a stream exists once its index is below the high-water mark
+/-- §2.1, line 718: a stream exists once its index is below the high-water mark
     of its type — which is what makes implicit opening decidable. -/
 def has (s : State) (id : StreamId) : Bool :=
   decide (id.index < s.opened.get id.initiator id.dir)
@@ -182,14 +186,14 @@ def get (s : State) (id : StreamId) : Stream.State :=
 def setStream (s : State) (id : StreamId) (st : Stream.State) : State :=
   { s with streams := s.streams.set id st }
 
-/-- §2.1, line 712: "A stream ID that is used out of order results in all
+/-- §2.1, line 718: "A stream ID that is used out of order results in all
     streams of that type with lower-numbered stream IDs also being opened." -/
 def openThrough (s : State) (id : StreamId) : State :=
   { s with
       opened := s.opened.set id.initiator id.dir
         (max (s.opened.get id.initiator id.dir) (id.index + 1)) }
 
-/-- §4.6, line 1553: "Endpoints MUST NOT exceed the limit set by their peer." -/
+/-- §4.6, line 1546: "Endpoints MUST NOT exceed the limit set by their peer." -/
 def withinPeerStreamLimit (s : State) (id : StreamId) : Bool :=
   !decide (id.initiator = s.role) || decide (id.index < s.maxStreamsPeer.get id.dir)
 
@@ -212,9 +216,9 @@ inductive Event where
   | recvStreamsBlocked (dir : StreamDir) (v : Nat)
   /-- §2.1: the application opens a new stream of this type. -/
   | appOpenStream (dir : StreamDir)
-  /-- §4.1, line 1349: we transmitted a MAX_DATA frame advertising this limit. -/
+  /-- §4.1, line 1356: we transmitted a MAX_DATA frame advertising this limit. -/
   | sentMaxData (v : Nat)
-  /-- §4.6, line 1537: we transmitted a MAX_STREAMS frame. -/
+  /-- §4.6, line 1533: we transmitted a MAX_STREAMS frame. -/
   | sentMaxStreams (dir : StreamDir) (v : Nat)
   deriving DecidableEq, Repr
 
@@ -222,7 +226,7 @@ inductive Effect where
   /-- An effect of one stream (WP2), tagged with the stream it came from. -/
   | stream (id : StreamId) (e : Stream.Effect)
   /-- A stream came into existence, whether explicitly or implicitly (§2.1,
-      line 712).  One per stream, in increasing order of stream ID. -/
+      line 718).  One per stream, in increasing order of stream ID. -/
   | streamOpened (id : StreamId)
   /-- §4.1: the peer raised the connection-level limit; more may be sent. -/
   | dataCreditAvailable (max : Nat)
@@ -241,7 +245,34 @@ def peerFrame : Stream.Event → Bool
   | .send e => e.isPeerFrame
   | .recv e => e.isPeerFrame
 
-/-- §4.1, line 1352 / §4.5, line 1495: the connection-level credit a stream has
+/-- Does the text *mandate* STREAM_STATE_ERROR for this frame on a
+    locally-initiated stream `id` that has not yet been created?
+
+    Three of the five stream-scoped frames name that situation explicitly:
+
+    * STREAM — §19.8, line 7637: "An endpoint MUST terminate the connection with
+      error STREAM_STATE_ERROR if it receives a STREAM frame for a
+      locally-initiated stream that has not yet been created";
+    * STOP_SENDING — §19.5, line 7473: "Receiving a STOP_SENDING frame for a
+      locally-initiated stream that has not yet been created MUST be treated as
+      a connection error of type STREAM_STATE_ERROR";
+    * MAX_STREAM_DATA — §19.10, line 7734: the same sentence.
+
+    The other two do not.  §19.4, line 7431 and §19.13, line 7863 say only that
+    RESET_STREAM resp. STREAM_DATA_BLOCKED "for a **send-only** stream" MUST be
+    a STREAM_STATE_ERROR.  A locally-initiated *unidirectional* stream is
+    send-only at this endpoint, so those two sentences do cover it; a
+    locally-initiated *bidirectional* stream that has not been created is
+    covered by no sentence of the text at all (review finding S-2). -/
+def localNotCreatedMandatory (id : StreamId) : Stream.Event → Bool
+  | .recv (.recvStream ..) => true                             -- §19.8, line 7637
+  | .send (.recvStopSending _) => true                         -- §19.5, line 7473
+  | .send (.recvMaxStreamData _) => true                       -- §19.10, line 7734
+  | .recv (.recvResetStream ..) => decide (id.dir = .uni)      -- §19.4, line 7431
+  | .recv (.recvStreamDataBlocked _) => decide (id.dir = .uni) -- §19.13, line 7863
+  | _ => false
+
+/-- §4.1, line 1358 / §4.5, line 1495: the connection-level credit a stream has
     consumed on the receive side is its highest received offset — which a
     RESET_STREAM sets to the final size. -/
 def recvHighest (st : Stream.State) : Nat :=
@@ -249,8 +280,9 @@ def recvHighest (st : Stream.State) : Nat :=
   | some rs => rs.highest
   | none => 0
 
-/-- The same on the send side (§4.5, line 1479: "one higher than the offset of
-    the byte with the largest offset sent on the stream"). -/
+/-- The same on the send side (§4.5, line 1481: "More generally, this is one
+    higher than the offset of the byte with the largest offset sent on the
+    stream"). -/
 def sentHighest (st : Stream.State) : Nat :=
   match st.send with
   | some ss => ss.sent
@@ -277,12 +309,19 @@ theorem sentEnd_eq_none_of_recvEnd {e : Stream.Event} {k : Nat} (h : recvEnd e =
 
 /-- §19.9, line 7712: "An endpoint MUST terminate a connection with a
     FLOW_CONTROL_ERROR error if it receives more data than the maximum data
-    value that it has sent."  The frame's contribution is what it adds to the
-    stream's highest received offset. -/
-def connRecvViolation (s : State) (st : Stream.State) (e : Stream.Event) : Bool :=
-  match recvEnd e with
-  | none => false
-  | some k => decide (s.maxDataLocal < s.recvTotal + (k - recvHighest st))
+    value that it has sent."
+
+    What the connection is charged is what the *stream* accepts, not what the
+    frame claims: §4.5, line 1495 says the receiver accounts for a stream by its
+    final size, and §4.5, line 1522 ("Generating these errors is not mandatory")
+    permits ignoring data at or beyond a known final size altogether.  So the
+    charge is the movement of the stream's own highest received offset between
+    the state before the event (`st`) and the state the stream's own rules chose
+    (`st'`) — exactly the delta `afterStep` adds to `recvTotal`.  A step in which
+    the stream accepts nothing therefore costs nothing and can never violate the
+    connection-level limit (review finding S-1). -/
+def connRecvViolation (s : State) (st st' : Stream.State) : Bool :=
+  decide (s.maxDataLocal < s.recvTotal + (recvHighest st' - recvHighest st))
 
 /-- §4.1, line 1330: "Senders MUST NOT send data in excess of either limit."
     A frame that would exceed the peer's MAX_DATA is not sent. -/
@@ -302,21 +341,13 @@ theorem connSendBlocked_false_of_peerFrame {s : State} {st : Stream.State} {e : 
     (h : peerFrame e = true) : connSendBlocked s st e = false := by
   simp [connSendBlocked, sentEnd_eq_none_of_peerFrame h]
 
-theorem connSendBlocked_false_of_recvViolation {s : State} {st : Stream.State}
-    {e : Stream.Event} (h : connRecvViolation s st e = true) :
-    connSendBlocked s st e = false := by
-  simp only [connRecvViolation] at h
-  cases he : recvEnd e with
-  | none => rw [he] at h; exact absurd h (by simp)
-  | some k => simp [connSendBlocked, sentEnd_eq_none_of_recvEnd he]
-
 /-- The connection-level totals move with the stream's own accounting. -/
 def afterStep (s : State) (id : StreamId) (st st' : Stream.State) : State :=
   { s.setStream id st' with
       recvTotal := s.recvTotal + (recvHighest st' - recvHighest st),
       sentTotal := s.sentTotal + (sentHighest st' - sentHighest st) }
 
-/-- §2.1, line 712: one `streamOpened` per stream that opening `id` creates,
+/-- §2.1, line 718: one `streamOpened` per stream that opening `id` creates,
     in increasing order of stream ID. -/
 def openedEffects (s : State) (id : StreamId) : List Effect :=
   (List.range' (s.opened.get id.initiator id.dir)
@@ -324,10 +355,17 @@ def openedEffects (s : State) (id : StreamId) : List Effect :=
     (fun n => Effect.streamOpened (StreamId.make id.initiator id.dir n))
 
 /-- Lift one stream's outcome to the table: `base` is the table after any
-    implicit opening, `pre` the effects that opening produced. -/
+    implicit opening, `pre` the effects that opening produced.
+
+    An outcome in which the stream accepts bytes that take the connection past
+    the limit we advertised becomes the FLOW_CONTROL_ERROR of §19.9, line 7712;
+    every other outcome survives unchanged, including the `.ok` the stream
+    chooses when it ignores data beyond a known final size (§4.5, line 1522). -/
 def lift (base : State) (id : StreamId) (st : Stream.State) (pre : List Effect) :
     Outcome Stream.State Stream.Effect → Out
-  | .ok st' fx => .ok (afterStep base id st st') (pre ++ fx.map (Effect.stream id))
+  | .ok st' fx =>
+      if connRecvViolation base st st' then .error .flowControlError
+      else .ok (afterStep base id st st') (pre ++ fx.map (Effect.stream id))
   | .error c => .error c
   | .drop => .drop
 

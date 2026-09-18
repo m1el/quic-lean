@@ -38,7 +38,7 @@ theorem maySend_stream_iff_not_blocked (s : State) (id : StreamId) (offset : Nat
 
 /-! ### (a′) The tracked totals are the sums the text describes
 
-§19.9, line 7710: "A receiver maintains a cumulative sum of bytes received on
+§4.1, line 1358: "A receiver maintains a cumulative sum of bytes received on
 all streams."  `recvTotal` and `sentTotal` are that sum, kept incrementally;
 these lemmas show the bookkeeping never drifts from the table.  Streams with no
 entry contribute nothing, which is right: they are at their initial state. -/
@@ -141,9 +141,9 @@ theorem recvTotal_eq_sum {s₀ s : State} (h0 : Inv s₀)
   intro a b e fx hr hstep prev
   have hia : Inv a := component.inv_of_reachable h0 hr
   cases hstep with
-  | @existOk id e2 st2 gx hx hb hfc hs =>
+  | @existOk id e2 st2 gx hx hb hs hfc =>
     exact sum_afterStep rfl (recvHighest_freshStream a id) (recvHighest_mono hs) prev
-  | @openOk id e2 st2 gx hx hp hr' hl hfc hs =>
+  | @openOk id e2 st2 gx hx hp hr' hl hs hfc =>
     refine sum_afterStep (w := recvHighest) ?_ (recvHighest_freshStream a id)
       (recvHighest_mono hs) prev
     exact (get_of_not_has hia hx).symm
@@ -158,9 +158,9 @@ theorem sentTotal_eq_sum {s₀ s : State} (h0 : Inv s₀)
   intro a b e fx hr hstep prev
   have hia : Inv a := component.inv_of_reachable h0 hr
   cases hstep with
-  | @existOk id e2 st2 gx hx hb hfc hs =>
+  | @existOk id e2 st2 gx hx hb hs hfc =>
     exact sum_afterStep rfl (sentHighest_freshStream a id) (sentHighest_mono hs) prev
-  | @openOk id e2 st2 gx hx hp hr' hl hfc hs =>
+  | @openOk id e2 st2 gx hx hp hr' hl hs hfc =>
     refine sum_afterStep (w := sentHighest) ?_ (sentHighest_freshStream a id)
       (sentHighest_mono hs) prev
     exact (get_of_not_has hia hx).symm
@@ -169,7 +169,7 @@ theorem sentTotal_eq_sum {s₀ s : State} (h0 : Inv s₀)
 /-! ### (b) Stream-count limits -/
 
 /-- **(b) The peer never opens more streams of a type than we advertised.**
-    §4.6, line 1553: "An endpoint MUST terminate a connection with a
+    §19.11, line 7815: "An endpoint MUST terminate a connection with a
     STREAM_LIMIT_ERROR error if a peer opens more streams than was
     permitted." -/
 theorem openedRemote_le_advertised {s₀ s : State} (h0 : Inv s₀)
@@ -178,7 +178,7 @@ theorem openedRemote_le_advertised {s₀ s : State} (h0 : Inv s₀)
   (component.inv_of_reachable h0 h).2.2.1 d
 
 /-- **(b, our side) We never open more streams than the peer allowed.**
-    §4.6, line 1553: "Endpoints MUST NOT exceed the limit set by their peer." -/
+    §4.6, line 1546: "Endpoints MUST NOT exceed the limit set by their peer." -/
 theorem openedLocal_le_peer {s₀ s : State} (h0 : Inv s₀)
     (h : component.Reachable s₀ s) (d : StreamDir) :
     s.opened.get s.role d ≤ s.maxStreamsPeer.get d :=
@@ -190,7 +190,7 @@ theorem opened_step {s s' : State} {e : Event} {fx : List Effect}
     (h : Step s e (.ok s' fx)) (r : Role) (d : StreamDir) :
     s.opened.get r d ≤ s'.opened.get r d := by
   cases h with
-  | @openOk id e2 st2 gx hx hp hr hl hfc hs =>
+  | @openOk id e2 st2 gx hx hp hr hl hs hfc =>
     show s.opened.get r d ≤ (s.openThrough id).opened.get r d
     rw [openThrough_opened]
     split
@@ -221,11 +221,11 @@ theorem no_reuse {s s' : State} {e : Event} {fx : List Effect} (h : Step s e (.o
     exact Nat.lt_of_lt_of_le hh (opened_step h _ _)
   · intro id' hmem
     cases h with
-    | @existOk id₀ e2 st2 gx hx hb hfc hs =>
+    | @existOk id₀ e2 st2 gx hx hb hs hfc =>
       simp only [List.mem_map] at hmem
       obtain ⟨a, -, ha⟩ := hmem
       exact absurd ha (by simp)
-    | @openOk id₀ e2 st2 gx hx hp hr hl hfc hs =>
+    | @openOk id₀ e2 st2 gx hx hp hr hl hs hfc =>
       simp only [List.mem_append, List.mem_map] at hmem
       rcases hmem with hmem | ⟨a, -, ha⟩
       · simp only [openedEffects, List.mem_map] at hmem
@@ -258,7 +258,7 @@ theorem has_forever {s₀ s : State} (h : component.Reachable s₀ s) {id : Stre
 
 /-! ### (d) Implicit opening -/
 
-/-- **(d) §2.1, line 712**: "A stream ID that is used out of order results in
+/-- **(d) §2.1, line 718**: "A stream ID that is used out of order results in
     all streams of that type with lower-numbered stream IDs also being opened."
     This holds in every state, hence after every step. -/
 theorem has_lower {s : State} {id : StreamId} (h : s.has id = true) {n : Nat}
@@ -280,12 +280,12 @@ theorem get_step {s s' : State} {e : Event} {fx : List Effect} (hi : Inv s)
     (h : Step s e (.ok s' fx)) (id : StreamId) :
     s'.get id = s.get id ∨ ∃ e' gx, Stream.Step (s.get id) e' (.ok (s'.get id) gx) := by
   cases h with
-  | @existOk id₀ e2 st2 gx hx hb hfc hs =>
+  | @existOk id₀ e2 st2 gx hx hb hs hfc =>
     by_cases hide : id = id₀
     · subst hide
       exact Or.inr ⟨e2, gx, by rw [afterStep_get_self]; exact hs⟩
     · exact Or.inl (afterStep_get_of_ne s _ _ hide)
-  | @openOk id₀ e2 st2 gx hx hp hr hl hfc hs =>
+  | @openOk id₀ e2 st2 gx hx hp hr hl hs hfc =>
     by_cases hide : id = id₀
     · subst hide
       refine Or.inr ⟨e2, gx, ?_⟩
@@ -301,14 +301,14 @@ theorem stream_inv {s₀ s : State} (h0 : Inv s₀) (h : component.Reachable s�
   (inv_get (component.inv_of_reachable h0 h) id).2.2
 
 /-- **(e₁) Lifted from WP2**: no stream has accepted data beyond the credit we
-    advertised for it (§4.1, line 1359; `Stream.highest_le_maxData`). -/
+    advertised for it (§4.1, line 1368; `Stream.highest_le_maxData`). -/
 theorem stream_highest_le_maxData {s₀ s : State} (h0 : Inv s₀)
     (h : component.Reachable s₀ s) (id : StreamId) {rs : Stream.Recv.State}
     (hr : (s.get id).recv = some rs) : rs.highest ≤ rs.maxData :=
   ((stream_inv h0 h id).2.2.2 rs hr).2.2.1
 
 /-- **(e₂) Lifted from WP2**: the final size of a stream, once known, never
-    changes (§4.5, line 1516; `Stream.finalSize_immutable`) — on both halves of
+    changes (§4.5, line 1517; `Stream.finalSize_immutable`) — on both halves of
     every stream in the table. -/
 theorem stream_finalSize_immutable {s s' : State} {e : Event} {fx : List Effect}
     (hi : Inv s) (h : Step s e (.ok s' fx)) (id : StreamId) :
@@ -330,7 +330,7 @@ theorem stream_finalSize_immutable {s s' : State} {e : Event} {fx : List Effect}
 
 /-! ### (f) Advertised limits never decrease -/
 
-/-- **(f) §4.1, line 1357 and §4.6, line 1559**: a smaller limit "has no
+/-- **(f) §4.1, line 1364 and §4.6, line 1551**: a smaller limit "has no
     effect", so what we have advertised — and what we have been told — only
     ever grows. -/
 theorem maxDataLocal_mono {s s' : State} {e : Event} {fx : List Effect}
@@ -374,16 +374,31 @@ theorem maxStreamsPeer_mono {s s' : State} {e : Event} {fx : List Effect}
 
 The three sentences that WP2 left to this package, read off `Step`. -/
 
-/-- §19.8, line 7638 (and §19.4, §19.5, §19.10, §19.13): a frame for a
-    locally-initiated stream that has not yet been created is a
-    STREAM_STATE_ERROR — and nothing else is permitted. -/
+/-- §19.8, line 7637 (STREAM), §19.5, line 7473 (STOP_SENDING) and §19.10,
+    line 7734 (MAX_STREAM_DATA): a frame for a locally-initiated stream that has
+    not yet been created is a STREAM_STATE_ERROR — and nothing else is
+    permitted.  §19.4, line 7431 and §19.13, line 7863 add RESET_STREAM and
+    STREAM_DATA_BLOCKED for a locally-initiated *unidirectional* stream, which
+    is send-only; `localNotCreatedMandatory` is exactly that set. -/
 theorem localNotCreated_iff (s : State) (id : StreamId) (e : Stream.Event)
-    (hx : s.has id = false) (hp : peerFrame e = true) (hr : id.initiator = s.role) (o : Out) :
+    (hx : s.has id = false) (hp : peerFrame e = true) (hr : id.initiator = s.role)
+    (hm : localNotCreatedMandatory id e = true) (o : Out) :
     Step s (.stream id e) o ↔ o = .error .streamStateError := by
   rw [← outcomes_iff]
-  simp [outcomes, streamOutcomes, hx, hp, hr]
+  simp [outcomes, streamOutcomes, hx, hp, hr, hm]
 
-/-- §4.6, line 1554: a frame for a peer-initiated stream beyond the limit we
+/-- Review finding S-2: where the text mandates nothing — a RESET_STREAM or a
+    STREAM_DATA_BLOCKED for a locally-initiated *bidirectional* stream that has
+    not been created — exactly two outcomes are permitted, the
+    STREAM_STATE_ERROR and ignoring the frame. -/
+theorem localNotCreatedIgnored_iff (s : State) (id : StreamId) (e : Stream.Event)
+    (hx : s.has id = false) (hp : peerFrame e = true) (hr : id.initiator = s.role)
+    (hm : localNotCreatedMandatory id e = false) (o : Out) :
+    Step s (.stream id e) o ↔ (o = .error .streamStateError ∨ o = .ok s []) := by
+  rw [← outcomes_iff]
+  simp [outcomes, streamOutcomes, hx, hp, hr, hm]
+
+/-- §4.6, line 1546: a frame for a peer-initiated stream beyond the limit we
     advertised is a STREAM_LIMIT_ERROR. -/
 theorem openLimit_error (s : State) (id : StreamId) (e : Stream.Event)
     (hx : s.has id = false) (hp : peerFrame e = true) (hr : ¬ id.initiator = s.role)
@@ -401,15 +416,20 @@ theorem not_has_of_exceeding_limit {s : State} (hi : Inv s) {id : StreamId}
   rw [State.has, decide_eq_false_iff_not, Nat.not_lt, eq_peer_of_ne hr]
   exact Nat.le_trans (hi.2.2.1 id.dir) hl
 
-/-- §2.1, line 712: receiving a frame for a stream that does not exist yet opens
-    it and every lower-numbered stream of its type. -/
+/-- §2.1, line 718: receiving a frame for a *peer-initiated* stream that does
+    not exist yet opens it and every lower-numbered stream of its type.  The
+    hypothesis `hr` is needed since review finding S-2: a frame for an uncreated
+    *locally*-initiated stream may also be ignored (`Step.localNotCreatedIgnored`),
+    and ignoring it opens nothing — a locally-initiated stream is opened by
+    `Event.appOpenStream`, never by a frame from the peer. -/
 theorem openOk_opens_lower {s s' : State} {id : StreamId} {e : Stream.Event}
     {fx : List Effect} (h : Step s (.stream id e) (.ok s' fx)) (hx : s.has id = false)
-    {n : Nat} (hn : n ≤ id.index) :
+    (hr : ¬ id.initiator = s.role) {n : Nat} (hn : n ≤ id.index) :
     s'.has (StreamId.make id.initiator id.dir n) = true := by
   cases h with
-  | @existOk _ _ st2 gx hx' hb hfc hs => exact absurd (hx.symm.trans hx') (by simp)
-  | @openOk _ _ st2 gx hx' hp hr hl hfc hs =>
+  | @existOk _ _ st2 gx hx' hb hs hfc => exact absurd (hx.symm.trans hx') (by simp)
+  | @localNotCreatedIgnored _ _ hx' hp hr' hm => exact absurd hr' hr
+  | @openOk _ _ st2 gx hx' hp hr' hl hs hfc =>
     rw [afterStep_has]
     simp only [State.has, openThrough_opened, StreamId.initiator_make, StreamId.dir_make,
       StreamId.index_make, and_self, reduceIte, decide_eq_true_eq]
