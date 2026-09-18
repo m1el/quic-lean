@@ -30,6 +30,10 @@ worktrees.
 
 ## Rules
 
+- Do not spawn subagents (no `Agent` tool, no "commissioned review"): the
+  lead limits how many agents run at once. If you want a second opinion, ask
+  for it in your final report.
+
 - Files: create only the files named in your assignment, under
   `QuicModel/Spec/`. Do not edit `Core.lean`, `Template.lean`, `QuicModel.lean`
   or anything outside `QuicModel/Spec/<yours>`. Build your module with
@@ -53,7 +57,9 @@ worktrees.
   (see the template) so `decide` works on `component.track`/`trackSet` results.
 - Rules about whole packets or datagrams go in the optional `MaySendPacket` /
   `MaySendDatagram` fields of `Component` (over `Spec.OutPacket` /
-  `Spec.OutDatagram`), not in free-standing functions.
+  `Spec.OutDatagram`), not in free-standing functions. `OutDatagram` carries
+  the path (`src`, `dest`) and the connection IDs (`dcid`, `scid`) of the
+  packets in it; rules about those go in `MaySendDatagram`.
 - A MAY or a permission ("can safely ignore") is an *additional* permitted
   outcome, never the only one: keep the alternative the text also allows. The
   Wave 1 reviews found this collapse to be the commonest defect.

@@ -46,6 +46,10 @@ structure Addr where
   id : Nat
   deriving DecidableEq, Repr
 
+/-- Connection ID bytes, as the behavioural components carry them
+    (`ByteArray.toList` does not reduce in the kernel, so `decide` needs a list). -/
+abbrev CidBytes := List UInt8
+
 /-- Time in microseconds.  Always supplied on events; the model never reads a clock.
 
     A notation rather than an `abbrev`: `omega` only recognises terms whose type
@@ -200,6 +204,13 @@ structure OutDatagram where
   packets : List OutPacket
   dest : Addr := ⟨0⟩
   isPmtuProbe : Bool := false
+  /-- The local address it leaves from; with `dest` this is the path (§8.2). -/
+  src : Addr := ⟨0⟩
+  /-- Destination / Source Connection ID of the packets in it.  One per datagram,
+      because §12.2 forbids coalescing packets with different connection IDs;
+      `none` when the rule being checked does not look at them. -/
+  dcid : Option CidBytes := none
+  scid : Option CidBytes := none
   deriving DecidableEq
 
 /-- The usual pattern for an API that cannot tell "processed, nothing visible"
