@@ -456,15 +456,20 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
   packet is addressed to sequence number 0 and the frame retires 2).  So either
   `ConnIds.Local.State.activeCount` does not count what §5.1.1 line 1721 counts,
   or `recvRetireCid`'s `.ok` is not the branch the candidate set kept.
-* **Verdict: model, to be confirmed by hand.**  The next step is a two-line
-  `#eval`/`example` in `ConnIds`: issue three connection IDs, apply
-  `recvRetireCid 2`, and check `activeCount`.  Not done here because WP13 may
-  not edit `QuicModel/Spec`, and because the answer decides whether this is a
-  defect in `ConnIds.Local` or in the endpoint's dispatch.  Two related facts
-  from the same run: ngtcp2 does *not* fire `remove_connection_id` for this
-  retirement while the model produces `cidLocal (.cidRetiredByPeer _)` (a
-  `WP13-8`-style soft finding, 42 occurrences under the `dcid_status` signature),
-  and raising `DIFF_MAX_CANDS` to 48 does not make the signature go away.
+* **Verdict (lead, confirmed by hand): harness mapping, fixed — not a model
+  defect.**  `ConnIds.Local` is correct: issuing 1, 2, 3, then `recvRetireCid 2`
+  gives `activeCount = 3` and the replacement issue is permitted (checked with a
+  direct `#eval`).  The diagnostic export added for WP13-17
+  (`quic_endpoint_may_send_datagram_why`) showed every surviving candidate with
+  `retired = []`: the candidates that had applied the retirement were rejected
+  by the *observation*, because the model rendered `Effect.cidRetiredByPeer` as
+  ngtcp2's `remove_connection_id` callback, which ngtcp2 fires when it later
+  removes the ID, not on receipt of the frame.  The candidates that survived
+  were the ones in which the packet was discarded, which WP13-3's blanket
+  `.drop` alternative permits and which matches "no callbacks".  Fix: the
+  effect is no longer mapped to a callback (same class as WP13-1).  After the
+  fix the reproducer and the eight scenarios run with zero mismatches.
+  WP13-3 remains worth closing: it is what let a wrong candidate survive.
 
 ## WP13-14 — harness: `NGTCP2_ERR_DRAINING` is not a PROTOCOL_VIOLATION (fixed)
 
@@ -541,7 +546,7 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
   through `tlsComplete`, which is fine, and `Migration`'s `handshakeConfirmed`
   fine with it; address validation is the only one with no event.
 
-## WP13-17 — change request: the send side needs `MaySendDatagram` to be answerable per candidate
+## WP13-17 — change request: the send side needs `MaySendDatagram` to be answerable per candidate (done: `quic_endpoint_may_send_datagram_why`, printed per candidate under `DIFF_SHOW=1`)
 
 * **Not a mismatch.**  `quic_endpoint_may_send_datagram` takes one state, so the
   harness asks it once per candidate and accepts the datagram if *any* candidate

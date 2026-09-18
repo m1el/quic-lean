@@ -70,7 +70,10 @@ def Effect.cbName : Effect → Option String
   | .pv (.pathFailed _) => some "path_validation"
   | .cidRemote (.stopUsing ..) => some "dcid_status"
   | .cidLocal (.sendNewCid ..) => some "get_new_connection_id"
-  | .cidLocal (.cidRetiredByPeer _) => some "remove_connection_id"
+  -- `cidRetiredByPeer` is NOT mapped: ngtcp2 fires `remove_connection_id` when
+  -- it later removes the ID, not on receipt of RETIRE_CONNECTION_ID; comparing
+  -- it rejected the candidates that had correctly applied the retirement
+  -- (TRIAGE WP13-13).  Same class as `stream_close` (WP13-1).
   | .vnClient .abandon => some "recv_version_negotiation"
   | .vnClient (.attemptVersion _) => some "version_negotiation"
   | .ecn _ .ecnValidationFailed => some "path_validation"
@@ -296,6 +299,16 @@ def maySendDatagramC (s : State) (src dest : UInt64) (size : UInt64) (isPmtuProb
       { size := size.toNat, packets, dest := ⟨dest.toNat⟩, isPmtuProbe := isPmtuProbe != 0,
         isEcnMarked := isEcnMarked != 0, src := ⟨src.toNat⟩, dcid := some dcid.toList,
         scid := some scid.toList } then 1 else 0
+
+/-- The refusing conjuncts of `maySendDatagram`, comma-separated (empty when it
+    would return 1).  Diagnostic only (TRIAGE WP13-17). -/
+@[export quic_endpoint_may_send_datagram_why]
+def maySendDatagramWhyC (s : State) (src dest : UInt64) (size : UInt64) (isPmtuProbe : UInt8)
+    (isEcnMarked : UInt8) (dcid scid : ByteArray) (packets : List OutPacket) : String :=
+  ",".intercalate (maySendDatagramWhy s
+    { size := size.toNat, packets, dest := ⟨dest.toNat⟩, isPmtuProbe := isPmtuProbe != 0,
+      isEcnMarked := isEcnMarked != 0, src := ⟨src.toNat⟩, dcid := some dcid.toList,
+      scid := some scid.toList })
 
 @[export quic_endpoint_may_send_packet]
 def maySendPacketC (s : State) (p : OutPacket) : UInt8 := if maySendPacket s p then 1 else 0

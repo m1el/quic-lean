@@ -219,6 +219,77 @@ def maySendDatagram (s : State) (d : OutDatagram) : Bool :=
   handshakeHeaderOk s d &&
   d.packets.all (maySendPacket s)
 
+/-- Diagnostic: the components whose frame-level `maySend` refuses `f`. -/
+def maySendWhy (s : State) (f : Frame) : List String :=
+  let checks : List (String × Bool) :=
+    [("Handshake", Handshake.maySend s.hs f), ("StreamTable", StreamTable.maySend s.st f),
+     ("ConnIds.Local" ++ (match f with
+        | .newConnectionId seq rpt cid token =>
+          s!"(nextSeq={s.cidLocal.nextSeq} peerLimit={s.cidLocal.peerLimit} issued={s.cidLocal.issued.map (·.seq)} retired={s.cidLocal.retired} sentRpt={s.cidLocal.sentRetirePriorTo} peerActiveAfter={s.cidLocal.peerActiveAfter rpt} canIssue={ConnIds.Local.canIssue s.cidLocal cid.toList token.toList rpt} reNew={ConnIds.Local.isReNewCid s.cidLocal seq rpt cid.toList token.toList})"
+        | _ => ""), ConnIds.Local.maySend s.cidLocal f),
+     ("ConnIds.Remote", ConnIds.Remote.maySend s.cidRemote f),
+     ("PathValidation", PathValidation.maySend s.pv f),
+     ("Termination", Termination.maySend s.term f),
+     ("Retransmission", Retransmission.maySend s.rtx f)]
+  (checks.filter (fun c => !c.2)).map (·.1)
+
+/-- Diagnostic: the packet-level conjuncts refusing `p`, then, per refused
+    frame, the components refusing it. -/
+def maySendPacketWhy (s : State) (p : OutPacket) : List String :=
+  let checks : List (String × Bool) :=
+    [("FrameRules.maySendPacket", FrameRules.maySendPacket s.fr p),
+     ("Handshake.maySendPacket", Handshake.maySendPacket s.hs p),
+     ("Termination.maySendPacket", Termination.maySendPacket s.term p),
+     ("Migration.maySendPacket", Migration.maySendPacket s.mig p),
+     ("ackPacketOk", ackPacketOk s p), ("ecnPacketOk", ecnPacketOk s p)]
+  (checks.filter (fun c => !c.2)).map (·.1) ++
+    (p.frames.zipIdx.filter (fun fi => !maySend s fi.1)).map
+      (fun fi => s!"frame#{fi.2}: {maySendWhy s fi.1}")
+
+/-- Diagnostic twin of `maySendDatagram`: the names of the conjuncts that refuse
+    `d` (empty iff `maySendDatagram s d = true`).  For the differential harness,
+    which otherwise sees one bit for a nine-way conjunction (TRIAGE WP13-17). -/
+def maySendDatagramWhy (s : State) (d : OutDatagram) : List String :=
+  let checks : List (String × Bool) :=
+    [("AddressValidation.maySendTo", AddressValidation.maySendTo s.av d.dest d.size),
+     ("DatagramSize.maySendDatagram", DatagramSize.maySendDatagram s.dsz d),
+     ("Migration.maySendDatagram", Migration.maySendDatagram s.mig d),
+     ("PathValidation.maySendDatagramOn", PathValidation.maySendDatagramOn s.av d),
+     ("Migration.MaySendDatagramOn", decide (Migration.MaySendDatagramOn s.av s.mig d)),
+     ("pathResponsesOnPath", pathResponsesOnPath s d),
+     ("ecnMarkOk", ecnMarkOk s d),
+     ("handshakeHeaderOk", handshakeHeaderOk s d),
+     ("maySendPacket", d.packets.all (maySendPacket s))]
+  (checks.filter (fun c => !c.2)).map (·.1) ++
+    (d.packets.filter (fun p => !maySendPacket s p)).flatMap (maySendPacketWhy s)
+
+theorem maySendDatagramWhy_nil_iff (s : State) (d : OutDatagram) :
+    maySendDatagramWhy s d = [] ↔ maySendDatagram s d = true := by
+  simp only [maySendDatagramWhy, maySendDatagram, List.append_eq_nil_iff, List.map_eq_nil_iff,
+    List.filter_eq_nil_iff, List.mem_cons, List.not_mem_nil, or_false, Bool.and_eq_true]
+  constructor
+  · rintro ⟨h, -⟩
+    have h1 := h _ (Or.inl rfl)
+    have h2 := h _ (Or.inr (Or.inl rfl))
+    have h3 := h _ (Or.inr (Or.inr (Or.inl rfl)))
+    have h4 := h _ (Or.inr (Or.inr (Or.inr (Or.inl rfl))))
+    have h5 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))
+    have h6 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl))))))
+    have h7 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))))
+    have h8 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl))))))))
+    have h9 := h _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr rfl))))))))
+    simp only [Bool.not_eq_eq_eq_not, Bool.not_true, Bool.not_eq_false] at h1 h2 h3 h4 h5 h6 h7 h8 h9
+    exact ⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩
+  · rintro ⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩
+    refine ⟨fun c hc => ?_, ?_⟩
+    · rcases hc with hc | hc | hc | hc | hc | hc | hc | hc | hc <;> rw [hc] <;>
+        simp only [h1, h2, h3, h4, h5, h6, h7, h8, h9, Bool.not_true, Bool.false_eq_true,
+          not_false_eq_true]
+    · simp only [List.flatMap_eq_nil_iff, List.mem_filter]
+      intro p hp
+      have := List.all_eq_true.mp h9 p hp.1
+      simp [this] at hp
+
 theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
     maySendDatagram s d = true ↔ MaySendDatagram s d := by
   simp only [maySendDatagram, MaySendDatagram, Bool.and_eq_true, AddressValidation.maySendTo_iff,

@@ -155,6 +155,11 @@ extern uint8_t quic_endpoint_obligations(lean_object *s, uint64_t now,
                                          uint64_t tolerance);
 extern uint8_t quic_endpoint_phase(lean_object *s);
 extern lean_object *quic_endpoint_state_render(lean_object *s);
+extern lean_object *quic_endpoint_may_send_datagram_why(lean_object *s, uint64_t src,
+                                                        uint64_t dest, uint64_t size,
+                                                        uint8_t isPmtuProbe, uint8_t isEcnMarked,
+                                                        lean_object *dcid, lean_object *scid,
+                                                        lean_object *packets);
 extern uint64_t quic_endpoint_repair_owed(lean_object *s);
 
 /* QuicModel/Harness.lean */
@@ -1274,7 +1279,6 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     }
     p = l_tail(p);
   }
-  lean_dec(packets);
 
   if (!allowed) {
     char detail[1024], sigkey[512];
@@ -1300,8 +1304,23 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     snprintf(detail, sizeof(detail), "OUT len=%zu packets=%d first=[%.700s]", len, np,
              dump);
     lean_dec(d);
+    /* Which conjunct refused, per candidate (TRIAGE WP13-17). */
+    if (getenv("DIFF_SHOW")) {
+      int ci = 0;
+      for (p = m->cands; !lean_is_scalar(p); p = l_tail(p), ++ci) {
+        lean_object *s = l_head(p), *why;
+        lean_inc(s);
+        lean_inc(packets);
+        why = quic_endpoint_may_send_datagram_why(
+            s, ADDR_SELF, ADDR_PEER, len, 0, 0, model_bytes(ps[0].dcid, ps[0].dcidlen),
+            model_bytes(ps[0].scid, ps[0].scidlen), packets);
+        fprintf(stderr, "  candidate %d refused by: %s\n", ci, lean_string_cstr(why));
+        lean_dec(why);
+      }
+    }
     report(h, m, "maysend", sigkey, detail, NULL);
   }
+  lean_dec(packets);
 
   /* The bookkeeping the components need once a frame really travelled. */
   for (i = 0; i < np; ++i) {
