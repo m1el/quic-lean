@@ -680,6 +680,78 @@ private def coalesced : ByteArray :=
 #guard outcomeCbsC (recvOut srv coalesced) = ["stream_open", "recv_stream_data"]
 #guard (recvNextB srv coalesced).st.recvTotal = 3
 
+/-! ## 12b. The receive-path findings of `TRANSPORT_AUDIT_2026-09-18.md`
+
+Four counterexamples the audit reproduced against the composed endpoint, each
+now asserting the behaviour the text requires.  Like §12 they are out of
+`conn_trace.c`'s reach, so they are regression checks for the model alone. -/
+
+/-! ### D34-1 — §10.1, line 3841: only a packet "received and processed
+successfully" restarts the idle timer -/
+
+-- A Handshake packet that fails authentication leaves the idle timer alone …
+#guard (recvNextB cli badHandshakePacket 12345).term.idleStart = cli.term.idleStart
+#guard cli.term.idleStart ≠ 12345
+-- … a packet that is processed restarts it, even one with no visible effect …
+#guard (recvNextB cli (handshakeDgram 0 [.ping]) 12345).term.idleStart = 12345
+#guard outcomeCbsC (recvOut cli (handshakeDgram 0 [.ping]) 12345) = []
+-- … and so does a datagram in which only the *second* packet is processed.
+#guard (recvNextB srv coalesced 12345).term.idleStart = 12345
+-- §12.3's duplicate is discarded, not processed: no restart the second time.
+#guard (recvNextB (recvNextB cli (handshakeDgram 0 [.ping]) 100)
+          (handshakeDgram 0 [.ping]) 12345).term.idleStart = 100
+
+/-! ### D34-2 — §17.2.5.2, line 6626: a Retry whose Retry Integrity Tag cannot
+be validated is discarded -/
+
+/-- A structurally valid Retry: Source Connection ID `c0 01 … 07` (not the
+    client's original Destination Connection ID), a one-byte token, and sixteen
+    bytes of `tag` as the Retry Integrity Tag. -/
+private def retryBytes (tag : UInt8) : ByteArray :=
+  bytes [0xf0, 0, 0, 0, 1, 8] ++ localCid ++ bytes [8] ++
+    bytes [0xc0, 1, 2, 3, 4, 5, 6, 7] ++ bytes [1] ++ ⟨Array.replicate 16 tag⟩
+
+private def fresh : State := init (cfgOf false)
+
+-- The stub's valid tag (0xA5 × 16) is accepted; any other tag is not, and the
+-- rejected Retry changes neither the token nor the idle timer.
+#guard (recvNextB fresh (retryBytes 0xa5)).av.retriesAccepted = 1
+#guard (recvNextB fresh (retryBytes 0)).av.retriesAccepted = 0
+#guard (recvNextB fresh (retryBytes 0xff)).av.retriesAccepted = 0
+#guard (recvNextB fresh (retryBytes 0) 12345).term.idleStart = fresh.term.idleStart
+#guard outcomeCbsC (recvOut fresh (retryBytes 0xa5)) = ["recv_retry"]
+#guard outcomeCbsC (recvOut fresh (retryBytes 0)) = []
+
+/-! ### D34-3 — §14.1, line 5727: an Initial in a datagram under 1200 bytes is
+discarded wherever in the datagram it sits -/
+
+private def mixed : ByteArray := handshakeDgram 0 [.ping] ++ initialDgram 0 [.ping]
+private def freshSrv : State := init (cfgOf true)
+
+#guard mixed.size < 1200
+-- The Initial behind the Handshake packet is not recorded as received …
+#guard (recvNextB freshSrv mixed 100).ackInitial.received = []
+-- … §14.1, line 5729's PROTOCOL_VIOLATION close is permitted as well …
+#guard accepts prot freshSrv (dgEvent mixed 100) (.error .protocolViolation) = true
+-- … and the same two packets padded out to 1200 bytes are both processed.
+#guard (recvNextB freshSrv (mixed ++ ⟨Array.replicate (1200 - mixed.size) 0⟩) 100
+          ).ackInitial.received = [⟨0, 0⟩]
+
+/-! ### D34-4 — §12.2, line 4619: a packet too short for a header-protection
+sample does not stop the coalesced packets after it -/
+
+/-- A Handshake long header whose Length is 1: the extent is known, the sample
+    cannot be taken. -/
+private def shortSample : ByteArray :=
+  bytes [0xe0, 0, 0, 0, 1, 8] ++ localCid ++ bytes [8] ++ peerCid ++ bytes [1, 0]
+
+#guard match parseOne prot cli shortSample 0 with
+  | .error .tooShortForSample => true | _ => false
+#guard (recvNextB cli (shortSample ++ handshakeDgram 1 [.ping])).ackHandshake.received
+          = [⟨1, 1⟩]
+-- On its own it is simply skipped.
+#guard outcomeRenderC (recvOut cli shortSample) = "OK [dsz_deliver; skipped_rest]"
+
 /-! ## 13. The phase gate, and what a closing endpoint may send -/
 
 private def withPhase (s : State) (p : Termination.Phase) : State :=

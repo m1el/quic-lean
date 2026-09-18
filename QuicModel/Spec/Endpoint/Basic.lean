@@ -389,6 +389,12 @@ inductive Effect where
       are still processed.  (The constructor's name is historical: an earlier
       draft of this file read §12.2 as ending the datagram there.) -/
   | skippedRest
+  /-- A packet of the received datagram was processed successfully: no
+      component discarded it and no frame of it raised an error.  §10.1,
+      line 3841 restarts the idle timer only for such a packet, so the receive
+      pipeline has to tell it apart from a packet that was discarded — also
+      from one that was processed without any other visible effect. -/
+  | packetProcessed
   deriving DecidableEq
 
 abbrev Out := Outcome State Effect

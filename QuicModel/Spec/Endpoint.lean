@@ -76,8 +76,9 @@ Five combinators in `Endpoint/Merge.lean` and two in `Endpoint/Pipeline.lean`.
 * **Coalescing.**  `recvPackets` walks the packets of one datagram on a fuel
   loop.  §12.2, line 4619 ("the receiver MAY either discard or buffer the packet
   for later processing and MUST attempt to process the remaining packets") means
-  a packet whose protection cannot be removed leaves `Effect.skippedRest` behind
-  and the loop *continues*, at the offset `packetEndOf` computes from the long
+  a packet whose protection cannot be removed — the AEAD open failed, or the
+  packet is too short to yield a header-protection sample (audit 2026-09-18,
+  D34-4) — leaves `Effect.skippedRest` behind and the loop *continues*, at the offset `packetEndOf` computes from the long
   header's Length field (or the end of the datagram for a short header, §12.2
   line 4606).  It stops only where the text's "attempt" is impossible.  This was
   wrong until the examples layer: the loop used to end there, justified by a
@@ -120,6 +121,9 @@ Every `WP12` mention under `QuicModel/Spec`, with where it landed.
 | `VersionNegotiation` 884 (review AV-4) | §5.2.2 (1936) a server refusing a connection SHOULD send CONNECTION_CLOSE(CONNECTION_REFUSED) | **Not handled — the one real gap.** `TransportError.connectionRefused` occurs nowhere in `Endpoint/*` except the decoder for a *received* CONNECTION_CLOSE. It is not an oversight that can be patched in place: refusal happens at connection *acceptance*, and `Endpoint.State` is an already-established connection (`init` presupposes that the handshake produced the parameters in `Config`). `Endpoint.Event` has no "a connection attempt arrived" constructor, so encoding it would mean inventing an event and a pre-`init` state. What is missing, precisely: an `Event.accept` (or a `Config`-less pre-connection state) plus an `addAlt`-style alternative `.error .connectionRefused` on it |
 | `VersionNegotiation` 886 | §5.2.2 (1946) servers MUST drop incoming packets under all other circumstances | The in-connection half is `vnServerGate` / `vnPacket`. The "reaches no connection" half is out of the model by construction: `Endpoint.State` *is* one connection and there is no connection table. Belongs to a dispatcher above `Endpoint` |
 | `Termination` 721 | §10.3 (4125) MAY send a stateless reset for a packet it cannot associate with a connection | same no-connection path, above `Endpoint`; `maySendStatelessReset` is exported for when it exists |
+| audit 2026-09-18, D34-1 | §10.1 (3841) the idle timer restarts when a packet is "received and processed successfully" | `Effect.packetProcessed` is emitted at the end of a packet no component discarded (`Pipeline.processed`); `idleGate` runs `afterDatagram` only for an outcome that carries it. A datagram whose packets were all discarded leaves `term.idleStart` alone. `Examples` §12b |
+| audit 2026-09-18, D34-2 | §17.2.5.2 (6626) discard a Retry whose Retry Integrity Tag cannot be validated | `Protection.retryTagOk` is the abstract check; `Pipeline.retryIntegrityOk` hands its verdict to `AddressValidation.Step.retryBadTag` through `retryPacket`. `Protection.stub` validates sixteen bytes of 0xA5 |
+| audit 2026-09-18, D34-3 | §14.1 (5727) a server MUST discard an Initial carried in a datagram under 1200 bytes | per packet, in `Pipeline.recvOne`: `DatagramSize`'s `.recvInitial buf.size` is asked for *every* Initial of the datagram, before it is unprotected; its `.drop` skips that packet only (`gateElse` / `afterSkipped`), its PROTOCOL_VIOLATION (line 5729) is terminal. `dszGate` is now only the datagram-level `.recvDatagram` |
 | `Termination` 727 | §10.3 (4220) MUST discard packets too small to be a valid QUIC packet | receive half: the decoder's `.header` error → `[.ok s [.skippedRest]]`; send half: `Send.maySendStatelessReset` |
 | `Termination` 718 | §10.2.3 (4099) CONNECTION_CLOSE in several packet types may be coalesced | `MaySendDatagram` quantifies `MaySendPacket` over `d.packets`, and `Termination.MaySendPacket` is per packet type, so each coalesced packet is checked on its own |
 | `Termination` 719 | §10.2.3 (4111) MAY discard rather than close on errors in unauthenticated packets | `packetErrOutcomes`'s Initial `.drop`, as above |
@@ -207,7 +211,8 @@ depends on that.  The one exception is `Endpoint.Examples`, which uses
 
 `none` covers `keysDiscarded`, `peerParams`, `cryptoDiscarding`, `dcidChanged`,
 `addressValidated`, `handshakeProceeds`, `queueRetire`, `switchPath`,
-`fr (.deliver _)`, `sendPending`, `skippedRest`, the `Ack`/`Termination`/
+`fr (.deliver _)`, `sendPending`, `skippedRest`, `packetProcessed`, the
+`Ack`/`Termination`/
 `DatagramSize`/`Retransmission` effects, and the three `Stream` *request*
 effects (`stopSendingRequested`, `resetRequested`, `resetAcked`).  The last
 group is not "ngtcp2 does not surface this": ngtcp2 *does* print

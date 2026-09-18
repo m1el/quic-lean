@@ -28,7 +28,8 @@ callback ngtcp2 fired; those are the model's effects.  `cbName` is the mapping,
 and `none` means "do not compare this".  For most of them that is because
 ngtcp2 does not surface them at all: `keysDiscarded`, `peerParams`,
 `cryptoDiscarding`, `dcidChanged`, `addressValidated`, `handshakeProceeds`,
-`queueRetire`, `switchPath`, `deliver`, `sendPending`, `skippedRest` and the
+`queueRetire`, `switchPath`, `deliver`, `sendPending`, `skippedRest`,
+`packetProcessed` and the
 `Termination` send effects are model-level signals, or things that appear in the
 trace as `OUT`/`ERR` records rather than as `CB` lines.
 
@@ -157,6 +158,7 @@ def Effect.render : Effect → String
   | .ecn sp .ecnValidated => s!"ecn_validated space={spaceName sp}"
   | .sendPending f => s!"send_pending {f.dump}"
   | .skippedRest => "skipped_rest"
+  | .packetProcessed => "packet_processed"
 
 /-- The callback names one outcome's effects would show as `CB` lines, in order
     and with the ones ngtcp2 does not surface removed. -/

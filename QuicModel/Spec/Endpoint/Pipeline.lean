@@ -16,9 +16,10 @@ import QuicModel.Spec.Endpoint.Dispatch
   2. `Termination`'s phase gate — §10.2.2, line 4023 (draining sends nothing)
      and §10.2.1, line 3965 (closing answers with CONNECTION_CLOSE).  Only the
      `active` phase goes on to parse;
-  3. §14's size rules (`DatagramSize`), which is where §14.1 line 5727's "a
-     server MUST discard an Initial packet … smaller than 1200 bytes" and
-     §11.1 line 4485's MAY-discard live;
+  3. §14's datagram-level size rule (`DatagramSize`, line 5695/5697).  §14.1
+     line 5727's "a server MUST discard an Initial packet … smaller than 1200
+     bytes" is asked again for *each* Initial packet in step 5, because the
+     first header of a datagram says nothing about the packets behind it;
   4. version handling — `VersionNeg.Server` for a server, `VersionNeg.Client`
      for a client;
   5. for each coalesced packet: `Quic.decodePacket`, then §9's receive rules
@@ -29,7 +30,8 @@ import QuicModel.Spec.Endpoint.Dispatch
      frame §12.4/§12.5 (`FrameRules`) and dispatch to the component that owns
      the frame's semantics;
   6. after the datagram: §10.1 line 3841's idle-timer restart, which the text
-     conditions on the packet having been "received and processed successfully".
+     conditions on the packet having been "received and processed successfully"
+     — so it runs only for an outcome carrying `Effect.packetProcessed`.
 
   §12.2, line 4619: "The receiver of coalesced QUIC packets MUST individually
   process each QUIC packet and separately acknowledge them … if decryption fails
@@ -95,6 +97,59 @@ theorem gate_inv {s : State} {l : List Out} {k : State → List Out} (hs : Inv s
     simp only [List.mem_singleton, Outcome.ok.injEq] at hmem
     exact hmem.1 ▸ hs
 
+/-- `gate`, with the continuation after a `.drop` made explicit.  The receive
+    loop uses it where discarding *this packet* has to be followed by locating
+    the next coalesced one (§12.2, line 4619). -/
+def gateElseOut (onDrop : List Out) (k : State → List Out) : Out → List Out
+  | .ok s' fx => (k s').map (withFx fx)
+  | .error c => [.error c]
+  | .drop => onDrop
+
+def gateElse (l : List Out) (onDrop : List Out) (k : State → List Out) : List Out :=
+  l.flatMap (gateElseOut onDrop k)
+
+theorem gateElse_ne {l onDrop : List Out} {k : State → List Out} (hl : l ≠ [])
+    (hd : onDrop ≠ []) (hk : ∀ s, k s ≠ []) : gateElse l onDrop k ≠ [] := by
+  cases l with
+  | nil => exact absurd rfl hl
+  | cons a t =>
+    simp only [gateElse, List.flatMap_cons, ne_eq, List.append_eq_nil_iff, not_and]
+    intro h
+    cases a with
+    | ok s' fx => simp only [gateElseOut, List.map_eq_nil_iff] at h; exact absurd h (hk s')
+    | error c => simp [gateElseOut] at h
+    | drop => exact absurd h hd
+
+theorem gateElse_inv {l onDrop : List Out} {k : State → List Out} (hl : InvOk l)
+    (hd : InvOk onDrop) (hk : ∀ s, Inv s → InvOk (k s)) : InvOk (gateElse l onDrop k) := by
+  intro s' fx hm
+  simp only [gateElse, List.mem_flatMap] at hm
+  obtain ⟨o, ho, hmem⟩ := hm
+  simp only [gateElseOut] at hmem
+  cases o with
+  | ok s0 fx0 =>
+    have h0 : Inv s0 := hl _ _ ho
+    simp only [List.mem_map] at hmem
+    obtain ⟨o', ho', he⟩ := hmem
+    cases o' with
+    | ok x gx =>
+      simp only [withFx, Outcome.ok.injEq] at he
+      exact he.1 ▸ hk s0 h0 _ _ ho'
+    | error c => simp [withFx] at he
+    | drop => simp [withFx] at he
+  | error c => simp at hmem
+  | drop => exact hd _ _ hmem
+
+/-- The end of a packet that was processed successfully (§10.1, line 3841).
+    Every `.drop` on the way here short-circuits its `gate`, and every error is
+    terminal, so `Effect.packetProcessed` is present exactly when no component
+    discarded the packet. -/
+def processed (s : State) : List Out := [.ok s [Effect.packetProcessed]]
+
+theorem processed_ne (s : State) : processed s ≠ [] := by simp [processed]
+
+theorem processed_inv {s : State} (hs : Inv s) : InvOk (processed s) := InvOk.ok hs
+
 /-! ## 2b. Reading a packet header -/
 
 def hdrPtype : Header → PacketType
@@ -153,7 +208,8 @@ Where the failing packet's extent is *not* known — the header did not parse, o
 its Length field runs past the datagram — there is nothing left to look at, so
 the datagram ends here.  Where it is known, `recvPackets` does not call this
 function for `.decryptFailed`: §12.2, line 4619 requires the remaining packets
-to be attempted. -/
+to be attempted.  The same holds for `.tooShortForSample`; both constructors are
+kept in the first arm only so that the function stays total. -/
 
 def packetErrOutcomes (s : State) (isInitial : Bool) : PacketErr → List Out
   -- nothing more of the datagram can be located, so it ends here
@@ -447,36 +503,52 @@ theorem vnAfterPacket_inv {s : State} (hs : Inv s) (ver : Option Nat) :
       | exact keep_inv hs
       | exact gate_inv hs (stepVnClient_inv hs _) (fun _ h => keep_inv h)
 
-/-- §17.2.5: a Retry packet.  Whether its integrity tag validates is
-    [QUIC-TLS] §5.8 and opaque here; `Quic.decodePacket` has already checked the
-    packet's shape, and the token and Source Connection ID rules are WP5's. -/
-def retryPacket (token scid dcid : ByteArray) (s : State) : List Out :=
-  gate s (stepAv s (.recvRetry token scid true))
-    (fun s1 => gate s1 (stepHs s1 (.recvHeader .retry dcid.toList scid.toList)) keep)
+/-- §17.2.5: a Retry packet.  *How* its integrity tag is validated is
+    [QUIC-TLS] §5.8 and opaque here, but *whether* it validated is not:
+    §17.2.5.2, line 6626 makes a client discard a Retry whose tag cannot be
+    validated, so `integrityOk` — `Protection.retryTagOk`'s verdict — is handed
+    to `AddressValidation.Step.retryBadTag`.  `Quic.decodePacket` has already
+    checked the packet's shape, and the token and Source Connection ID rules
+    are WP5's. -/
+def retryPacket (integrityOk : Bool) (token scid dcid : ByteArray) (s : State) : List Out :=
+  gate s (stepAv s (.recvRetry token scid integrityOk))
+    (fun s1 => gate s1 (stepHs s1 (.recvHeader .retry dcid.toList scid.toList)) processed)
 
-theorem retryPacket_ne (t c d : ByteArray) (s : State) : retryPacket t c d s ≠ [] :=
-  gate_ne (stepAv_ne _ _) (fun _ => gate_ne (stepHs_ne _ _) keep_ne)
+theorem retryPacket_ne (b : Bool) (t c d : ByteArray) (s : State) :
+    retryPacket b t c d s ≠ [] :=
+  gate_ne (stepAv_ne _ _) (fun _ => gate_ne (stepHs_ne _ _) processed_ne)
 
-theorem retryPacket_inv {s : State} (hs : Inv s) (t c d : ByteArray) :
-    InvOk (retryPacket t c d s) :=
+theorem retryPacket_inv {s : State} (hs : Inv s) (b : Bool) (t c d : ByteArray) :
+    InvOk (retryPacket b t c d s) :=
   gate_inv hs (stepAv_inv hs _)
-    (fun _ h => gate_inv h (stepHs_inv h _) (fun _ h' => keep_inv h'))
+    (fun _ h => gate_inv h (stepHs_inv h _) (fun _ h' => processed_inv h'))
+
+/-- §17.2.5.2: the Retry Integrity Tag check for the Retry packet that starts at
+    `pos`.  A Retry packet runs to the end of its datagram and its last
+    `retryTagLen` bytes are the tag; the pseudo-packet is built from the
+    client's original Destination Connection ID, which is what
+    `AddressValidation` still holds while no Retry has been accepted. -/
+def retryIntegrityOk (prot : Protection) (s : State) (buf : ByteArray) (pos : Nat)
+    (tag : ByteArray) : Bool :=
+  prot.retryTagOk s.av.dcid (buf.extract pos (buf.size - retryTagLen)) tag
 
 /-- §17.2.1: a Version Negotiation packet.  §6.1, line 2066: a server never
     answers one, and §5.2.2 line 1946 makes it a drop. -/
 def vnPacket (dcid scid : ByteArray) (vs : List Nat) (s : State) : List Out :=
   match s.role with
-  | .client => stepVnClient s (.recvVersionNegotiation dcid scid vs)
+  | .client => bindAll (stepVnClient s (.recvVersionNegotiation dcid scid vs)) processed
   | .server => [.drop]
 
 theorem vnPacket_ne (d c : ByteArray) (vs : List Nat) (s : State) : vnPacket d c vs s ≠ [] := by
   cases hr : s.role <;> simp only [vnPacket, hr] <;>
-    first | exact stepVnClient_ne _ _ | simp
+    first | exact bindAll_ne (stepVnClient_ne _ _) processed_ne | simp
 
 theorem vnPacket_inv {s : State} (hs : Inv s) (d c : ByteArray) (vs : List Nat) :
     InvOk (vnPacket d c vs s) := by
   cases hr : s.role <;> simp only [vnPacket, hr] <;>
-    first | exact stepVnClient_inv hs _ | exact InvOk.drop
+    first
+      | exact invOk_bindAll (stepVnClient_inv hs _) (fun _ h => processed_inv h)
+      | exact InvOk.drop
 
 /-- The body of one 1-RTT / 0-RTT / Initial / Handshake packet, in the order of
     the pipeline: `Handshake`'s key and connection-ID rules, §9's receive rules,
@@ -497,12 +569,13 @@ def processPayload (now : Time) (mp : Migration.Path) (av : Bool) (ver : Option 
     gate s1 (stepHs s1 (.recvHeader pt dcid.toList scid.toList))
       (fun s2 =>
         match pt.space with
-        | none => keep s2
+        | none => processed s2
         | some sp =>
           gate s2 (stepAck s2 sp (.recvPacket pn now (FrameRules.packetAckEliciting fs)))
             (fun s3 =>
               bindAll (processFrames now mp pt (dcidSeqOf s3 dcid) av fs s3) (fun s4 =>
-                bindAll (avAfterPacket pt mp.peer s4) (vnAfterPacket ver)))))
+                bindAll (avAfterPacket pt mp.peer s4) (fun s5 =>
+                  bindAll (vnAfterPacket ver s5) processed)))))
 
 theorem processPayload_ne (now : Time) (mp : Migration.Path) (av : Bool) (ver : Option Nat)
     (pt : PacketType) (dcid scid : ByteArray) (pn : Nat) (fs : List Frame) (s : State) :
@@ -512,10 +585,11 @@ theorem processPayload_ne (now : Time) (mp : Migration.Path) (av : Bool) (ver : 
   · exact stepFr_ne _ _
   · refine gate_ne (stepMig_ne _ _) (fun _ => gate_ne (stepHs_ne _ _) (fun _ => ?_))
     split
-    · exact keep_ne _
+    · exact processed_ne _
     · exact gate_ne (stepAck_ne _ _ _) (fun _ =>
         bindAll_ne (processFrames_ne _ _ _ _ _ _ _)
-          (fun _ => bindAll_ne (avAfterPacket_ne _ _ _) (fun _ => vnAfterPacket_ne _ _)))
+          (fun _ => bindAll_ne (avAfterPacket_ne _ _ _)
+            (fun _ => bindAll_ne (vnAfterPacket_ne _ _) processed_ne)))
 
 theorem processPayload_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration.Path)
     (av : Bool) (ver : Option Nat) (pt : PacketType) (dcid scid : ByteArray) (pn : Nat)
@@ -526,35 +600,39 @@ theorem processPayload_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration
   · refine gate_inv hs (stepMig_inv hs _) (fun s1 h1 =>
       gate_inv h1 (stepHs_inv h1 _) (fun s2 h2 => ?_))
     split
-    · exact keep_inv h2
+    · exact processed_inv h2
     · exact gate_inv h2 (stepAck_inv h2 _ _) (fun s3 h3 =>
         invOk_bindAll (processFrames_inv h3 _ _ _ _ _ _)
           (fun s4 h4 => invOk_bindAll (avAfterPacket_inv h4 _ _)
-            (fun _ h5 => vnAfterPacket_inv h5 _)))
+            (fun _ h5 => invOk_bindAll (vnAfterPacket_inv h5 _)
+              (fun _ h6 => processed_inv h6))))
 
-/-- One decoded packet of a datagram. -/
+/-- One decoded packet of a datagram.  `retryOk` is the Retry Integrity Tag
+    verdict for a packet whose body is a Retry's, given its tag. -/
 def processPacket (now : Time) (mp : Migration.Path) (av : Bool) (ver : Option Nat)
-    (pkt : Packet) (s : State) : List Out :=
+    (retryOk : ByteArray → Bool) (pkt : Packet) (s : State) : List Out :=
   match pkt.body with
   | .versions vs => vnPacket (hdrDcid pkt.header) (hdrScid pkt.header) vs.toList s
-  | .retry token _ => retryPacket token (hdrScid pkt.header) (hdrDcid pkt.header) s
+  | .retry token tag =>
+    retryPacket (retryOk tag) token (hdrScid pkt.header) (hdrDcid pkt.header) s
   | .payload pn _ _ frames =>
     processPayload now mp av ver (hdrPtype pkt.header) (hdrDcid pkt.header)
       (hdrScid pkt.header) pn (frames.toList.map (·.1)) s
 
 theorem processPacket_ne (now : Time) (mp : Migration.Path) (av : Bool) (ver : Option Nat)
-    (pkt : Packet) (s : State) : processPacket now mp av ver pkt s ≠ [] := by
+    (r : ByteArray → Bool) (pkt : Packet) (s : State) :
+    processPacket now mp av ver r pkt s ≠ [] := by
   cases hb : pkt.body <;> simp only [processPacket, hb]
   · exact vnPacket_ne _ _ _ _
-  · exact retryPacket_ne _ _ _ _
+  · exact retryPacket_ne _ _ _ _ _
   · exact processPayload_ne _ _ _ _ _ _ _ _ _ _
 
 theorem processPacket_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration.Path)
-    (av : Bool) (ver : Option Nat) (pkt : Packet) :
-    InvOk (processPacket now mp av ver pkt s) := by
+    (av : Bool) (ver : Option Nat) (r : ByteArray → Bool) (pkt : Packet) :
+    InvOk (processPacket now mp av ver r pkt s) := by
   cases hb : pkt.body <;> simp only [processPacket, hb]
   · exact vnPacket_inv hs _ _ _
-  · exact retryPacket_inv hs _ _ _
+  · exact retryPacket_inv hs _ _ _ _
   · exact processPayload_inv hs _ _ _ _ _ _ _ _ _
 
 /-! ## 2g. The coalesced packets of one datagram
@@ -598,27 +676,122 @@ def packetEndOf (s : State) (buf : ByteArray) (pos : Nat) : Option Nat :=
       if pnOff + length ≤ buf.size then some (pnOff + length) else none
     | _ => some buf.size
 
+/-- Go on after the packet at `pos`, which was discarded leaving `fx` behind.
+    §12.2, line 4619's "MUST attempt to process the remaining packets" is
+    possible exactly when `packetEndOf` can say where the next one starts;
+    otherwise the datagram ends here. -/
+def afterSkipped (s : State) (buf : ByteArray) (pos : Nat) (fx : List Effect)
+    (k : Nat → State → List Out) : List Out :=
+  match packetEndOf s buf pos with
+  | some next => if next ≤ pos then [.ok s fx] else bindAll [.ok s fx] (k next)
+  | none => [.ok s fx]
+
+theorem afterSkipped_ne {k : Nat → State → List Out} (hk : ∀ n s, k n s ≠ []) (s : State)
+    (buf : ByteArray) (pos : Nat) (fx : List Effect) : afterSkipped s buf pos fx k ≠ [] := by
+  simp only [afterSkipped]
+  split
+  · split
+    · simp
+    · exact bindAll_ne (by simp) (hk _)
+  · simp
+
+theorem afterSkipped_inv {s : State} (hs : Inv s) {k : Nat → State → List Out}
+    (hk : ∀ n s, Inv s → InvOk (k n s)) (buf : ByteArray) (pos : Nat) (fx : List Effect) :
+    InvOk (afterSkipped s buf pos fx k) := by
+  simp only [afterSkipped]
+  split
+  · split
+    · exact InvOk.ok hs
+    · exact invOk_bindAll (InvOk.ok hs) (hk _)
+  · exact InvOk.ok hs
+
+/-- Parse and process the packet at `pos`; `k` is the rest of the datagram.
+
+    §12.2, line 4619: a packet that cannot be unprotected MUST NOT stop the
+    remaining ones being processed.  That covers a failed AEAD open and equally
+    a packet too short to yield a header-protection sample (§5.4.2 of
+    [QUIC-TLS]): neither can be processed, and for both the long header's
+    Length field still says where the next packet starts. -/
+def recvParsed (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
+    (ver : Option Nat) (buf : ByteArray) (pos : Nat) (k : Nat → State → List Out)
+    (s : State) : List Out :=
+  match parseOne prot s buf pos with
+  | .error .decryptFailed | .error .tooShortForSample =>
+    afterSkipped s buf pos [Effect.skippedRest] k
+  | .error e => packetErrOutcomes s (initialAt s buf pos) e
+  | .ok (pkt, next) =>
+    if next ≤ pos then keep s
+    else bindAll (processPacket now mp av ver (retryIntegrityOk prot s buf pos) pkt s) (k next)
+
+theorem recvParsed_ne (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
+    (ver : Option Nat) (buf : ByteArray) (pos : Nat) {k : Nat → State → List Out}
+    (hk : ∀ n s, k n s ≠ []) (s : State) : recvParsed prot now mp av ver buf pos k s ≠ [] := by
+  simp only [recvParsed]
+  split
+  · exact afterSkipped_ne hk _ _ _ _
+  · exact afterSkipped_ne hk _ _ _ _
+  · exact packetErrOutcomes_ne _ _ _
+  · split
+    · exact keep_ne _
+    · exact bindAll_ne (processPacket_ne _ _ _ _ _ _ _) (hk _)
+
+theorem recvParsed_inv (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
+    (ver : Option Nat) (buf : ByteArray) (pos : Nat) {k : Nat → State → List Out}
+    (hk : ∀ n s, Inv s → InvOk (k n s)) {s : State} (hs : Inv s) :
+    InvOk (recvParsed prot now mp av ver buf pos k s) := by
+  simp only [recvParsed]
+  split
+  · exact afterSkipped_inv hs hk _ _ _
+  · exact afterSkipped_inv hs hk _ _ _
+  · exact packetErrOutcomes_inv hs _ _
+  · split
+    · exact keep_inv hs
+    · exact invOk_bindAll (processPacket_inv hs _ _ _ _ _ _) (hk _)
+
+/-- One packet of the datagram, with §14.1's size rule in front of it.
+
+    §14.1, line 5727: "A server MUST discard an Initial packet that is carried
+    in a UDP datagram with a payload that is smaller than the smallest allowed
+    maximum datagram size of 1200 bytes."  The rule is about *each* Initial
+    packet and the datagram that carries it, wherever in the datagram the packet
+    sits — §12.2, line 4606 recommends increasing encryption-level order but
+    does not mandate it — so it is asked per packet, with the enclosing
+    datagram's size, and before the packet is unprotected: the discard takes
+    precedence over any error the packet's content could raise.  A discarded
+    Initial does not end the datagram (§12.2, line 4619). -/
+def recvOne (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
+    (ver : Option Nat) (buf : ByteArray) (pos : Nat) (k : Nat → State → List Out)
+    (s : State) : List Out :=
+  if initialAt s buf pos then
+    gateElse (stepDsz s (.recvInitial buf.size)) (afterSkipped s buf pos [] k)
+      (recvParsed prot now mp av ver buf pos k)
+  else recvParsed prot now mp av ver buf pos k s
+
+theorem recvOne_ne (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
+    (ver : Option Nat) (buf : ByteArray) (pos : Nat) {k : Nat → State → List Out}
+    (hk : ∀ n s, k n s ≠ []) (s : State) : recvOne prot now mp av ver buf pos k s ≠ [] := by
+  simp only [recvOne]
+  split
+  · exact gateElse_ne (stepDsz_ne _ _) (afterSkipped_ne hk _ _ _ _)
+      (fun _ => recvParsed_ne _ _ _ _ _ _ _ hk _)
+  · exact recvParsed_ne _ _ _ _ _ _ _ hk _
+
+theorem recvOne_inv (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
+    (ver : Option Nat) (buf : ByteArray) (pos : Nat) {k : Nat → State → List Out}
+    (hk : ∀ n s, Inv s → InvOk (k n s)) {s : State} (hs : Inv s) :
+    InvOk (recvOne prot now mp av ver buf pos k s) := by
+  simp only [recvOne]
+  split
+  · exact gateElse_inv (stepDsz_inv hs _) (afterSkipped_inv hs hk _ _ _)
+      (fun _ h => recvParsed_inv _ _ _ _ _ _ _ hk h)
+  · exact recvParsed_inv _ _ _ _ _ _ _ hk hs
+
 def recvPackets (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
     (ver : Option Nat) (buf : ByteArray) : Nat → Nat → State → List Out
   | 0, _, s => keep s
   | fuel + 1, pos, s =>
     if buf.size ≤ pos then keep s
-    else
-      match parseOne prot s buf pos with
-      -- §12.2, line 4619: decryption failing on one coalesced packet MUST NOT
-      -- stop the remaining ones being processed.
-      | .error .decryptFailed =>
-        match packetEndOf s buf pos with
-        | some next =>
-          if next ≤ pos then packetErrOutcomes s (initialAt s buf pos) .decryptFailed
-          else bindAll [.ok s [Effect.skippedRest]]
-                 (recvPackets prot now mp av ver buf fuel next)
-        | none => packetErrOutcomes s (initialAt s buf pos) .decryptFailed
-      | .error e => packetErrOutcomes s (initialAt s buf pos) e
-      | .ok (pkt, next) =>
-        if next ≤ pos then keep s
-        else bindAll (processPacket now mp av ver pkt s)
-               (recvPackets prot now mp av ver buf fuel next)
+    else recvOne prot now mp av ver buf pos (recvPackets prot now mp av ver buf fuel) s
 
 theorem recvPackets_ne (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
     (ver : Option Nat) (buf : ByteArray) (fuel pos : Nat) (s : State) :
@@ -629,16 +802,7 @@ theorem recvPackets_ne (prot : Protection) (now : Time) (mp : Migration.Path) (a
     simp only [recvPackets]
     split
     · exact keep_ne _
-    · split
-      · split
-        · split
-          · exact packetErrOutcomes_ne _ _ _
-          · exact bindAll_ne (by simp) (fun _ => ih _ _)
-        · exact packetErrOutcomes_ne _ _ _
-      · exact packetErrOutcomes_ne _ _ _
-      · split
-        · exact keep_ne _
-        · exact bindAll_ne (processPacket_ne _ _ _ _ _ _) (fun _ => ih _ _)
+    · exact recvOne_ne _ _ _ _ _ _ _ (fun _ _ => ih _ _) _
 
 theorem recvPackets_inv (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
     (ver : Option Nat) (buf : ByteArray) (fuel pos : Nat) {s : State} (hs : Inv s) :
@@ -649,16 +813,7 @@ theorem recvPackets_inv (prot : Protection) (now : Time) (mp : Migration.Path) (
     simp only [recvPackets]
     split
     · exact keep_inv hs
-    · split
-      · split
-        · split
-          · exact packetErrOutcomes_inv hs _ _
-          · exact invOk_bindAll (InvOk.ok hs) (fun _ h => ih _ h)
-        · exact packetErrOutcomes_inv hs _ _
-      · exact packetErrOutcomes_inv hs _ _
-      · split
-        · exact keep_inv hs
-        · exact invOk_bindAll (processPacket_inv hs _ _ _ _ _) (fun _ h => ih _ h)
+    · exact recvOne_inv _ _ _ _ _ _ _ (fun _ _ h => ih _ h) hs
 
 /-! ## 2h. Version handling, per role -/
 
@@ -782,26 +937,20 @@ theorem vnClientGate_inv {s : State} (hs : Inv s) {k : Option Nat → State → 
 
 /-! ## 2i. §14's size rules -/
 
-/-- Does the datagram start with an Initial packet?  §14.1's rule is about the
-    datagram that *carries* one. -/
-def carriesInitial (s : State) (buf : ByteArray) : Bool :=
-  match Quic.decodeHeader buf s.shortDcidLen with
-  | .ok (hd, _) => hdrPtype hd == .initial
-  | .error _ => false
-
+/-- The datagram-level half: §14, line 5695's "MUST NOT close" with line 5697's
+    MAY-discard, for any datagram.  §14.1's rule for Initial packets is *not*
+    decided here — a datagram's first header says nothing about the packets
+    coalesced behind it — but per packet, in `recvOne`. -/
 def dszGate (buf : ByteArray) (k : State → List Out) (s : State) : List Out :=
-  if carriesInitial s buf then bindAll (stepDsz s (.recvInitial buf.size)) k
-  else bindAll (stepDsz s (.recvDatagram buf.size)) k
+  bindAll (stepDsz s (.recvDatagram buf.size)) k
 
 theorem dszGate_ne {k : State → List Out} (hk : ∀ s, k s ≠ []) (buf : ByteArray) (s : State) :
     dszGate buf k s ≠ [] := by
-  simp only [dszGate]
-  split <;> exact bindAll_ne (stepDsz_ne _ _) hk
+  exact bindAll_ne (stepDsz_ne _ _) hk
 
 theorem dszGate_inv {s : State} (hs : Inv s) {k : State → List Out}
     (hk : ∀ s, Inv s → InvOk (k s)) (buf : ByteArray) : InvOk (dszGate buf k s) := by
-  simp only [dszGate]
-  split <;> exact invOk_bindAll (stepDsz_inv hs _) hk
+  exact invOk_bindAll (stepDsz_inv hs _) hk
 
 /-! ## 2j. The whole datagram -/
 
@@ -865,6 +1014,60 @@ theorem routeDatagram_inv {s : State} (hs : Inv s) (prot : Protection) (now : Ti
 def afterDatagram (now : Time) (av : Bool) (s : State) : List Out :=
   stepTerm s (.recvPacket now s.pto av)
 
+/-- `afterDatagram`, conditioned the way the sentence is: only an outcome in
+    which at least one packet was processed successfully
+    (`Effect.packetProcessed`) restarts the idle timer.  An outcome whose packets
+    were all discarded — authentication failed, a header did not parse, a
+    component's MUST-discard fired — is left as it is, so unauthenticated
+    traffic cannot keep the connection alive. -/
+def idleOut (now : Time) (av : Bool) : Out → List Out
+  | .ok s fx =>
+    if fx.contains Effect.packetProcessed then (afterDatagram now av s).map (withFx fx)
+    else [.ok s fx]
+  | .error c => [.error c]
+  | .drop => [.drop]
+
+def idleGate (now : Time) (av : Bool) (l : List Out) : List Out := l.flatMap (idleOut now av)
+
+theorem idleGate_ne (now : Time) (av : Bool) {l : List Out} (hl : l ≠ []) :
+    idleGate now av l ≠ [] := by
+  cases l with
+  | nil => exact absurd rfl hl
+  | cons a t =>
+    simp only [idleGate, List.flatMap_cons, ne_eq, List.append_eq_nil_iff, not_and]
+    intro h
+    cases a with
+    | ok s fx =>
+      simp only [idleOut] at h
+      split at h
+      · simp only [List.map_eq_nil_iff] at h; exact absurd h (stepTerm_ne _ _)
+      · simp at h
+    | error c => simp [idleOut] at h
+    | drop => simp [idleOut] at h
+
+theorem idleGate_inv (now : Time) (av : Bool) {l : List Out} (hl : InvOk l) :
+    InvOk (idleGate now av l) := by
+  intro s' fx hm
+  simp only [idleGate, List.mem_flatMap] at hm
+  obtain ⟨o, ho, hmem⟩ := hm
+  cases o with
+  | ok s0 fx0 =>
+    have h0 : Inv s0 := hl _ _ ho
+    simp only [idleOut] at hmem
+    split at hmem
+    · simp only [List.mem_map] at hmem
+      obtain ⟨o', ho', he⟩ := hmem
+      cases o' with
+      | ok x gx =>
+        simp only [withFx, Outcome.ok.injEq] at he
+        exact he.1 ▸ stepTerm_inv h0 _ _ _ ho'
+      | error c => simp [withFx] at he
+      | drop => simp [withFx] at he
+    · simp only [List.mem_singleton, Outcome.ok.injEq] at hmem
+      exact hmem.1 ▸ h0
+  | error c => simp [idleOut] at hmem
+  | drop => simp [idleOut] at hmem
+
 /-- The phases that process nothing (`draining`, `closed`) and the one that
     answers with a CONNECTION_CLOSE (`closing`) — §10.2.1, line 3965; §10.2.2,
     line 4023; §10.2, line 3953.  §10.2.2 line 4044's "MAY enter the draining
@@ -890,21 +1093,21 @@ def phaseGate (prot : Protection) (now : Time) (src : Addr) (mp : Migration.Path
     (buf : ByteArray) (s : State) : List Out :=
   match s.term.phase with
   | .active =>
-    bindAll (routeDatagram prot now src mp buf s) (afterDatagram now (addrValidated s src))
+    idleGate now (addrValidated s src) (routeDatagram prot now src mp buf s)
   | _ => closedPhase prot now (addrValidated s src) buf s
 
 theorem phaseGate_ne (prot : Protection) (now : Time) (src : Addr) (mp : Migration.Path)
     (buf : ByteArray) (s : State) : phaseGate prot now src mp buf s ≠ [] := by
   simp only [phaseGate]
   split
-  · exact bindAll_ne (routeDatagram_ne _ _ _ _ _ _) (fun _ => stepTerm_ne _ _)
+  · exact idleGate_ne _ _ (routeDatagram_ne _ _ _ _ _ _)
   · exact closedPhase_ne _ _ _ _ _
 
 theorem phaseGate_inv {s : State} (hs : Inv s) (prot : Protection) (now : Time) (src : Addr)
     (mp : Migration.Path) (buf : ByteArray) : InvOk (phaseGate prot now src mp buf s) := by
   simp only [phaseGate]
   split
-  · exact invOk_bindAll (routeDatagram_inv hs _ _ _ _ _) (fun _ h => stepTerm_inv h _)
+  · exact idleGate_inv _ _ (routeDatagram_inv hs _ _ _ _ _)
   · exact closedPhase_inv hs _ _ _ _
 
 /-- The whole receive pipeline. -/

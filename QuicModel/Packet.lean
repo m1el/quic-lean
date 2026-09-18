@@ -125,10 +125,18 @@ structure Protection where
   hpMask : ByteArray → ByteArray
   /-- AEAD open: header bytes (AAD), packet number, ciphertext‖tag ↦ plaintext. -/
   aeadOpen : (aad : ByteArray) → (pn : Nat) → (ct : ByteArray) → Option ByteArray
+  /-- §17.2.5.2 / [QUIC-TLS] §5.8: does the Retry Integrity Tag validate?  The
+      arguments are the client's original Destination Connection ID (the Retry
+      Pseudo-Packet is prefixed with it), the Retry packet without its tag, and
+      the tag.  The algorithm stays abstract; the *outcome* has to reach the
+      transport rules, because §17.2.5.2 makes it decide whether the packet is
+      discarded. -/
+  retryTagOk : (odcid : ByteArray) → (retry : ByteArray) → (tag : ByteArray) → Bool
 
 /-- Stub protection shared with `harness/pkt_diff.c`: the payload is sent in the
     clear, the tag is `tagLen` bytes of 0xA5, and the header-protection mask is
-    the first five bytes of the sample.  Not secure; but it still exercises the
+    the first five bytes of the sample.  A Retry Integrity Tag follows the same
+    convention: it validates when it is sixteen bytes of 0xA5.  Not secure; but it still exercises the
     sample offset, the masked header bits and the tag position. -/
 def Protection.stub (tagLen : Nat := 16) : Protection where
   tagLen := tagLen
@@ -137,6 +145,7 @@ def Protection.stub (tagLen : Nat := 16) : Protection where
     if ct.size < tagLen then none else
     let tag := ct.extract (ct.size - tagLen) ct.size
     if tag.data.all (· == 0xa5) then some (ct.extract 0 (ct.size - tagLen)) else none
+  retryTagOk _ _ tag := tag.size == retryTagLen && tag.data.all (· == 0xa5)
 
 inductive PacketErr where
   | header (e : Err)

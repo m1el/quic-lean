@@ -319,6 +319,25 @@ by the reviewer (reachable, conformant counterexamples).
   callback" / subsequence). Design decision to revisit: the harness's level-3
   "subsequence" matching is a real weakening (30 residual signatures).
 
+## 4h. Disposition of TRANSPORT_AUDIT_2026-09-18.md
+
+Four receive-path findings against `a6b74c2`, all in `Endpoint/Pipeline.lean`,
+all reproduced and all fixed; `Examples.lean` §12b holds the audit's
+counterexamples with the guards turned round to the required behaviour.
+
+| Audit item | Status |
+|---|---|
+| D34-1 discarded packets restart the idle timer (§10.1) | fixed: `Effect.packetProcessed` marks a packet no component discarded; `idleGate` restarts the timer only for an outcome that carries it |
+| D34-2 Retry integrity assumed to succeed (§17.2.5.2) | fixed: `Protection.retryTagOk` (abstract; the stub validates 16 × 0xA5) feeds `AddressValidation`'s `integrityOk` instead of a literal `true` |
+| D34-3 undersized Initial accepted behind another packet (§14.1) | fixed: `.recvInitial buf.size` is asked per Initial packet in `recvOne`, before unprotection; the discard skips that packet only. `carriesInitial` is gone |
+| D34-4 short header-protection sample stops coalesced processing (§12.2) | fixed: `.tooShortForSample` continues at `packetEndOf` like `.decryptFailed`; terminal only when the extent is unknown |
+| Assurance limits (definitional `Step`, abstracted STREAM bytes, scheduling, extension profile) | unchanged and still open; see §4b's last rows |
+
+Not done here: a fresh fuzzing campaign.  The eight scripts and the existing
+`corpus/conn_trace` were replayed through `endpoint_diff` before and after.
+`.fixedBitClear` on a long header has a known extent too and still ends the
+datagram; the audit did not raise it and it is left for triage.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server

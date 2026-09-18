@@ -1131,7 +1131,7 @@ line the quoted sentence starts on.
 | §17.2.5.1 (6616) | "A server MUST NOT send more than one Retry packet in response to a single UDP datagram" | `AtMostOneRetry` / `atMostOneRetry`, exported for WP12 |
 | §17.2.5.2 (6621) | a client MUST accept and process at most one Retry per connection attempt | `Inv`, `atMostOneRetryAccepted` |
 | §17.2.5.2 (6622) | after an Initial or Retry from the server, discard later Retries | `Step.retryLate`, `retry_discarded_after` |
-| §17.2.5.2 (6626) | discard Retries whose Retry Integrity Tag cannot be validated | `Step.retryBadTag` (the tag check is the opaque `integrityOk`) |
+| §17.2.5.2 (6626) | discard Retries whose Retry Integrity Tag cannot be validated | `Step.retryBadTag` (the tag check is the opaque `integrityOk`; the endpoint supplies it from `Protection.retryTagOk`) |
 | §17.2.5.2 (6630) | a client MUST discard a Retry with a zero-length Retry Token | `Step.retryEmptyToken` |
 | §17.2.5.2 (6633) | the client responds with an Initial carrying the Retry Token | `Step.retryAccept`, `Effect.useToken` |
 | §17.2.5.2 (6641) | the client MUST NOT change its Source Connection ID | out of scope: WP4 ConnIds |
