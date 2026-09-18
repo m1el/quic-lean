@@ -57,10 +57,15 @@ inductive Event where
       endpoint wishes to remove a connection ID from use"); driven by the
       application or by migration (WP10). -/
   | retireCid (seq : Nat)
+  /-- The endpoint notices that `pending` of its locally retired connection IDs
+      have RETIRE_CONNECTION_ID frames not yet acknowledged (§5.1.2, line 1823).
+      Acknowledgement itself is RFC 9002 state and stays outside the model; the
+      count is supplied by whoever tracks it. -/
+  | retirementBacklog (pending : Nat)
   deriving DecidableEq, Repr
 
 inductive Effect where
-  /-- §19.15, line 8011: "the peer MUST stop using the corresponding connection
+  /-- §5.1.2, line 1811: "the peer MUST stop using the corresponding connection
       IDs" — this one must no longer be used as a Destination Connection ID. -/
   | stopUsing (seq : Nat) (cid : Cid)
   /-- Queue a RETIRE_CONNECTION_ID frame for this sequence number (§19.16). -/
@@ -160,7 +165,7 @@ inductive Step : State → Event → Out → Prop
       Step s (.recvNewCid seq rpt cid token) (.error .connectionIdLimitError)
   /-- The ordinary case: §19.15, line 7998 ("A receiver MUST ignore any Retire
       Prior To fields that do not increase the largest received Retire Prior To
-      value" — hence `Nat.max`), line 8011 ("the peer MUST stop using the
+      value" — hence `Nat.max`), §5.1.2 line 1811 ("the peer MUST stop using the
       corresponding connection IDs and retire them with RETIRE_CONNECTION_ID
       frames before adding the newly provided connection ID"), line 8013 (a
       sequence number below a previously received Retire Prior To "MUST send a
@@ -179,6 +184,16 @@ inductive Step : State → Event → Out → Prop
       this is a local request, not a received frame. -/
   | retireNop {s n} (h : entryOf? s.entries n = none ∨ s.isRetired n = true) :
       Step s (.retireCid n) .drop
+  /-- A retirement backlog is, by itself, no event: nothing changes. -/
+  | backlogOk {s pending} : Step s (.retirementBacklog pending) (.ok s [])
+  /-- §5.1.2, line 1826: an endpoint "MAY choose to treat having connection IDs in
+      need of retirement that exceed this limit as a connection error of type
+      CONNECTION_ID_LIMIT_ERROR".  "This limit" is the endpoint's own, which line
+      1824 says "SHOULD allow for … at least twice the active_connection_id
+      limit"; the model takes that floor as the limit, so the error is permitted
+      only past twice our advertised limit. -/
+  | backlogError {s pending} (h : pending > 2 * s.limit) :
+      Step s (.retirementBacklog pending) (.error .connectionIdLimitError)
 
 /-! ## 3. Executable form -/
 
@@ -194,6 +209,8 @@ def outcomes (s : State) : Event → List Out
     match entryOf? s.entries n with
     | some e => if s.isRetired n then [.drop] else [.ok (applyRetire s e).1 (applyRetire s e).2]
     | none => [.drop]
+  | .retirementBacklog pending =>
+    if pending > 2 * s.limit then [.ok s [], .error .connectionIdLimitError] else [.ok s []]
 
 /-! ## 4. The two forms agree -/
 
@@ -240,6 +257,14 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
       · rename_i he
         simp only [List.mem_singleton] at h; subst h
         exact .retireNop (.inl he)
+    | retirementBacklog pending =>
+      simp only [outcomes] at h
+      split at h
+      · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+        rcases h with h | h <;> subst h
+        · exact .backlogOk
+        · exact .backlogError ‹_›
+      · simp only [List.mem_singleton] at h; subst h; exact .backlogOk
   · intro h
     cases h with
     | ncidZeroLen hz => simp [outcomes, hz]
@@ -259,6 +284,8 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
       · cases he : entryOf? s.entries n with
         | none => simp [outcomes, he]
         | some e => simp [outcomes, he, hr]
+    | @backlogOk pending => by_cases hp : pending > 2 * s.limit <;> simp [outcomes, hp]
+    | @backlogError pending hp => simp [outcomes, hp]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
   cases e with
@@ -267,6 +294,9 @@ theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
     all_goals simp
   | retireCid n =>
     simp only [outcomes]; repeat' split
+    all_goals simp
+  | retirementBacklog pending =>
+    simp only [outcomes]; split
     all_goals simp
 
 /-! ## 5. Invariant -/
@@ -294,6 +324,7 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
     refine ⟨entriesAfter_nodup hn seq cid token, ?_⟩
     have : (applyNcid s seq rpt cid token).1.limit = s.limit := rfl
     omega
+  | backlogOk => exact ⟨hn, hc⟩
   | @retireOk n en he hr =>
     refine ⟨hn, ?_⟩
     have hlim : (applyRetire s en).1.limit = s.limit := rfl
@@ -378,6 +409,7 @@ theorem retired_mono {s s' : State} {e : Event} {fx : List Effect}
   cases h with
   | ncidOk => intro n hn; exact List.mem_append_left _ hn
   | retireOk => intro n hn; exact List.mem_append_left _ hn
+  | backlogOk => intro n hn; exact hn
 
 theorem retired_mono_reachable {s₀ s : State} (h : component.Reachable s₀ s) :
     ∀ n ∈ s₀.retired, n ∈ s.retired :=
@@ -401,6 +433,7 @@ theorem rpt_mono {s s' : State} {e : Event} {fx : List Effect}
   cases h with
   | ncidOk => exact Nat.le_max_left _ _
   | retireOk => exact Nat.le_refl _
+  | backlogOk => exact Nat.le_refl _
 
 theorem rpt_mono_reachable {s₀ s : State} (h : component.Reachable s₀ s) :
     s₀.retirePriorTo ≤ s.retirePriorTo :=
@@ -506,6 +539,15 @@ example : component.maySend { s0 with peerZeroLen := true } (.retireConnectionId
 example : component.track s0 (.recvNewCid 2 0 [3] (tok 3)) (.ok []) =
     some { s0 with entries := s0.entries ++ [⟨2, [3], tok 3⟩] } := by decide
 
+-- Review finding W4-2: §5.1.2 line 1826's MAY.  With a limit of 4, a backlog of
+-- 9 unacknowledged retirements may be a CONNECTION_ID_LIMIT_ERROR but need not
+-- be; a backlog within twice the limit may not.
+example : component.accepts s0 (.retirementBacklog 9) (.error .connectionIdLimitError) = true := by
+  decide
+example : component.step s0 (.retirementBacklog 9) = .ok s0 [] := by decide
+example : component.accepts s0 (.retirementBacklog 8) (.error .connectionIdLimitError) = false := by
+  decide
+
 end Examples
 
 /-! ## 10. Coverage and notes
@@ -521,12 +563,12 @@ issued to us.
 | §5.1 (1670) | MUST NOT reuse an address/port pair for concurrent zero-length-CID connections | out of scope: about several connections, not one endpoint's CID set |
 | §5.1.1 (1709) | an issuer MUST accept packets carrying an issued CID until retired | `Local.State.active` |
 | §5.1.1 (1712) | issued and not retired = active | `State.active` |
-| §5.1.1 (1718) | SHOULD keep the peer supplied with CIDs | `Local.Recommended` (advice, not `Step`) |
+| §5.1.1 (1718) | SHOULD ensure the peer has a sufficient number of available CIDs | advice, not checkable here: "sufficient" is unquantified; `Local.Recommended` covers the quantified SHOULD NOT of line 1831 only |
 | §5.1.1 (1721) | MUST NOT provide more CIDs than the peer's limit | `Local.canIssue`, `Local.issue_respects_peer_limit` |
 | §5.1.1 (1722) | MAY exceed temporarily with a large enough Retire Prior To | `Local.State.peerActiveAfter` |
 | §5.1.1 (1743) | more active CIDs than advertised → CONNECTION_ID_LIMIT_ERROR | `Step.ncidLimit`, `Inv`, `active_le_limit` |
-| §5.1.1 (1749) | SHOULD supply a new CID when the peer retires one | `Local.Effect.cidRetiredByPeer` (advice) |
-| §5.1.1 (1753) | MAY limit the total number of CIDs issued | permitted: `Step.issueRefused` allows refusing |
+| §5.1.1 (1749) | SHOULD supply a new CID when the peer retires one | advice, not checkable here: an obligation to act *later*; `Local.Effect.cidRetiredByPeer` marks the moment for a trace-level check (WP12) |
+| §5.1.1 (1753) | MAY limit the total number of CIDs issued | `Local.Step.issueDeclined`: `.drop` is permitted for every issue request |
 | §5.1.1 (1766) | a zero-length-CID endpoint cannot issue a new CID | `Local.canIssue` |
 | §5.1.2 (1779) | send RETIRE_CONNECTION_ID to remove a CID from use | `Step.retireOk`, `MaySend` |
 | §5.1.2 (1799) | SHOULD retire CIDs no longer used on a path | out of scope: paths are WP10 |
