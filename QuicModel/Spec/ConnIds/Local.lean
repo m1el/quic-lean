@@ -55,7 +55,13 @@ def activeCount (s : State) : Nat := s.active.length
     NEW_CONNECTION_ID with this Retire Prior To value: everything at or above
     `rpt` that it has not already retired, plus the one being issued. -/
 def peerActiveAfter (s : State) (rpt : Nat) : Nat :=
-  (s.issued.filter (fun e => decide (rpt ≤ e.seq ∧ e.seq ∉ s.retired))).length + 1
+  -- §5.1.2, lines 1811–1814: on an increased Retire Prior To the peer "MUST
+  -- stop using the corresponding connection IDs and retire them … before
+  -- adding the newly provided connection ID", so everything below the largest
+  -- Retire Prior To we have *ever* sent no longer counts against its limit,
+  -- whether or not its RETIRE_CONNECTION_ID frames have reached us yet.
+  (s.issued.filter (fun e =>
+    decide (Nat.max s.sentRetirePriorTo rpt ≤ e.seq ∧ e.seq ∉ s.retired))).length + 1
 
 end State
 
@@ -166,9 +172,13 @@ inductive Step : State → Event → Out → Prop
   | issueOk {s cid token rpt} (h : canIssue s cid token rpt = true) :
       Step s (.issueCid cid token rpt)
         (.ok (applyIssue s cid token rpt).1 (applyIssue s cid token rpt).2)
-  /-- A local request to issue a connection ID that the text forbids is simply
-      not carried out; nothing is sent and nothing changes. -/
-  | issueRefused {s cid token rpt} (h : canIssue s cid token rpt = false) :
+  /-- Not issuing is always permitted: a request the text forbids is simply not
+      carried out, and even a permitted one may be declined — §5.1.1, line 1753:
+      "An endpoint MAY limit the total number of connection IDs issued for each
+      connection"; line 1755: "MAY also limit the issuance of connection IDs to
+      reduce the amount of per-path state it maintains".  Nothing is sent and
+      nothing changes. -/
+  | issueDeclined {s cid token rpt} :
       Step s (.issueCid cid token rpt) .drop
 
 /-! ## 3. Executable form -/
@@ -182,7 +192,7 @@ def outcomes (s : State) : Event → List Out
     else [.ok (applyRetire s n).1 (applyRetire s n).2]
   | .issueCid cid token rpt =>
     if canIssue s cid token rpt then
-      [.ok (applyIssue s cid token rpt).1 (applyIssue s cid token rpt).2]
+      [.ok (applyIssue s cid token rpt).1 (applyIssue s cid token rpt).2, .drop]
     else [.drop]
 
 /-! ## 4. The two forms agree -/
@@ -210,8 +220,11 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | issueCid cid token rpt =>
       simp only [outcomes] at h
       split at h
-      · simp only [List.mem_singleton] at h; subst h; exact .issueOk (by simp_all)
-      · simp only [List.mem_singleton] at h; subst h; exact .issueRefused (by simp_all)
+      · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+        rcases h with h | h <;> subst h
+        · exact .issueOk (by simp_all)
+        · exact .issueDeclined
+      · simp only [List.mem_singleton] at h; subst h; exact .issueDeclined
   · intro h
     cases h with
     | retireZeroLen hz => simp [outcomes, hz]
@@ -220,7 +233,8 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | @retireOk n d hz hn =>
       by_cases hd : d = some n <;> simp [outcomes, hz, hn, hd]
     | issueOk hc => simp [outcomes, hc]
-    | issueRefused hc => simp [outcomes, hc]
+    | @issueDeclined cid token rpt =>
+      by_cases hc : canIssue s cid token rpt = true <;> simp [outcomes, hc]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
   cases e <;> simp only [outcomes] <;> repeat' split
@@ -372,8 +386,12 @@ theorem sent_rpt_mono_reachable {s₀ s : State} (h : component.Reachable s₀ s
     (motive := fun (t : State) _ => s₀.sentRetirePriorTo ≤ t.sentRetirePriorTo)
     (Nat.le_refl _) (fun _ hs ih => Nat.le_trans ih (sent_rpt_mono hs)) h
 
-/-- (a), send side: we never push the peer past its `active_connection_id_limit`
-    (§5.1.1, line 1721). -/
+/-- (a), send side: we never push the peer past its `active_connection_id_limit`.
+    §5.1.1, line 1721: "An endpoint MUST NOT provide more connection IDs than
+    the peer's limit."  `peerActiveAfter` counts what the peer is obliged to
+    keep active after this frame: the issued IDs at or above the largest Retire
+    Prior To ever sent (including this frame's), not yet retired, plus the new
+    one. -/
 theorem issue_respects_peer_limit {s : State} {cid token rpt}
     (h : canIssue s cid token rpt = true) : s.peerActiveAfter rpt ≤ s.peerLimit := by
   simp only [canIssue, Bool.and_eq_true, decide_eq_true_eq] at h
@@ -481,6 +499,25 @@ example : component.maySend s0 (.retireConnectionId 0) = true := by decide
 -- Following an implementation whose state we cannot see.
 example : component.track s0 (.recvRetireCid 0 none) (.ok [.cidRetiredByPeer 0]) =
     some { s0 with retired := [0] } := by decide
+
+-- Review finding W4-1 (regression).  Two permitted issues bring the peer's
+-- active set to {seq 2} with a Retire Prior To of 2 already sent; a further
+-- issue with rpt = 0 leaves the peer at exactly its limit of 2, and must be
+-- permitted.  Before the fix `peerActiveAfter` counted the retired-by-rpt
+-- IDs 0 and 1 again and the request was refused.
+private def wA : State := { nextSeq := 1, issued := [⟨0, [1], tok 0⟩], retired := [],
+                            peerLimit := 2, zeroLen := false, sentRetirePriorTo := 0 }
+private def wB : State := (component.step wA (.issueCid [2] (tok 2) 0)).next wA
+private def wC : State := (component.step wB (.issueCid [3] (tok 3) 2)).next wB
+example : wC.sentRetirePriorTo = 2 ∧ wC.retired = [] := by decide
+example : wC.peerActiveAfter 0 = 2 := by decide
+example : component.accepts wC (.issueCid [4] (tok 4) 0)
+    (.ok (applyIssue wC [4] (tok 4) 0).1 (applyIssue wC [4] (tok 4) 0).2) = true := by decide
+example : component.maySend wC (.newConnectionId 3 0 (bytes [4]) (bytes (tok 4))) = true := by decide
+-- Review finding W4-3: declining to issue is always permitted (§5.1.1 line 1753),
+-- and issuing remains the preferred outcome.
+example : component.accepts wA (.issueCid [2] (tok 2) 0) .drop = true := by decide
+example : component.step wA (.issueCid [2] (tok 2) 0) ≠ .drop := by decide
 
 end Examples
 
