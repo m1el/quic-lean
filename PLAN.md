@@ -244,8 +244,8 @@ forbidden behaviour. All accepted.
 | Finding | Owner | Status |
 |---|---|---|
 | W4-1 `peerActiveAfter` ignores Retire Prior To already sent; W4-2, W4-3 missing MAYs; W4-4 coverage rows | lead (done by hand, be159ea) | done |
-| W2-1 RESET_STREAM: FINAL_SIZE_ERROR must also be permitted when both rules fire (ngtcp2 checks final size first); W2-2 MAX_STREAM_DATA after FIN is a SHOULD; W2-3 STREAM_DATA_BLOCKED has no bounds or errors; W2-4 "can safely ignore" made mandatory; W2-5..8 | WP2 fix run | running |
-| W2-6 §13.3 "content of a RESET_STREAM MUST NOT change when sent again" | WP2 fix run (send rule of the stream) and WP14 coverage | queued |
+| W2-1 RESET_STREAM: FINAL_SIZE_ERROR must also be permitted when both rules fire (ngtcp2 checks final size first); W2-2 MAX_STREAM_DATA after FIN is a SHOULD; W2-3 STREAM_DATA_BLOCKED has no bounds or errors; W2-4 "can safely ignore" made mandatory; W2-5..8 | WP2 fix run | merged; two ngtcp2 behaviours on STREAM_DATA_BLOCKED deliberately not encoded (Recv NOTES) → WP13 triage |
+| W2-6 §13.3 "content of a RESET_STREAM MUST NOT change when sent again" | WP2 fix run (merged); WP14 coverage | WP14 running |
 | W3-1 minimum-packet-number drop (§12.3) not permitted; W3-4 `MaySendPacket` for empty packets and frame/packet-type legality; W3-5/6 coverage | WP3 fix run | merged (4c98db1) |
 | W1-1 duplicate parameters: first-copy-wins also conforms; W1-2 dropped SHOULDs; citation drift | WP1 fix run | running |
 | Ruling on `Recommended` vs "advice only" | BRIEF.md | done |
