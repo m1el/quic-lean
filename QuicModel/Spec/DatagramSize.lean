@@ -1,4 +1,4 @@
-import QuicModel.Spec.Core
+import QuicModel.Spec.FrameRules
 
 /-
   WP7a: §14 Datagram Size (lines 5640–5919).
@@ -8,7 +8,7 @@ import QuicModel.Spec.Core
   carried in a datagram smaller than 1200 bytes"), the ICMP rules of §14.2.1
   that change the endpoint's maximum datagram size, and — on the send side — the
   size constraints on a datagram the endpoint is about to send (§14.1, §14.2,
-  §14.4).
+  §14.4), as the component's `MaySendDatagram` over `Spec.OutDatagram`.
 
   The DPLPMTUD search algorithm itself (§14.3) is deliberately absent: only the
   constraints on what may be sent are specified, so `maxDatagramSize` moves here
@@ -19,12 +19,15 @@ import QuicModel.Spec.Core
 -/
 namespace Quic.Spec.DatagramSize
 
-/-- §14, line 5650: "QUIC MUST NOT be used if the network path cannot support a
+open Quic.Spec (OutPacket OutDatagram)
+
+/-- §14, line 5649: "QUIC MUST NOT be used if the network path cannot support a
     maximum datagram size of at least 1200 bytes."  This is also the value §14.1
     calls "the smallest allowed maximum datagram size". -/
 def smallestMaxDatagramSize : Nat := 1200
 
-/-- §18.2, line 6963: the default `max_udp_payload_size`. -/
+/-- §18.2, line 6963: "The default for this parameter is the maximum permitted
+    UDP payload of 65527." -/
 def defaultMaxUdpPayloadSize : Nat := 65527
 
 /-! ## 1. State, events, effects -/
@@ -35,12 +38,16 @@ structure State where
   role : Role
   /-- §18.2: the peer's `max_udp_payload_size`, once it has been received. -/
   peerMaxUdpPayload : Option Nat
-  /-- §14.2: "The largest UDP payload an endpoint sends at any given time is
-      referred to as the endpoint's maximum datagram size." -/
+  /-- §14.2, line 5742: "The largest UDP payload an endpoint sends at any given
+      time is referred to as the endpoint's maximum datagram size." -/
   maxDatagramSize : Nat
   /-- False once §14.2's "the PMTU ... cannot support the smallest allowed
       maximum datagram size" has been determined for this path. -/
   pathUsable : Bool
+  /-- §14.2, line 5746: whether this endpoint runs DPLPMTUD or PMTUD at all.
+      Line 5749's "in the absence of these mechanisms" advice applies only when
+      it does not. -/
+  runsPmtuDiscovery : Bool
   deriving DecidableEq, Repr
 
 inductive Event where
@@ -57,8 +64,10 @@ inductive Event where
       validation of §14.2.1 claims this PMTU (as a UDP payload size). -/
   | icmpPtb (pmtu : Nat)
   /-- §14.2: PMTU discovery determined that this path cannot support the
-      smallest allowed maximum datagram size. -/
-  | pathBelowMinimum
+      smallest allowed maximum datagram size.  `alternativeExists` is §14.2 line
+      5762's "if an alternative path cannot be found", negated: true when the
+      endpoint has another path it can move to. -/
+  | pathBelowMinimum (alternativeExists : Bool)
   deriving DecidableEq, Repr
 
 inductive Effect where
@@ -88,10 +97,21 @@ inductive Step : State → Event → Out → Prop
       size of datagrams it receives, and a server's rule is met. -/
   | initialOk {s n} (h : ¬ (s.role = .server ∧ n < smallestMaxDatagramSize)) :
       Step s (.recvInitial n) (.ok s [.deliver])
+  /-- §5.2, line 1878: "Invalid packets that lack strong integrity protection,
+      such as Initial, Retry, or Version Negotiation, MAY be discarded."
+      §11.1, line 4485: "As the AEAD on Initial packets does not provide strong
+      authentication, an endpoint MAY discard an invalid Initial packet." -/
+  | initialDiscard {s n} (h : ¬ (s.role = .server ∧ n < smallestMaxDatagramSize)) :
+      Step s (.recvInitial n) .drop
   /-- §14, line 5695: "an endpoint MUST NOT close a connection when it receives a
       datagram that does not meet size constraints".  No size constraint of §14
       governs a datagram that carries no Initial packet, so it is processed. -/
   | datagramOk {s n} : Step s (.recvDatagram n) (.ok s [.deliver])
+  /-- §14, line 5697: "endpoint MAY however discard such datagrams" — the
+      permission that goes with the MUST NOT above.  This component cannot see
+      which size constraint (if any) a datagram had to meet, so the discard the
+      text permits is permitted here for any datagram; see NOTES. -/
+  | datagramDiscard {s n} : Step s (.recvDatagram n) .drop
   /-- §18.2, line 6966: the peer's limit "does act as an additional constraint on
       datagram size in the same way as the path MTU".  Recording it is all this
       component does with it; the value's validity is WP1's. -/
@@ -120,11 +140,14 @@ inductive Step : State → Event → Out → Prop
       support the smallest allowed maximum datagram size of 1200 bytes, it MUST
       immediately cease sending QUIC packets, except for those in PMTU probes or
       those containing CONNECTION_CLOSE frames, on the affected path." -/
-  | pathLost {s} :
-      Step s .pathBelowMinimum (.ok { s with pathUsable := false } [.ceaseSending])
+  | pathLost {s alt} :
+      Step s (.pathBelowMinimum alt) (.ok { s with pathUsable := false } [.ceaseSending])
   /-- §14.2, line 5762: "An endpoint MAY terminate the connection if an
-      alternative path cannot be found." -/
-  | pathLostTerminate {s} : Step s .pathBelowMinimum (.error .noViablePath)
+      alternative path cannot be found."  §8.2.4, line 3262 hedges the same
+      permission: "MAY signal this using the NO_VIABLE_PATH connection error,
+      noting that this is only possible if the network path exists but does not
+      support the required MTU" — which is exactly this event. -/
+  | pathLostTerminate {s} : Step s (.pathBelowMinimum false) (.error .noViablePath)
 
 /-! ## 3. Executable form -/
 
@@ -132,15 +155,16 @@ def outcomes (s : State) : Event → List Out
   | .recvInitial n =>
     if s.role = .server ∧ n < smallestMaxDatagramSize then
       [.drop, .error .protocolViolation]
-    else [.ok s [.deliver]]
-  | .recvDatagram _ => [.ok s [.deliver]]
+    else [.ok s [.deliver], .drop]
+  | .recvDatagram _ => [.ok s [.deliver], .drop]
   | .recvMaxUdpPayload v => [.ok { s with peerMaxUdpPayload := some v } []]
   | .icmpPtb p =>
     if p < smallestMaxDatagramSize then [.ok s []]
     else if s.maxDatagramSize ≤ p then [.ok s []]
     else [.ok { s with maxDatagramSize := p } [], .ok s []]
-  | .pathBelowMinimum =>
-    [.ok { s with pathUsable := false } [.ceaseSending], .error .noViablePath]
+  | .pathBelowMinimum alt =>
+    if alt then [.ok { s with pathUsable := false } [.ceaseSending]]
+    else [.ok { s with pathUsable := false } [.ceaseSending], .error .noViablePath]
 
 /-! ## 4. The two forms agree -/
 
@@ -156,9 +180,15 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
         rcases h with h | h <;> subst h
         · exact .initialTooSmallDrop hc.1 hc.2
         · exact .initialTooSmallClose hc.1 hc.2
-      · simp only [List.mem_singleton] at h; subst h; exact .initialOk ‹_›
+      · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+        rcases h with h | h <;> subst h
+        · exact .initialOk ‹_›
+        · exact .initialDiscard ‹_›
     | recvDatagram n =>
-      simp only [outcomes, List.mem_singleton] at h; subst h; exact .datagramOk
+      simp only [outcomes, List.mem_cons, List.not_mem_nil, or_false] at h
+      rcases h with h | h <;> subst h
+      · exact .datagramOk
+      · exact .datagramDiscard
     | recvMaxUdpPayload v =>
       simp only [outcomes, List.mem_singleton] at h; subst h; exact .maxUdpPayload
     | icmpPtb p =>
@@ -172,17 +202,25 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
           rcases h with h | h <;> subst h
           · exact .icmpReduce ‹_› (Nat.lt_of_not_le ‹_›)
           · exact .icmpDefer ‹_› (Nat.lt_of_not_le ‹_›)
-    | pathBelowMinimum =>
-      simp only [outcomes, List.mem_cons, List.not_mem_nil, or_false] at h
-      rcases h with h | h <;> subst h
-      · exact .pathLost
-      · exact .pathLostTerminate
+    | pathBelowMinimum alt =>
+      simp only [outcomes] at h
+      split at h
+      · simp only [List.mem_singleton] at h; subst h; exact .pathLost
+      · rename_i halt
+        simp only [Bool.not_eq_true] at halt
+        subst halt
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+        rcases h with h | h <;> subst h
+        · exact .pathLost
+        · exact .pathLostTerminate
   · intro h
     cases h with
     | initialTooSmallDrop hr hn => simp [outcomes, hr, hn]
     | initialTooSmallClose hr hn => simp [outcomes, hr, hn]
     | initialOk h => simp [outcomes, h]
+    | initialDiscard h => simp [outcomes, h]
     | datagramOk => simp [outcomes]
+    | datagramDiscard => simp [outcomes]
     | maxUdpPayload => simp [outcomes]
     | icmpBelowMinimum h => simp [outcomes, h]
     | icmpNoIncrease h hp => simp [outcomes, h, hp]
@@ -192,7 +230,7 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | icmpDefer h hp =>
       have : ¬ _ ≤ _ := Nat.not_le.mpr hp
       simp [outcomes, h, this]
-    | pathLost => simp [outcomes]
+    | @pathLost alt => cases alt <;> simp [outcomes]
     | pathLostTerminate => simp [outcomes]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
@@ -221,24 +259,27 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
 /-! ## 6. Send side
 
 No frame is governed by datagram size — the constraint is on the datagram — so
-`MaySend` is `True` everywhere and the real content of this section is
-`MaySendDatagram`, a predicate on the datagram the endpoint is about to send. -/
+`MaySend` is `True` everywhere and the real content of this section is the
+component's `MaySendDatagram` over `Spec.OutDatagram`. -/
 
-/-- The size-relevant summary of a datagram about to be sent. -/
-structure OutDatagram where
-  /-- UDP payload size (§14: "not the UDP or IP headers"). -/
-  size : Nat
-  /-- It carries an Initial packet. -/
-  carriesInitial : Bool
-  /-- That Initial packet is ack-eliciting (§14.1's server rule). -/
-  initialAckEliciting : Bool
-  /-- It is a PMTU probe (§14.2, §14.4). -/
-  isProbe : Bool
-  /-- It is ack-eliciting. -/
-  ackEliciting : Bool
-  /-- It carries a CONNECTION_CLOSE frame (§14.2's exception). -/
-  carriesConnectionClose : Bool
-  deriving DecidableEq, Repr
+/-- §14.1: does this datagram carry an Initial packet? -/
+def carriesInitial (d : OutDatagram) : Bool := d.packets.any (fun p => p.ptype == .initial)
+
+/-- §14.1: does it carry an *ack-eliciting* Initial packet?  Ack-elicitation is
+    `FrameRules.packetAckEliciting` on that packet's frames (Table 3, §12.4). -/
+def carriesAckElicitingInitial (d : OutDatagram) : Bool :=
+  d.packets.any (fun p => p.ptype == .initial && FrameRules.packetAckEliciting p.frames)
+
+/-- §14.4, line 5873: "PMTU probes are ack-eliciting packets."  A datagram is
+    ack-eliciting when one of the packets in it is. -/
+def ackEliciting (d : OutDatagram) : Bool :=
+  d.packets.any (fun p => FrameRules.packetAckEliciting p.frames)
+
+/-- §14.2's exception: does the datagram carry a CONNECTION_CLOSE frame? -/
+def carriesConnectionClose (d : OutDatagram) : Bool :=
+  d.packets.any (fun p => p.frames.any (fun f => match f with
+    | .connectionClose .. => true
+    | _ => false))
 
 /-- The MUSTs of §14 about a datagram this endpoint sends. -/
 def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
@@ -246,35 +287,40 @@ def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
   -- carrying Initial packets to at least ... 1200 bytes ... Similarly, a server
   -- MUST expand the payload of all UDP datagrams carrying ack-eliciting Initial
   -- packets to at least ... 1200 bytes."
-  (d.carriesInitial = true → s.role = .client ∨ d.initialAckEliciting = true →
+  (carriesInitial d = true → s.role = .client ∨ carriesAckElicitingInitial d = true →
       smallestMaxDatagramSize ≤ d.size) ∧
   -- §14.4, line 5873: "PMTU probes are ack-eliciting packets."
-  (d.isProbe = true → d.ackEliciting = true) ∧
+  (d.isPmtuProbe = true → ackEliciting d = true) ∧
   -- §14.2, line 5758: once the path is known not to support 1200 bytes, only
   -- PMTU probes and datagrams containing CONNECTION_CLOSE may still be sent.
-  (s.pathUsable = false → d.isProbe = true ∨ d.carriesConnectionClose = true)
+  (s.pathUsable = false → d.isPmtuProbe = true ∨ carriesConnectionClose d = true)
 
 def maySendDatagram (s : State) (d : OutDatagram) : Bool :=
-  (!d.carriesInitial || !(s.role == .client || d.initialAckEliciting) ||
-      smallestMaxDatagramSize ≤ d.size) &&
-  (!d.isProbe || d.ackEliciting) &&
-  (s.pathUsable || d.isProbe || d.carriesConnectionClose)
+  (!carriesInitial d || !(decide (s.role = .client) || carriesAckElicitingInitial d) ||
+      decide (smallestMaxDatagramSize ≤ d.size)) &&
+  (!d.isPmtuProbe || ackEliciting d) &&
+  (s.pathUsable || d.isPmtuProbe || carriesConnectionClose d)
 
 theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
     maySendDatagram s d = true ↔ MaySendDatagram s d := by
-  cases s with | mk role pm mds pu =>
-  cases d with | mk size ci iae ip ae cc =>
-  cases role <;> cases ci <;> cases iae <;> cases ip <;> cases ae <;> cases cc <;> cases pu <;>
-    simp [maySendDatagram, MaySendDatagram]
+  cases hci : carriesInitial d <;> cases hai : carriesAckElicitingInitial d <;>
+    cases hpr : d.isPmtuProbe <;> cases hae : ackEliciting d <;>
+    cases hcc : carriesConnectionClose d <;> cases hpu : s.pathUsable <;>
+    cases hrole : s.role <;>
+    simp [maySendDatagram, MaySendDatagram, hci, hai, hpr, hae, hcc, hpu, hrole]
 
 /-- §14.2/§18.2 advice, which is SHOULD-strength and therefore kept out of
     `MaySendDatagram`: an implementation that ignores it still conforms. -/
 def RecommendedDatagram (s : State) (d : OutDatagram) : Prop :=
   -- §14.2, line 5753: "All QUIC packets that are not sent in a PMTU probe
   -- SHOULD be sized to fit within the maximum datagram size".
-  (d.isProbe = false → d.size ≤ s.maxDatagramSize) ∧
+  (d.isPmtuProbe = false → d.size ≤ s.maxDatagramSize) ∧
   -- §14.2: a PMTU probe is by definition larger than the current maximum.
-  (d.isProbe = true → s.maxDatagramSize < d.size) ∧
+  (d.isPmtuProbe = true → s.maxDatagramSize < d.size) ∧
+  -- §14.2, line 5749: "QUIC endpoints SHOULD NOT send datagrams larger than the
+  -- smallest allowed maximum datagram size" — "in the absence of these
+  -- mechanisms", i.e. when neither DPLPMTUD nor PMTUD is running.
+  (s.runsPmtuDiscovery = false → d.size ≤ smallestMaxDatagramSize) ∧
   -- §14, line 5679 with §18.2, line 6966: stay within what the peer said it is
   -- willing to receive, once that value is known.
   (∀ v, s.peerMaxUdpPayload = some v → d.size ≤ v)
@@ -300,6 +346,9 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
   MaySend := MaySend
   maySend := maySend
   maySend_iff := maySend_iff
+  MaySendDatagram := MaySendDatagram
+  maySendDatagram := maySendDatagram
+  maySendDatagram_iff := maySendDatagram_iff
 
 /-! ## 8. Named theorems -/
 
@@ -313,13 +362,24 @@ theorem server_never_processes_small_initial {s : State} {n : Nat} {o : Out}
   | initialTooSmallDrop => exact Or.inl rfl
   | initialTooSmallClose => exact Or.inr rfl
   | initialOk hc => exact absurd ⟨hr, hn⟩ hc
+  | initialDiscard hc => exact absurd ⟨hr, hn⟩ hc
 
 /-- §14, line 5695: "an endpoint MUST NOT close a connection when it receives a
     datagram that does not meet size constraints".  For every datagram that does
     not carry an Initial packet — whatever its size — no outcome is an error. -/
 theorem no_close_on_datagram_size {s : State} {n : Nat} {o : Out}
     (h : Step s (.recvDatagram n) o) : ∀ c, o ≠ .error c := by
-  cases h; intro c; simp
+  cases h <;> (intro c; simp)
+
+/-- §14 line 5697, §5.2 line 1878 and §11.1 line 4485: discarding a received
+    datagram is always permitted, whatever its size; this component never forces
+    an endpoint to process one. -/
+theorem drop_always_permitted (s : State) (n : Nat) :
+    Step s (.recvDatagram n) .drop ∧ Step s (.recvInitial n) .drop := by
+  refine ⟨.datagramDiscard, ?_⟩
+  by_cases h : s.role = .server ∧ n < smallestMaxDatagramSize
+  · exact .initialTooSmallDrop h.1 h.2
+  · exact .initialDiscard h
 
 /-- §14.2.1: ICMP never raises the endpoint's maximum datagram size. -/
 theorem icmp_never_increases {s s' : State} {p : Nat} {fx : List Effect}
@@ -340,16 +400,25 @@ theorem icmp_below_minimum_ignored {s : State} {p : Nat} {o : Out}
   | icmpReduce h => exact absurd hp h
   | icmpDefer h => exact absurd hp h
 
+/-- §14.2, line 5762: the connection error is permitted only when no alternative
+    path can be found; while one exists, the path is abandoned but the
+    connection is not. -/
+theorem no_error_while_alternative_exists {s : State} {o : Out}
+    (h : Step s (.pathBelowMinimum true) o) :
+    o = .ok { s with pathUsable := false } [.ceaseSending] := by
+  cases h with
+  | pathLost => rfl
+
 /-- §14.1: every datagram a client sends that carries an Initial packet is at
     least 1200 bytes. -/
 theorem client_initial_expanded {s : State} {d : OutDatagram}
-    (hr : s.role = .client) (hi : d.carriesInitial = true) (h : MaySendDatagram s d) :
+    (hr : s.role = .client) (hi : carriesInitial d = true) (h : MaySendDatagram s d) :
     smallestMaxDatagramSize ≤ d.size := h.1 hi (Or.inl hr)
 
 /-- §14.1: every datagram a server sends that carries an ack-eliciting Initial
     packet is at least 1200 bytes. -/
 theorem server_ackEliciting_initial_expanded {s : State} {d : OutDatagram}
-    (hi : d.carriesInitial = true) (ha : d.initialAckEliciting = true)
+    (hi : carriesInitial d = true) (ha : carriesAckElicitingInitial d = true)
     (h : MaySendDatagram s d) : smallestMaxDatagramSize ≤ d.size :=
   h.1 hi (Or.inr ha)
 
@@ -357,9 +426,9 @@ theorem server_ackEliciting_initial_expanded {s : State} {d : OutDatagram}
     CONNECTION_CLOSE datagrams may be sent — and in particular the endpoint can
     no longer send an Initial packet on it. -/
 theorem no_initial_on_dead_path {s : State} {d : OutDatagram}
-    (hp : s.pathUsable = false) (_hi : d.carriesInitial = true)
-    (hnc : d.carriesConnectionClose = false) (h : MaySendDatagram s d) :
-    d.isProbe = true := by
+    (hp : s.pathUsable = false) (_hi : carriesInitial d = true)
+    (hnc : carriesConnectionClose d = false) (h : MaySendDatagram s d) :
+    d.isPmtuProbe = true := by
   rcases h.2.2 hp with h' | h'
   · exact h'
   · exact absurd h' (by simp [hnc])
@@ -374,7 +443,8 @@ theorem maxDatagramSize_ge_min {s₀ s : State} (h0 : Inv s₀)
 
 private def srv : State :=
   { role := .server, peerMaxUdpPayload := none,
-    maxDatagramSize := smallestMaxDatagramSize, pathUsable := true }
+    maxDatagramSize := smallestMaxDatagramSize, pathUsable := true,
+    runsPmtuDiscovery := false }
 private def cli : State := { srv with role := .client }
 
 -- §14.1: "A server MUST discard an Initial packet that is carried in a UDP
@@ -383,13 +453,19 @@ example : component.step srv (.recvInitial 1199) = .drop := by decide
 -- … and it MAY instead close with PROTOCOL_VIOLATION, but nothing else.
 example : component.accepts srv (.recvInitial 1199) (.error .protocolViolation) = true := by decide
 example : component.accepts srv (.recvInitial 1199) (.ok srv [.deliver]) = false := by decide
--- A full-size Initial is processed.
+-- A full-size Initial is processed …
 example : component.step srv (.recvInitial 1200) = .ok srv [.deliver] := by decide
--- A client has no such rule: it processes a short Initial datagram from the
--- server (§14.1 constrains the sender, and only the server checks).
+-- … or discarded: §5.2 line 1878 and §11.1 line 4485 permit discarding an
+-- Initial packet, which lacks strong integrity protection.
+example : component.accepts srv (.recvInitial 1200) .drop = true := by decide
+-- A client has no size rule for Initials it receives, and may still discard.
 example : component.step cli (.recvInitial 200) = .ok cli [.deliver] := by decide
--- §14, line 5695: receiving an undersized datagram never closes the connection.
+example : component.accepts cli (.recvInitial 200) .drop = true := by decide
+-- §14 lines 5695/5697: receiving an undersized datagram never closes the
+-- connection, and discarding it is permitted.
 example : component.step srv (.recvDatagram 20) = .ok srv [.deliver] := by decide
+example : component.accepts srv (.recvDatagram 20) .drop = true := by decide
+example : component.accepts srv (.recvDatagram 20) (.error .protocolViolation) = false := by decide
 -- §14.2.1: "MUST ignore an ICMP message that claims the PMTU has decreased
 -- below QUIC's smallest allowed maximum datagram size."
 example : component.step { cli with maxDatagramSize := 1452 } (.icmpPtb 1000) =
@@ -403,24 +479,42 @@ example : component.accepts { cli with maxDatagramSize := 1452 } (.icmpPtb 1280)
 -- §14.2.1: "MUST NOT increase PMTU based on ICMP messages."
 example : component.step { cli with maxDatagramSize := 1280 } (.icmpPtb 1452) =
     .ok { cli with maxDatagramSize := 1280 } [] := by decide
--- §14.2: a path that cannot carry 1200 bytes stops the flow of packets.
-example : component.step cli .pathBelowMinimum =
+-- §14.2: a path that cannot carry 1200 bytes stops the flow of packets …
+example : component.step cli (.pathBelowMinimum true) =
     .ok { cli with pathUsable := false } [.ceaseSending] := by decide
+-- … and NO_VIABLE_PATH is permitted only when no alternative path exists.
+example : component.accepts cli (.pathBelowMinimum true) (.error .noViablePath) = false := by decide
+example : component.accepts cli (.pathBelowMinimum false) (.error .noViablePath) = true := by decide
+
+-- Send side, over `Spec.OutDatagram`.
+private def initialPkt (ackEliciting : Bool) : OutPacket :=
+  { ptype := .initial,
+    frames := if ackEliciting then [.crypto 0 .empty] else [.ack 0 0 0 #[] none] }
+private def oneRttPkt : OutPacket := { ptype := .oneRtt, frames := [.ping] }
+private def closePkt : OutPacket :=
+  { ptype := .oneRtt, frames := [.connectionClose 0 none .empty] }
+
 -- §14.1: a client's Initial datagram must be expanded to 1200 bytes.
-example : maySendDatagram cli
-    { size := 1200, carriesInitial := true, initialAckEliciting := true,
-      isProbe := false, ackEliciting := true, carriesConnectionClose := false } = true := by decide
-example : maySendDatagram cli
-    { size := 1199, carriesInitial := true, initialAckEliciting := true,
-      isProbe := false, ackEliciting := true, carriesConnectionClose := false } = false := by decide
+example : component.maySendDatagram cli
+    { size := 1200, packets := [initialPkt true] } = true := by decide
+example : component.maySendDatagram cli
+    { size := 1199, packets := [initialPkt true] } = false := by decide
 -- §14.1: a server's *non*-ack-eliciting Initial (a pure ACK) need not be.
-example : maySendDatagram srv
-    { size := 100, carriesInitial := true, initialAckEliciting := false,
-      isProbe := false, ackEliciting := false, carriesConnectionClose := false } = true := by decide
+example : component.maySendDatagram srv
+    { size := 100, packets := [initialPkt false] } = true := by decide
+example : component.maySendDatagram srv
+    { size := 100, packets := [initialPkt true] } = false := by decide
 -- §14.4: "PMTU probes are ack-eliciting packets."
-example : maySendDatagram cli
-    { size := 1400, carriesInitial := false, initialAckEliciting := false,
-      isProbe := true, ackEliciting := false, carriesConnectionClose := false } = false := by decide
+example : component.maySendDatagram cli
+    { size := 1400, packets := [{ ptype := .oneRtt, frames := [.padding 100] }],
+      isPmtuProbe := true } = false := by decide
+example : component.maySendDatagram cli
+    { size := 1400, packets := [oneRttPkt], isPmtuProbe := true } = true := by decide
+-- §14.2: on a dead path only probes and CONNECTION_CLOSE may still be sent.
+example : component.maySendDatagram { cli with pathUsable := false }
+    { size := 100, packets := [oneRttPkt] } = false := by decide
+example : component.maySendDatagram { cli with pathUsable := false }
+    { size := 100, packets := [closePkt] } = true := by decide
 
 /-! ## 10. Coverage and notes
 
@@ -430,28 +524,36 @@ Assigned range: lines 5640–5919 (§14) and, for the size constant, 5920–5958
 | Text (line) | Sentence | Encoded as |
 |---|---|---|
 | §14 (5649) | QUIC MUST NOT be used if the path cannot support 1200 bytes | `smallestMaxDatagramSize`, `Step.pathLost`, `MaySendDatagram` third clause |
-| §14 (5687) | UDP datagrams MUST NOT be fragmented at the IP layer; DF bit MUST be set | out of scope: below the transport, not observable in the model |
-| §14 (5695) | MUST NOT close a connection on a datagram that fails size constraints; MAY discard | `Step.datagramOk`, theorem `no_close_on_datagram_size` |
+| §14 (5679) | enforcement of `max_udp_payload_size` might limit datagram size | `RecommendedDatagram` fourth clause; no normative keyword here, and §18.2 line 6966 makes it path-MTU-strength, i.e. SHOULD |
+| §14 (5687) | UDP datagrams MUST NOT be fragmented at the IP layer; DF bit MUST be set | out of scope: below the transport, not observable in this model |
+| §14 (5695) | MUST NOT close a connection on a datagram that fails size constraints | `Step.datagramOk`, theorem `no_close_on_datagram_size` |
+| §14 (5697) | "endpoint MAY however discard such datagrams" | `Step.datagramDiscard`, theorem `drop_always_permitted` |
 | §14.1 (5701) | a client MUST expand Initial-carrying datagrams to ≥ 1200 | `MaySendDatagram` first clause, `client_initial_expanded` |
 | §14.1 (5706) | a server MUST expand ack-eliciting-Initial-carrying datagrams to ≥ 1200 | `MaySendDatagram` first clause, `server_ackEliciting_initial_expanded` |
-| §14.1 (5723) | Initial datagrams MAY exceed 1200 bytes | `MaySendDatagram` bounds only from below |
+| §14.1 (5723) | Initial datagrams MAY exceed 1200 bytes | `MaySendDatagram` bounds size only from below |
 | §14.1 (5727) | a server MUST discard an Initial in a datagram < 1200 | `Step.initialTooSmallDrop`, `server_never_processes_small_initial` |
 | §14.1 (5729) | a server MAY close with PROTOCOL_VIOLATION instead | `Step.initialTooSmallClose` |
-| §14.1 (5733) | the server MUST limit bytes sent before validating the client's address | out of scope: WP5 `AddressValidation` (anti-amplification) |
-| §14.2 (5746) | SHOULD use DPLPMTUD/PMTUD; SHOULD NOT exceed the smallest maximum otherwise | `RecommendedDatagram` first clause |
-| §14.2 (5753) | non-probe packets SHOULD fit the maximum datagram size | `RecommendedDatagram` first clause |
+| §14.1 (5733) | the server MUST also limit bytes sent before validating the address | out of scope: WP5 `AddressValidation` (anti-amplification) |
+| §14.2 (5746) | an endpoint SHOULD use DPLPMTUD or PMTUD | advice, not checkable here: a choice of mechanism, not a constraint on an event or a datagram; its consequence is the next row |
+| §14.2 (5749) | absent those mechanisms, SHOULD NOT send datagrams larger than 1200 | `RecommendedDatagram` third clause, gated on `State.runsPmtuDiscovery` |
+| §14.2 (5753) | non-probe packets SHOULD be sized to fit the maximum datagram size | `RecommendedDatagram` first clause |
 | §14.2 (5758) | MUST cease sending except probes and CONNECTION_CLOSE below 1200 PMTU | `Step.pathLost`, `MaySendDatagram` third clause, `no_initial_on_dead_path` |
-| §14.2 (5762) | MAY terminate the connection if no alternative path | `Step.pathLostTerminate` |
-| §14.2 (5773) | SHOULD keep a maximum datagram size per address pair | out of scope: one `State` is one path; WP10 `Migration` owns the path table |
+| §14.2 (5762) | MAY terminate the connection if an alternative path cannot be found | `Step.pathLostTerminate`, gated on the event's `alternativeExists`; `no_error_while_alternative_exists` |
+| §14.2 (5774) | SHOULD maintain a maximum datagram size per address pair | advice, not checkable here: one `State` is one path, and the table of paths is WP10 `Migration` |
+| §14.2 (5778) | MAY be more conservative in computing the maximum datagram size | permitted: `MaySendDatagram` never requires a datagram to be *large*, except Initials |
 | §14.2.1 (5793) | MUST ignore an ICMP message claiming PMTU < 1200 | `Step.icmpBelowMinimum`, `icmp_below_minimum_ignored` |
-| §14.2.1 (5803) | SHOULD validate ICMP messages; validation MUST match addresses/ports | out of scope: the `icmpPtb` event is a message that already passed validation (addresses and ports are not in this model) |
+| §14.2.1 (5803) | SHOULD validate ICMP messages; validation MUST match addresses and ports | advice, not checkable here: the `icmpPtb` event is a message that already passed validation, and addresses and ports are not in this component's state |
+| §14.2.1 (5810) | SHOULD ignore all ICMP messages that fail validation | same as the row above: a message that fails validation never becomes an event |
 | §14.2.1 (5813) | MUST NOT increase PMTU based on ICMP | `Step.icmpNoIncrease`, `icmp_never_increases` |
 | §14.2.1 (5814) | a reduction MAY be provisional | `Step.icmpDefer` |
-| §14.3 (5829–5869) | DPLPMTUD parameters and states (BASE_PLPMTU, MPS, SEARCH_COMPLETE) | out of scope by PLAN §1: the search algorithm is excluded, only its constraints are modelled |
+| §14.3 (5837) | SHOULD set BASE_PLPMTU consistently with 1200 | advice, not checkable here: a DPLPMTUD internal parameter, and the search algorithm is out of scope by PLAN §1 |
+| §14.3 (5841–5869) | DPLPMTUD MPS per address pair, BASE state, ICMP validation | out of scope by PLAN §1: only the constraints on what may be sent are modelled |
 | §14.4 (5873) | PMTU probes are ack-eliciting packets | `MaySendDatagram` second clause |
-| §14.4 (5885) | loss of a probe SHOULD NOT trigger a congestion reaction | out of scope: congestion control is RFC 9002 |
-| §14.4.1 (5894–5918) | how to build a probe that quotes a Source Connection ID | out of scope: advice, no normative keyword |
+| §14.4 (5889) | loss of a probe SHOULD NOT trigger a congestion reaction | out of scope: congestion control is RFC 9002 |
+| §14.4.1 (5894–5918) | how to build a probe that quotes a Source Connection ID | advice, not checkable here: no normative keyword, and it constrains only what an ICMP message will quote |
 | §15 (5924) | version 0x00000000 is reserved for version negotiation | `Spec/VersionNegotiation.lean` |
+| §5.2 (1878) | invalid Initial/Retry/VN packets MAY be discarded | `Step.initialDiscard` (the Initial half; Retry is WP5, Version Negotiation is `Spec/VersionNegotiation.lean`) |
+| §11.1 (4485) | MAY discard an invalid Initial packet, even where an error is mandated | `Step.initialDiscard`; the "even where mandated" half is WP12's, which must union this `.drop` with the error outcomes other components require |
 
 NOTES
 
@@ -463,20 +565,37 @@ NOTES
   reading encoded is that the specific rule wins — `Step.initialTooSmallClose`
   exists, and `no_close_on_datagram_size` is therefore stated only for
   `.recvDatagram`, not for `.recvInitial`.
-- "A server MUST discard an Initial packet" is about a *packet*, but this model
-  handles a datagram as a whole, so `.drop` here means the Initial packet is
-  discarded.  A datagram smaller than 1200 bytes cannot usefully coalesce
-  anything behind a conforming Initial, so nothing is lost; a component that
-  wants per-packet granularity is WP12's `Endpoint`.
-- The `max_udp_payload_size` limit is SHOULD-strength: §18.2 says it constrains
-  datagram size "in the same way as the path MTU", and the path-MTU rule (§14.2
-  line 5753) is a SHOULD.  It is therefore in `RecommendedDatagram`, not in
-  `MaySendDatagram`, so that an implementation that overruns the peer's
+- **Discarding is always permitted.**  §14 line 5697 lets an endpoint discard a
+  datagram that fails a size constraint, but this component cannot see which
+  constraint a given datagram had to meet — §8.1's and §8.2.1's 1200-byte rules
+  for path validation belong to WP5, which sees the frames.  Rather than invent
+  a flag on the event, `Step.datagramDiscard` permits the discard for any
+  datagram, and `Step.initialDiscard` does the same for Initial packets on the
+  strength of §5.2 line 1878 and §11.1 line 4485.  Nothing is lost: §14 has no
+  "MUST process" sentence, so this component never had grounds to force
+  delivery, and the rules that do live in the frame-level components.
+- **`.drop` is per-datagram here.**  "A server MUST discard an Initial packet" is
+  about a *packet*; this model handles a datagram as a whole, so `.drop` means
+  the Initial packet is discarded.  A datagram smaller than 1200 bytes cannot
+  usefully coalesce anything behind a conforming Initial; a component that wants
+  per-packet granularity is WP12's `Endpoint`.
+- **NO_VIABLE_PATH.**  §14.2 line 5762's MAY is gated on "if an alternative path
+  cannot be found", which the event now carries.  §8.2.4 line 3262 hedges the
+  same permission with "only possible if the network path exists but does not
+  support the required MTU" — exactly the situation `pathBelowMinimum`
+  describes, which is why this component owns the error while `PathValidation`
+  (its NOTES 6) deliberately does not: after a failed *probe* nothing is known
+  about the MTU, so the error is not permitted there.
+- The `max_udp_payload_size` limit is SHOULD-strength: §18.2 line 6966 says it
+  constrains datagram size "in the same way as the path MTU", and the path-MTU
+  rule (§14.2 line 5753) is a SHOULD.  It is therefore in `RecommendedDatagram`,
+  not in `MaySendDatagram`, so that an implementation that overruns the peer's
   advertised limit is not rejected by the differential harness.
 - §14.4's "PMTU probes are ack-eliciting packets" is declarative, not a MUST.
-  It is encoded in `MaySendDatagram` anyway, because `isProbe` is the model's
-  own annotation of a datagram: a datagram that is not ack-eliciting simply is
-  not a probe.
+  It is encoded in `MaySendDatagram` anyway, because `isPmtuProbe` is the
+  sender's own annotation of a datagram: a datagram that is not ack-eliciting
+  simply is not a probe.  Ack-elicitation is read off the frames with
+  `FrameRules.packetAckEliciting`, so the two packages cannot drift apart.
 - `maxDatagramSize` only ever decreases in this component (ICMP).  Raising it is
   the DPLPMTUD search, which is out of scope; a caller that implements the
   search sets the field directly.

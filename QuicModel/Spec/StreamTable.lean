@@ -1,0 +1,264 @@
+import QuicModel.Spec.StreamTable.Theorems
+
+/-
+  WP9 StreamTable, part 5 of 5: examples from the text (§9), the coverage table
+  and the notes (§10).
+
+  All the streams of one connection, as seen by one endpoint: stream creation
+  and implicit opening (§2.1), the stream-count limits of §4.6, connection-level
+  flow control (§4.1, §4.5, §19.9) and the routing of every stream-scoped frame
+  to WP2's `Spec.Stream.component`.
+
+  * `StreamTable/Defs.lean`    — §1 state, events, effects, routing vocabulary
+  * `StreamTable/Step.lean`    — §2–§4 `Step`, `outcomes`, `outcomes_iff`
+  * `StreamTable/Inv.lean`     — §5 `Inv`, `step_inv`
+  * `StreamTable/Send.lean`    — §6 `MaySend`, §7 the `Component`
+  * `StreamTable/Theorems.lean`— §8 named theorems
+  * this file                  — §9 examples, §10 coverage and notes
+
+  Supersedes `Spec/Template.lean`'s stream-count component (see NOTES).
+-/
+namespace Quic.Spec.StreamTable
+
+/-! ## 9. Examples (scenarios from the text) -/
+
+private def lim : Limits :=
+  { maxData := 100, maxStreamDataBidiLocal := 100, maxStreamDataBidiRemote := 100,
+    maxStreamDataUni := 100, maxStreamsBidi := 3, maxStreamsUni := 3 }
+
+/-- A server that has advertised, and been told, the limits of `lim`. -/
+private def srv : State := init .server lim lim
+
+/-- Run a list of events through the reference implementation. -/
+private def run (s : State) : List Event → State
+  | [] => s
+  | e :: es => run ((component.step s e).next s) es
+
+-- §19.11, line 7812: "a server that receives a unidirectional stream limit of 3
+-- is permitted to open stream 3, 7, and 11, but not stream 15."
+example : component.step srv (.appOpenStream .uni) =
+    .ok ((component.step srv (.appOpenStream .uni)).next srv) [.streamOpened ⟨3⟩] := by decide
+example : (run srv [.appOpenStream .uni]).nextLocal .uni = ⟨7⟩ := by decide
+example : (run srv [.appOpenStream .uni, .appOpenStream .uni]).nextLocal .uni = ⟨11⟩ := by decide
+example : component.step (run srv [.appOpenStream .uni, .appOpenStream .uni, .appOpenStream .uni])
+    (.appOpenStream .uni) = .drop := by decide
+
+-- §2.1, line 712: a STREAM frame for client-initiated bidirectional stream 8
+-- (index 2) opens streams 0 and 4 as well, in increasing order …
+example : component.step srv (.stream ⟨8⟩ (.recv (.recvStream 0 5 false))) =
+    .ok ((component.step srv (.stream ⟨8⟩ (.recv (.recvStream 0 5 false)))).next srv)
+      [.streamOpened ⟨0⟩, .streamOpened ⟨4⟩, .streamOpened ⟨8⟩,
+       .stream ⟨8⟩ (.recv (.dataAvailable 5))] := by decide
+-- … and they really exist afterwards, while stream 12 does not.
+example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨0⟩ = true := by decide
+example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨4⟩ = true := by decide
+example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨12⟩ = false := by decide
+
+-- §4.6, line 1554: stream 12 is index 3, beyond the limit of 3 we advertised.
+example : component.step srv (.stream ⟨12⟩ (.recv (.recvStream 0 5 false))) =
+    .error .streamLimitError := by decide
+
+-- §19.8, line 7638: stream 1 is server-initiated, so at a server a STREAM frame
+-- for it before we created it is a STREAM_STATE_ERROR …
+example : component.step srv (.stream ⟨1⟩ (.recv (.recvStream 0 5 false))) =
+    .error .streamStateError := by decide
+-- … and so are the other four frames of §19.4/§19.5/§19.10/§19.13.
+example : component.step srv (.stream ⟨1⟩ (.recv (.recvResetStream 0 5))) =
+    .error .streamStateError := by decide
+example : component.step srv (.stream ⟨1⟩ (.send (.recvStopSending 0))) =
+    .error .streamStateError := by decide
+example : component.step srv (.stream ⟨1⟩ (.send (.recvMaxStreamData 5))) =
+    .error .streamStateError := by decide
+example : component.step srv (.stream ⟨1⟩ (.recv (.recvStreamDataBlocked 5))) =
+    .error .streamStateError := by decide
+
+-- §19.10, line 7736 through the routing: MAX_STREAM_DATA for a peer-initiated
+-- *unidirectional* stream opens it and then fails, because it is receive-only.
+example : component.step srv (.stream ⟨2⟩ (.send (.recvMaxStreamData 5))) =
+    .error .streamStateError := by decide
+
+-- §19.9, line 7712: 60 bytes on stream 0 and 60 on stream 4 exceed our MAX_DATA
+-- of 100, although each is within its own stream limit of 100.
+example : component.step (run srv [.stream ⟨0⟩ (.recv (.recvStream 0 60 false))])
+    (.stream ⟨4⟩ (.recv (.recvStream 0 60 false))) = .error .flowControlError := by decide
+-- §4.5, line 1495: a reset stream keeps consuming its final size, so the same
+-- total is reached through RESET_STREAM.
+example : component.step (run srv [.stream ⟨0⟩ (.recv (.recvResetStream 7 60))])
+    (.stream ⟨4⟩ (.recv (.recvStream 0 60 false))) = .error .flowControlError := by decide
+
+-- §2.1, line 687: a stream that has been reset is still "used"; its ID is never
+-- available again.
+example : (run srv [.stream ⟨0⟩ (.recv (.recvResetStream 7 5))]).has ⟨0⟩ = true := by decide
+
+-- §19.11, line 7809: a MAX_STREAMS that does not increase the limit is ignored,
+-- a larger one raises it.
+example : component.step srv (.recvMaxStreams .uni 2) = .ok srv [] := by decide
+example : component.step srv (.recvMaxStreams .uni 5) =
+    .ok ((component.step srv (.recvMaxStreams .uni 5)).next srv)
+      [.streamsAvailable .uni 5] := by decide
+-- §19.14, line 7919: either error code is acceptable for an oversized value.
+example : component.accepts srv (.recvStreamsBlocked .bidi (2 ^ 60 + 1))
+    (.error .streamLimitError) = true := by decide
+example : component.accepts srv (.recvStreamsBlocked .bidi (2 ^ 60 + 1))
+    (.error .frameEncodingError) = true := by decide
+example : component.accepts srv (.recvStreamsBlocked .bidi (2 ^ 60 + 1)) (.ok srv []) = false := by
+  decide
+
+-- Following an implementation we cannot see inside (what the WP13 harness does).
+example : component.track srv (.recvMaxData 500) (.ok [.dataCreditAvailable 500]) =
+    some { srv with maxDataPeer := 500 } := by decide
+-- An observation the spec does not permit empties the candidate set.
+example : component.trackSet [srv] (.stream ⟨12⟩ (.recv (.recvStream 0 5 false)))
+    (Obs.ok []).matchesLoosely = [] := by decide
+
+-- Send side.  §4.1, line 1357: advertising a smaller limit is not an error …
+example : component.maySend srv (.maxData 1) = true := by decide
+example : component.maySend srv (.maxStreams .bidi 1) = true := by decide
+-- … but 2^60 is the ceiling for MAX_STREAMS (§19.11, line 7802).
+example : component.maySend srv (.maxStreams .bidi (2 ^ 60 + 1)) = false := by decide
+-- §13.3, line 5409: a blocked frame carries the limit in force.
+example : component.maySend srv (.dataBlocked 100) = true := by decide
+example : component.maySend srv (.dataBlocked 99) = false := by decide
+example : component.maySend srv (.streamsBlocked .uni 3) = true := by decide
+-- Nothing may be sent for a stream that does not exist yet.
+example : component.maySend srv (.stream 3 0 false ByteArray.empty) = false := by decide
+-- After opening stream 3, a STREAM frame the application has written is allowed …
+private def srvOpen : State :=
+  run srv [.appOpenStream .uni, .stream ⟨3⟩ (.send (.appWrite 10))]
+example : maySend srvOpen (.stream 3 0 false (ByteArray.mk #[1, 2, 3])) = true := by decide
+-- … but not beyond the connection-level credit the peer gave us: with a peer
+-- that allows 1000 bytes on the stream but only 100 on the connection, a frame
+-- ending at offset 103 is within the stream limit and outside the connection's.
+private def limBig : Limits := { lim with maxStreamDataUni := 1000 }
+private def srvBig : State :=
+  run (init .server lim limBig) [.appOpenStream .uni, .stream ⟨3⟩ (.send (.appWrite 200))]
+example : maySend srvBig (.stream 3 0 false (ByteArray.mk #[1, 2, 3, 4, 5])) = true := by decide
+example : maySend srvBig (.stream 3 98 false (ByteArray.mk #[1, 2, 3, 4, 5])) = false := by decide
+
+/-! ## 10. Coverage and notes
+
+Assigned text: §2.1 (677–732), §4–§4.3 (1293–1460), §4.6 (1527–1576), the
+MAX_DATA / MAX_STREAMS / DATA_BLOCKED / STREAMS_BLOCKED frame sections
+(7689–7717, 7773–7856, 7884–7922) and the "locally-initiated stream that has not
+yet been created" half of §19.4/§19.5/§19.8/§19.10/§19.13.
+
+| Text (line) | Sentence | Encoded as |
+|---|---|---|
+| §2.1 (687) | a QUIC endpoint MUST NOT reuse a stream ID | `State.has` (high-water marks), `no_reuse`, `has_forever` |
+| §2.1 (697–702) | the two low bits give initiator and directionality | `Spec.StreamId` (WP0), used throughout |
+| §2.1 (712) | a stream ID used out of order opens all lower-numbered streams of that type | `State.openThrough`, `Step.openOk`, `openedEffects`, `has_lower`, `openOk_opens_lower` |
+| §4 (1298) | streams are flow controlled individually and across the connection | `State.recvTotal`/`maxDataLocal` here, `Stream.Recv.maxData` in WP2 |
+| §4 (1304) | the cumulative number of streams a peer can initiate is limited | `State.maxStreamsLocal`/`maxStreamsPeer` |
+| §4 (1308) | CRYPTO data is not flow controlled this way | out of scope: WP11 (CRYPTO stream) |
+| §4.1 (1330) | senders MUST NOT send data in excess of either limit | `connSendBlocked`, `Step.existSendBlocked`, `MaySend`, `sentTotal_le_peer` |
+| §4.1 (1331) | initial limits come from transport parameters | `Limits`, `init` |
+| §4.1 (1349) | a receiver can advertise a larger stream limit with MAX_STREAM_DATA | WP2 (`Recv.Step.sendMaxStreamData`), routed here |
+| §4.1 (1353) | a receiver can advertise a larger connection limit with MAX_DATA | `Step.sendMaxData`, `Step.maxDataRaise` |
+| §4.1 (1355) | a receiver maintains a cumulative sum of bytes received on all streams | `State.recvTotal`, `afterStep`, `recvTotal_eq_sum` |
+| §4.1 (1357) | advertising a smaller limit is not an error but has no effect | `Step.sendMaxData` (takes `max`), `MaySend` does *not* require an increase |
+| §4.1 (1359) | FLOW_CONTROL_ERROR if the sender violates the advertised limits | `Step.existFlowControl`, `Step.openFlowControl`, `recvTotal_le_advertised` |
+| §4.1 (1361) | a sender MUST ignore MAX_DATA frames that do not increase limits | `Step.maxDataStale` |
+| §4.1 (1368–1377) | a blocked sender SHOULD send DATA_BLOCKED, periodically | `Recommended`; `MaySend` permits it whenever the value is the limit in force |
+| §4.2 (1395–1429) | when and how much credit to advertise; MAY send repeatedly; autotuning | out of scope by assignment (advice); the "MUST NOT wait for DATA_BLOCKED" of line 1422 constrains a strategy, not an action — see NOTES |
+| §4.3 (1437–1455) | flow control performance | out of scope: no observable rule |
+| §4.5 (1495) | the receiver MUST use the final size to account for all bytes in its connection-level flow controller | `recvHighest` (RESET_STREAM sets `highest` to the final size in WP2), example at §4.5 above |
+| §4.6 (1531) | only streams with an index below the limit may be opened | `Step.openLimit`, `Step.openLocalBlocked` |
+| §4.6 (1535) | separate limits for unidirectional and bidirectional streams | `Counts`, `Opened` |
+| §4.6 (1543) | a max_streams value above 2^60: FRAME_ENCODING_ERROR (frame) / TRANSPORT_PARAMETER_ERROR (parameter) | `Step.maxStreamsTooLarge`; the transport-parameter half is WP1 |
+| §4.6 (1553) | endpoints MUST NOT exceed the peer's limit; a frame beyond the limit we sent is a STREAM_LIMIT_ERROR | `Step.openLimit`, `State.withinPeerStreamLimit`, `openedLocal_le_peer`, `openedRemote_le_advertised`, `not_has_of_exceeding_limit` |
+| §4.6 (1559) | a MAX_STREAMS that does not increase the limit MUST be ignored | `Step.maxStreamsStale` |
+| §4.6 (1563) | implementations decide when to advertise more streams | `Step.sendMaxStreams` is an event: the model tracks what was advertised, not when |
+| §4.6 (1569) | an endpoint unable to open a stream SHOULD send STREAMS_BLOCKED; MUST NOT wait for it | `Recommended`; see NOTES |
+| §19.9 (7710) | the sum of the final sizes on all streams MUST NOT exceed the advertised value; FLOW_CONTROL_ERROR otherwise | `connRecvViolation`, `recvTotal_le_advertised`, `recvTotal_eq_sum` |
+| §19.10 (7734) | MAX_STREAM_DATA for a locally-initiated stream not yet created: STREAM_STATE_ERROR | `Step.localNotCreated` |
+| §19.11 (7802) | MAX_STREAMS above 2^60: FRAME_ENCODING_ERROR | `Step.maxStreamsTooLarge` |
+| §19.11 (7809) | MAX_STREAMS that do not increase the limit MUST be ignored | `Step.maxStreamsStale` |
+| §19.11 (7812) | an endpoint MUST NOT open more streams than permitted; STREAM_LIMIT_ERROR if a peer does | `Step.openLocalBlocked`, `Step.openLimit` |
+| §19.11 (7820) | the limit counts closed streams too | high-water marks never decrease (`opened_step`) |
+| §19.12 (7828) | a sender SHOULD send DATA_BLOCKED when blocked | `Recommended`, `Step.dataBlocked` |
+| §19.13 (7863) | STREAM_DATA_BLOCKED for a locally-initiated stream not yet created | `Step.localNotCreated` |
+| §19.14 (7899) | STREAMS_BLOCKED when unable to open a stream | `Recommended` |
+| §19.14 (7903) | STREAMS_BLOCKED does not open the stream | `Step.streamsBlockedOk` (state unchanged) |
+| §19.14 (7919) | STREAMS_BLOCKED above 2^60: STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR | `Step.streamsBlockedTooLarge₁/₂` |
+| §19.4 (7431), §19.5 (7476), §19.8 (7638), §19.10 (7736), §19.13 (7864) | the *send-only / receive-only* halves of those sentences | WP2 (`Stream.Step.sendMissing`/`recvMissing`), reached through this file's routing |
+| §13.3 (5409) | blocked frames carry the limit in force when transmitted | `MaySend` for DATA_BLOCKED / STREAMS_BLOCKED |
+| §13.3 (rest) | retransmission and loss | out of scope by assignment |
+| §2.3 (777) | stream prioritisation | out of scope by assignment |
+
+NOTES
+
+* **Existence is the high-water mark, not the table.**  §2.1 opens every
+  lower-numbered stream of a type implicitly and forbids reusing an ID, so the
+  set of streams of one type is always an initial segment: `State.opened` counts
+  them and `State.has` decides existence.  The `Map StreamId Stream.State` holds
+  the state of streams that have actually taken a step; `State.get` falls back
+  to `State.freshStream`, so an implicitly opened stream that has seen no event
+  costs nothing and is still fully specified.  The alternative — materialising
+  every implicitly opened stream in the table — is observationally identical
+  (all of them are at their initial state) but makes every theorem about
+  implicit opening an induction over a range.  One consequence to keep in mind
+  for WP12/WP13: two histories that differ only in events that left a stream at
+  its initial state can produce table entries that differ syntactically while
+  being equal as states, so `trackSet` may carry two candidates where one would
+  do; it never loses the real state.
+* **Which error when several rules are violated.**  A frame can break the stream
+  limit of §4.6, the connection-level limit of §19.9 and a stream-level rule of
+  WP2 at once, and the text fixes no order between the checks.  `Step` therefore
+  has one constructor per violated rule with no mutual exclusion, and `outcomes`
+  lists STREAM_LIMIT_ERROR first, then FLOW_CONTROL_ERROR, then every error the
+  stream itself would raise.  The preferred outcome (`component.step`) is the
+  first, but `accepts` takes any of them — being stricter here would fail
+  implementations that check in a different order.
+* **A local action on a stream that does not exist is `.drop`, a frame is an
+  error.**  Same split as WP2: the application cannot write to a stream it never
+  opened, whereas a *frame* for an uncreated locally-initiated stream is the
+  STREAM_STATE_ERROR of §19.4/§19.5/§19.8/§19.10/§19.13.
+* **`MaySend` for a stream that does not exist is `False`** (for all five
+  stream-scoped frame types).  In this model a locally-initiated stream comes
+  into existence through `appOpenStream`, which is where §4.6's "MUST NOT exceed
+  the limit set by their peer" is enforced; with no state for the stream, none
+  of §3.3, §4.1 or §4.5 can be checked, so nothing may be said about it.  This
+  is a modelling decision, not a sentence of the text: an implementation that
+  opens a stream and sends on it in one step satisfies the model by emitting
+  `appOpenStream` first.  For a peer-initiated stream the answer coincides with
+  the text: the peer would treat MAX_STREAM_DATA or STOP_SENDING for a stream it
+  has not created as a STREAM_STATE_ERROR (§19.10, line 7734; §19.5, line 7473).
+* **Advertising a smaller limit is permitted.**  `Spec/Template.lean` required
+  `localMax ≤ v` in `MaySend` for MAX_STREAMS.  The text does not: §4.6,
+  line 1559 says only that "advertising a smaller limit has no effect", and
+  §4.1, line 1357 says explicitly that "it is not an error to advertise a
+  smaller limit".  This file therefore drops that conjunct — "has no effect" is
+  not "must not be sent" — and keeps the effect on the state (`max`), which is
+  what `maxDataLocal_mono` / `maxStreamsLocal_mono` (theorem (f)) rest on.  This
+  is the one place where this package deliberately differs from the template it
+  supersedes.
+* **Blocked frames must carry the current limit.**  §13.3, line 5409 is explicit
+  that a retransmitted blocked frame carries the limit in force at transmission
+  time, so requiring `v = s.maxDataPeer` (resp. the stream-type limit) does not
+  clash with the project rule that an exact repeat of an accepted frame stays
+  acceptable: after the limit moves, the frame that is re-sent is a different
+  frame by the text's own account.
+* **The 2^62-1 bound on MAX_DATA** is not a sentence of §19.9; it follows from
+  §16 (all frame fields are variable-length integers).  `MaySend` uses it as the
+  only bound on MAX_DATA, and `Step.sendMaxDataForbidden` mirrors it.
+* **Connection-level credit is accounted from the frame, not from the stream's
+  reply.**  The check that raises FLOW_CONTROL_ERROR must happen before the
+  stream is asked, so it uses the frame's end offset (`recvEnd`); the state then
+  moves by what the stream actually did (`afterStep`).  `recvHighest_step`
+  proves the second never exceeds the first, which is what makes theorem (a)
+  true.  A RESET_STREAM we *send* consumes no new credit because WP2's
+  `maySendReset` forces its Final Size to equal `sent`, which is already
+  counted.
+* **§4.2, line 1422 ("a receiver MUST NOT wait for a STREAM_DATA_BLOCKED or
+  DATA_BLOCKED frame before sending MAX_STREAM_DATA or MAX_DATA")** forbids a
+  scheduling strategy, not an action: every individual behaviour it rules out is
+  permitted frame by frame.  It cannot be stated over a single step and is
+  recorded here rather than encoded.
+* **The initial state is a parameter.**  `init` takes both endpoints' `Limits`
+  as plain numbers; `init_inv` needs only that the four `max_streams` parameters
+  are within 2^60, which is exactly what WP1's transport-parameter validity
+  guarantees.  WP12 will build the initial state from the negotiated parameters
+  (including §7.4.1's remembered 0-RTT limits, which are WP1/WP11's business).
+-/
+
+end Quic.Spec.StreamTable

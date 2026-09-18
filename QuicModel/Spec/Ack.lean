@@ -10,6 +10,12 @@ import QuicModel.Spec.FrameRules
 
   Table 3 and the packet-type legality of frames are in
   `QuicModel/Spec/FrameRules.lean`.
+
+  Exported for the composed endpoint (WP12) and for Termination (WP6):
+  `ackOverdue` / `AckObligationMet` / `EventuallyAcknowledged` — §13.2.1's MUST
+  and SHOULD are about *sending* an acknowledgment, which no single step can
+  force — and `pnExhausted`, §12.3's silent close once a packet number space is
+  spent.
 -/
 namespace Quic.Spec.Ack
 
@@ -299,9 +305,9 @@ def ackedAux (smallest : Nat) : List AckRange → Option (List Rng)
       (fun l => ⟨smallest - r.gap - 2 - r.len, smallest - r.gap - 2⟩ :: l)
 
 /-- The packet numbers an ACK frame acknowledges, largest range first.
-    §19.3, line 7300: "the smallest packet acknowledged in the range is
+    §19.3, line 7299: "That is, the smallest packet acknowledged in the range is
     determined by subtracting the First ACK Range value from the Largest
-    Acknowledged". -/
+    Acknowledged." -/
 def acked (largest first : Nat) (rs : List AckRange) : Option (List Rng) :=
   if largest < first then none
   else (ackedAux (largest - first) rs).map (fun l => ⟨largest - first, largest⟩ :: l)
@@ -354,10 +360,14 @@ theorem le_maxOpt_of_eq {o : Option Nat} {m : Nat} (h : o = some m) (pn : Nat) :
 structure State where
   /-- Which packet number space this instance tracks (§12.3, line 4662). -/
   space : PnSpace
-  /-- The packet type currently being assembled, for `MaySend` (§13.2.6). -/
-  assembling : PacketType
   /-- §12.3, line 4709: the packet numbers already processed in this space. -/
   received : List Rng
+  /-- §12.3, line 4717: "The data required for detecting duplicates can be
+      limited by maintaining a minimum packet number below which all packets are
+      immediately dropped."  `0` means no minimum is maintained.  Raised by
+      `Event.raiseMinimum`; `received` is *not* pruned with it, so the model
+      keeps at least as much information as the implementation it follows. -/
+  minPn : Nat
   /-- §13.2.3, line 5218: "they MUST retain the largest packet number that has
       been successfully processed". -/
   largest : Option Nat
@@ -366,11 +376,14 @@ structure State where
   largestTime : Time
   /-- The largest ack-eliciting packet number received (§13.2.1, line 5101). -/
   largestAckEliciting : Option Nat
-  /-- §13.2, line 5048: an ack-eliciting packet is waiting to be acknowledged. -/
-  ackElicitingPending : Bool
-  /-- §13.2.2, line 5163: ack-eliciting packets received since we last sent an
-      ACK frame. -/
-  ackElicitingSinceAck : Nat
+  /-- §13.2.1, line 5075: the ack-eliciting packets received in this space and
+      not yet acknowledged, each with the time it arrived.  This is the
+      *obligation*: every entry must be acknowledged by its own deadline, so the
+      deadline of the state is the earliest of them.  It is deliberately not a
+      single flag and not `largestTime`: a later packet must never be able to
+      postpone an earlier packet's deadline, and a partial ACK must discharge
+      only what it covers. -/
+  outstanding : List (Nat × Time)
   /-- §13.2.1, line 5101: reordering or a gap was seen, so an ACK should go out
       without delay. -/
   ackImmediately : Bool
@@ -379,6 +392,90 @@ structure State where
   /-- §18.2: the max_ack_delay we advertised, in microseconds. -/
   maxAckDelay : Time
   deriving DecidableEq, Repr
+
+/-- §13.2, line 5048: "only ack-eliciting packets cause an ACK frame to be sent
+    within the maximum ack delay".  Derived from `outstanding` rather than
+    stored, so that it cannot disagree with it. -/
+def State.ackElicitingPending (s : State) : Bool := !s.outstanding.isEmpty
+
+/-- §13.2.2, line 5163: "A receiver SHOULD send an ACK frame after receiving at
+    least two ack-eliciting packets."  Counted as the ack-eliciting packets
+    still awaiting acknowledgement; see NOTE 9. -/
+def State.ackElicitingSinceAck (s : State) : Nat := s.outstanding.length
+
+/-- The earliest arrival time among a set of outstanding packets. -/
+def minArrival : List (Nat × Time) → Option Time
+  | [] => none
+  | (_, t) :: ps => some (match minArrival ps with | none => t | some t' => min t t')
+
+@[simp] theorem minArrival_nil : minArrival [] = none := rfl
+
+theorem minArrival_eq_none_iff {l : List (Nat × Time)} : minArrival l = none ↔ l = [] := by
+  cases l <;> simp [minArrival]
+
+theorem minArrival_mem {l : List (Nat × Time)} {m : Time} (h : minArrival l = some m) :
+    ∃ pn, (pn, m) ∈ l := by
+  induction l with
+  | nil => simp [minArrival] at h
+  | cons p ps ih =>
+    obtain ⟨pn0, t0⟩ := p
+    cases hps : minArrival ps with
+    | none =>
+      simp only [minArrival, hps] at h
+      exact ⟨pn0, by rw [← Option.some.inj h]; exact List.mem_cons_self ..⟩
+    | some t' =>
+      simp only [minArrival, hps] at h
+      have hv : min t0 t' = m := Option.some.inj h
+      rcases Nat.le_total t0 t' with hle | hle
+      · have ht : t0 = m := by omega
+        subst ht
+        exact ⟨pn0, List.mem_cons_self ..⟩
+      · have ht : t' = m := by omega
+        subst ht
+        obtain ⟨pn, hpn⟩ := ih hps
+        exact ⟨pn, List.mem_cons_of_mem _ hpn⟩
+
+theorem minArrival_le_of_mem {l : List (Nat × Time)} {pn : Nat} {t : Time}
+    (h : (pn, t) ∈ l) : ∃ m, minArrival l = some m ∧ m ≤ t := by
+  induction l with
+  | nil => simp at h
+  | cons p ps ih =>
+    obtain ⟨pn0, t0⟩ := p
+    rw [List.mem_cons] at h
+    cases hps : minArrival ps with
+    | none =>
+      refine ⟨t0, by simp [minArrival, hps], ?_⟩
+      rcases h with h | h
+      · simp only [Prod.mk.injEq] at h; omega
+      · rw [minArrival_eq_none_iff.mp hps] at h; simp at h
+    | some t' =>
+      refine ⟨min t0 t', by simp [minArrival, hps], ?_⟩
+      rcases h with h | h
+      · simp only [Prod.mk.injEq] at h; omega
+      · obtain ⟨m, hm, hle⟩ := ih h
+        rw [hps] at hm
+        have := Option.some.inj hm
+        omega
+
+/-- Adding packets can only move the earliest arrival earlier. -/
+theorem minArrival_mono {l l' : List (Nat × Time)} (hsub : ∀ p ∈ l, p ∈ l')
+    {m : Time} (h : minArrival l = some m) : ∃ m', minArrival l' = some m' ∧ m' ≤ m := by
+  obtain ⟨pn, hpn⟩ := minArrival_mem h
+  exact minArrival_le_of_mem (hsub _ hpn)
+
+/-- §13.2.1, line 5075: "An endpoint MUST acknowledge all ack-eliciting Initial
+    and Handshake packets immediately and all ack-eliciting 0-RTT and 1-RTT
+    packets within its advertised max_ack_delay".  The moment by which a packet
+    that arrived at `t` must have been acknowledged. -/
+def State.ackDelayBudget (s : State) : Time :=
+  match s.space with
+  | .initial | .handshake => 0                  -- "immediately"
+  | .appData => s.maxAckDelay
+
+def State.deadlineOf (s : State) (t : Time) : Time := t + s.ackDelayBudget
+
+theorem State.deadlineOf_mono (s : State) {t t' : Time} (h : t ≤ t') :
+    s.deadlineOf t ≤ s.deadlineOf t' := by simp only [State.deadlineOf]; omega
 
 def State.isNewLargest (s : State) (pn : Nat) : Bool :=
   match s.largest with
@@ -396,7 +493,10 @@ def State.outOfOrder (s : State) (pn : Nat) : Bool :=
     else if m + 1 ≤ pn - 1 then !Ranges.subsetOf ⟨m + 1, pn - 1⟩ s.received
     else false
 
-/-- Record a packet that has been fully processed (§13.1, line 5020). -/
+/-- Record a packet that has been fully processed (§13.1, line 5020).
+    `largestTime` follows the largest packet number because §13.2.5, line 5271
+    measures the ACK Delay field from *that* packet; the acknowledgement
+    obligation is `outstanding`, which a later packet can only add to. -/
 def State.record (s : State) (pn : Nat) (t : Time) (ae : Bool) : State :=
   { s with
     received := Ranges.insert s.received pn
@@ -404,12 +504,72 @@ def State.record (s : State) (pn : Nat) (t : Time) (ae : Bool) : State :=
     largestTime := if s.isNewLargest pn then t else s.largestTime
     largestAckEliciting :=
       if ae then some (maxOpt s.largestAckEliciting pn) else s.largestAckEliciting
-    ackElicitingPending := s.ackElicitingPending || ae
-    ackElicitingSinceAck := s.ackElicitingSinceAck + (if ae then 1 else 0)
+    outstanding := if ae then s.outstanding ++ [(pn, t)] else s.outstanding
     ackImmediately := s.ackImmediately || (ae && s.outOfOrder pn) }
 
-def State.afterAckSent (s : State) : State :=
-  { s with ackElicitingPending := false, ackElicitingSinceAck := 0, ackImmediately := false }
+/-- Discharge exactly the packets an ACK frame covers.  §19.3, line 7231:
+    "Receivers send ACK frames (types 0x02 and 0x03) to inform senders of packets
+    they have received and processed" — an ACK that names some of the outstanding packets settles
+    those and no others. -/
+def State.discharge (s : State) (l : List Rng) : State :=
+  { s with
+    outstanding := s.outstanding.filter (fun p => !Ranges.mem l p.1)
+    ackImmediately :=
+      s.ackImmediately && !(s.outstanding.filter (fun p => !Ranges.mem l p.1)).isEmpty }
+
+/-- The state after we sent an ACK frame with these fields.  A frame whose
+    ranges do not compute (§19.3.1, line 7375) is one we would never send and
+    discharges nothing. -/
+def State.afterAckSent (s : State) (largest first : Nat) (rs : List AckRange) : State :=
+  match acked largest first rs with
+  | none => s
+  | some l => s.discharge l
+
+@[simp] theorem State.record_outstanding (s : State) (pn : Nat) (t : Time) (ae : Bool) :
+    (s.record pn t ae).outstanding =
+      if ae then s.outstanding ++ [(pn, t)] else s.outstanding := rfl
+
+@[simp] theorem State.record_deadlineOf (s : State) (pn : Nat) (t : Time) (ae : Bool)
+    (u : Time) : (s.record pn t ae).deadlineOf u = s.deadlineOf u := rfl
+
+@[simp] theorem State.discharge_outstanding (s : State) (l : List Rng) :
+    (s.discharge l).outstanding = s.outstanding.filter (fun p => !Ranges.mem l p.1) := rfl
+
+/-- Sending an ACK frame touches only the outstanding set and the
+    "send one now" hint; everything the receive side records is untouched. -/
+@[simp] theorem State.afterAckSent_received (s : State) (largest first : Nat)
+    (rs : List AckRange) : (s.afterAckSent largest first rs).received = s.received := by
+  unfold State.afterAckSent; split <;> rfl
+
+@[simp] theorem State.afterAckSent_largest (s : State) (largest first : Nat)
+    (rs : List AckRange) : (s.afterAckSent largest first rs).largest = s.largest := by
+  unfold State.afterAckSent; split <;> rfl
+
+@[simp] theorem State.afterAckSent_largestAckEliciting (s : State) (largest first : Nat)
+    (rs : List AckRange) :
+    (s.afterAckSent largest first rs).largestAckEliciting = s.largestAckEliciting := by
+  unfold State.afterAckSent; split <;> rfl
+
+@[simp] theorem State.afterAckSent_space (s : State) (largest first : Nat)
+    (rs : List AckRange) : (s.afterAckSent largest first rs).space = s.space := by
+  unfold State.afterAckSent; split <;> rfl
+
+@[simp] theorem State.afterAckSent_maxAckDelay (s : State) (largest first : Nat)
+    (rs : List AckRange) : (s.afterAckSent largest first rs).maxAckDelay = s.maxAckDelay := by
+  unfold State.afterAckSent; split <;> rfl
+
+@[simp] theorem State.afterAckSent_largestSent (s : State) (largest first : Nat)
+    (rs : List AckRange) : (s.afterAckSent largest first rs).largestSent = s.largestSent := by
+  unfold State.afterAckSent; split <;> rfl
+
+theorem State.mem_outstanding_afterAckSent {s : State} {largest first : Nat}
+    {rs : List AckRange} {p : Nat × Time}
+    (h : p ∈ (s.afterAckSent largest first rs).outstanding) : p ∈ s.outstanding := by
+  unfold State.afterAckSent at h
+  split at h
+  · exact h
+  · rw [State.discharge_outstanding] at h
+    exact (List.mem_filter.mp h).1
 
 def bumpSent : Option Nat → Nat → Option Nat
   | none, pn => some pn
@@ -431,10 +591,11 @@ inductive Event where
   | recvAck (largest first : Nat) (ranges : List AckRange)
   /-- We sent a packet numbered `pn` in this space. -/
   | sentPacket (pn : Nat)
-  /-- We sent an ACK frame for this space. -/
-  | sentAck
-  /-- We start assembling a packet of type `pt`. -/
-  | beginPacket (pt : PacketType)
+  /-- We sent an ACK frame for this space, with these fields (§19.3). -/
+  | sentAck (largest first : Nat) (ranges : List AckRange)
+  /-- §12.3, line 4717: we choose to stop remembering packet numbers below
+      `m`, and therefore to drop every packet below it. -/
+  | raiseMinimum (m : Nat)
   deriving DecidableEq, Repr
 
 inductive Effect where
@@ -453,10 +614,19 @@ inductive Step : State → Event → Out → Prop
       same packet number from the same packet number space." -/
   | duplicate {s pn t ae} (h : Ranges.mem s.received pn = true) :
       Step s (.recvPacket pn t ae) .drop
+  /-- §12.3, line 4717: "The data required for detecting duplicates can be
+      limited by maintaining a minimum packet number below which all packets
+      are immediately dropped."  An endpoint that maintains such a minimum can
+      no longer be "certain that it has not processed another packet with the
+      same packet number" (line 4709), so it drops. -/
+  | belowMinimum {s pn t ae} (h : Ranges.mem s.received pn = false) (h2 : pn < s.minPn) :
+      Step s (.recvPacket pn t ae) .drop
   /-- §13.1, line 5020: "A packet MUST NOT be acknowledged until packet
       protection has been successfully removed and all frames contained in the
       packet have been processed."  Recording the packet number is what makes
-      it acknowledgeable. -/
+      it acknowledgeable.  Permitted for any packet number not already
+      processed, including one below the minimum: this model does not prune
+      `received`, so it is still certain (see NOTE 3). -/
   | process {s pn t ae} (h : Ranges.mem s.received pn = false) :
       Step s (.recvPacket pn t ae) (.ok (s.record pn t ae) [.processed pn ae])
   /-- §19.3.1, line 7375: "If any computed packet number is negative, an
@@ -478,17 +648,21 @@ inductive Step : State → Event → Out → Prop
   /-- Bookkeeping for §13.1's "a packet it did not send". -/
   | sent {s pn} :
       Step s (.sentPacket pn) (.ok { s with largestSent := bumpSent s.largestSent pn } [])
-  /-- §13.2.2, line 5163: the count of unacknowledged ack-eliciting packets
-      restarts when an ACK frame goes out. -/
-  | ackSent {s} : Step s .sentAck (.ok s.afterAckSent [])
-  /-- Bookkeeping for `MaySend`: the packet under construction. -/
-  | begin {s pt} : Step s (.beginPacket pt) (.ok { s with assembling := pt } [])
+  /-- §13.2.1, line 5075: sending an ACK frame discharges the obligation for
+      exactly the packets that frame acknowledges — no more. -/
+  | ackSent {s largest first rs} :
+      Step s (.sentAck largest first rs) (.ok (s.afterAckSent largest first rs) [])
+  /-- §12.3, line 4717: raising the minimum is always permitted — it is the
+      "can" of that sentence — and never lowers it. -/
+  | raiseMin {s m} :
+      Step s (.raiseMinimum m) (.ok { s with minPn := max s.minPn m } [])
 
 /-! ## 3. Executable form -/
 
 def outcomes (s : State) : Event → List Out
   | .recvPacket pn t ae =>
     if Ranges.mem s.received pn then [.drop]
+    else if pn < s.minPn then [.drop, .ok (s.record pn t ae) [.processed pn ae]]
     else [.ok (s.record pn t ae) [.processed pn ae]]
   | .recvAck largest first rs =>
     match acked largest first rs with
@@ -496,8 +670,8 @@ def outcomes (s : State) : Event → List Out
     | some _ =>
       if acksUnsent s largest then [.error .protocolViolation, .ok s []] else [.ok s []]
   | .sentPacket pn => [.ok { s with largestSent := bumpSent s.largestSent pn } []]
-  | .sentAck => [.ok s.afterAckSent []]
-  | .beginPacket pt => [.ok { s with assembling := pt } []]
+  | .sentAck largest first rs => [.ok (s.afterAckSent largest first rs) []]
+  | .raiseMinimum m => [.ok { s with minPn := max s.minPn m } []]
 
 /-! ## 4. The two forms agree -/
 
@@ -511,7 +685,12 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
       · simp only [List.mem_singleton] at h; subst h; exact .duplicate ‹_›
       · rename_i hd
         simp only [Bool.not_eq_true] at hd
-        simp only [List.mem_singleton] at h; subst h; exact .process hd
+        split at h
+        · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+          rcases h with h | h <;> subst h
+          · exact .belowMinimum hd ‹_›
+          · exact .process hd
+        · simp only [List.mem_singleton] at h; subst h; exact .process hd
     | recvAck largest first rs =>
       simp only [outcomes] at h
       split at h
@@ -526,12 +705,15 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
           · exact .ackOk hne
         · simp only [List.mem_singleton] at h; subst h; exact .ackOk hne
     | sentPacket pn => simp only [outcomes, List.mem_singleton] at h; subst h; exact .sent
-    | sentAck => simp only [outcomes, List.mem_singleton] at h; subst h; exact .ackSent
-    | beginPacket pt => simp only [outcomes, List.mem_singleton] at h; subst h; exact .begin
+    | sentAck largest first rs =>
+      simp only [outcomes, List.mem_singleton] at h; subst h; exact .ackSent
+    | raiseMinimum m => simp only [outcomes, List.mem_singleton] at h; subst h; exact .raiseMin
   · intro h
     cases h with
     | duplicate h => simp [outcomes, h]
-    | process h => simp [outcomes, h]
+    | belowMinimum h h2 => simp [outcomes, h, h2]
+    | @process pn t ae h =>
+      by_cases hm : pn < s.minPn <;> simp [outcomes, h, hm]
     | @ackMalformed largest first rs h => simp [outcomes, h]
     | @ackUnsent largest first rs h h2 =>
       cases hac : acked largest first rs with
@@ -544,7 +726,7 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
         by_cases hu : acksUnsent s largest = true <;> simp [outcomes, hac, hu]
     | sent => simp [outcomes]
     | ackSent => simp [outcomes]
-    | begin => simp [outcomes]
+    | raiseMin => simp [outcomes]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
   cases e <;> simp only [outcomes] <;> repeat' split
@@ -559,6 +741,9 @@ def Inv (s : State) : Prop :=
   ∧ (∀ n, Ranges.mem s.received n = true → ∃ m, s.largest = some m ∧ n ≤ m)
   ∧ (∀ m, s.largest = some m → Ranges.mem s.received m = true)
   ∧ (∀ m, s.largestAckEliciting = some m → Ranges.mem s.received m = true)
+  -- an outstanding acknowledgement obligation is always for a packet we
+  -- actually processed (§13.1, line 5020)
+  ∧ (∀ p ∈ s.outstanding, Ranges.mem s.received p.1 = true)
 
 @[simp] theorem record_received (s : State) (pn : Nat) (t : Time) (ae : Bool) :
     (s.record pn t ae).received = Ranges.insert s.received pn := rfl
@@ -587,10 +772,10 @@ private theorem mem_insert_maxOpt {l : List Rng} (hw : Ranges.wf l = true) {o : 
 
 theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
     (hi : Inv s) (h : Step s e (.ok s' fx)) : Inv s' := by
-  obtain ⟨hw, h2, h3, h4⟩ := hi
+  obtain ⟨hw, h2, h3, h4, h5⟩ := hi
   cases h with
   | @process pn t ae hp =>
-    refine ⟨Ranges.wf_insert hw pn, ?_, ?_, ?_⟩
+    refine ⟨Ranges.wf_insert hw pn, ?_, ?_, ?_, ?_⟩
     · intro n hn
       refine ⟨maxOpt s.largest pn, rfl, ?_⟩
       rcases (Ranges.mem_insert (Ranges.wfFrom_zero_of_wf hw) pn n).mp hn with hn | hn
@@ -609,55 +794,133 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
         subst this
         exact mem_insert_maxOpt hw h4 pn
       · exact Ranges.mem_insert_mono (Ranges.wfFrom_zero_of_wf hw) pn (h4 m hm)
-  | ackOk => exact ⟨hw, h2, h3, h4⟩
-  | sent => exact ⟨hw, h2, h3, h4⟩
-  | ackSent => exact ⟨hw, h2, h3, h4⟩
-  | begin => exact ⟨hw, h2, h3, h4⟩
+    · intro p hp
+      rw [State.record_outstanding] at hp
+      split at hp
+      · rcases List.mem_append.mp hp with hp | hp
+        · exact Ranges.mem_insert_mono (Ranges.wfFrom_zero_of_wf hw) pn (h5 p hp)
+        · simp only [List.mem_singleton] at hp; subst hp
+          exact Ranges.mem_insert_self (Ranges.wfFrom_zero_of_wf hw) pn
+      · exact Ranges.mem_insert_mono (Ranges.wfFrom_zero_of_wf hw) pn (h5 p hp)
+  | ackOk => exact ⟨hw, h2, h3, h4, h5⟩
+  | sent => exact ⟨hw, h2, h3, h4, h5⟩
+  | @ackSent largest first rs =>
+    refine ⟨by rw [State.afterAckSent_received]; exact hw, ?_, ?_, ?_, ?_⟩
+    · intro n hn
+      rw [State.afterAckSent_received] at hn
+      rw [State.afterAckSent_largest]
+      exact h2 n hn
+    · intro m hm
+      rw [State.afterAckSent_largest] at hm
+      rw [State.afterAckSent_received]
+      exact h3 m hm
+    · intro m hm
+      rw [State.afterAckSent_largestAckEliciting] at hm
+      rw [State.afterAckSent_received]
+      exact h4 m hm
+    · intro p hp
+      rw [State.afterAckSent_received]
+      exact h5 p (State.mem_outstanding_afterAckSent hp)
+  | raiseMin => exact ⟨hw, h2, h3, h4, h5⟩
 
 /-! ## 6. Send side -/
 
-/-- What an ACK frame we put into the packet we are assembling may say.
+/-- What an ACK frame carried in a packet of *this* space may say.
 
-* §13.2.6, line 5293: "ACK frames MUST only be carried in a packet that has the
-  same packet number space as the packet being acknowledged"; this instance
-  tracks exactly one space, so the rule is a condition on the packet type.
 * §19.3.1, line 7375: no computed packet number may be negative.
 * §13.1, line 5026: "a receiver acknowledges receipt by sending one or more ACK
   frames containing the packet number of the received packet" — every
-  acknowledged packet number must be one we received and processed. -/
-def MaySend (s : State) : Frame → Prop
+  acknowledged packet number must be one we received and processed.
+
+Non-ACK frames are unconstrained. -/
+def AckFrameSendable (s : State) : Frame → Prop
   | .ack largest _ first ranges _ =>
-    s.assembling.space = some s.space
-    ∧ ∃ l, acked largest first ranges.toList = some l
+    ∃ l, acked largest first ranges.toList = some l
         ∧ ∀ r ∈ l, Ranges.subsetOf r s.received = true
   | _ => True
 
-def maySend (s : State) : Frame → Bool
+def ackFrameSendable (s : State) : Frame → Bool
   | .ack largest _ first ranges _ =>
-    decide (s.assembling.space = some s.space)
-      && (match acked largest first ranges.toList with
-          | none => false
-          | some l => l.all (fun r => Ranges.subsetOf r s.received))
+    match acked largest first ranges.toList with
+    | none => false
+    | some l => l.all (fun r => Ranges.subsetOf r s.received)
   | _ => true
 
-theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
+theorem ackFrameSendable_iff (s : State) (f : Frame) :
+    ackFrameSendable s f = true ↔ AckFrameSendable s f := by
   cases f
   case ack largest delay first ranges ecn =>
-    simp only [maySend, MaySend, Bool.and_eq_true, decide_eq_true_eq]
+    simp only [ackFrameSendable, AckFrameSendable]
     cases h : acked largest first ranges.toList with
     | none => simp
     | some l => simp [List.all_eq_true]
-  all_goals simp [maySend, MaySend]
+  all_goals simp [ackFrameSendable, AckFrameSendable]
+
+/-- Nothing about a single frame can be decided without knowing which packet
+    number space the packet belongs to, and `Component.MaySend` does not see
+    one.  With one instance of this component per space (§12.3, line 4662),
+    a frame-only predicate would have to hold in *all three* instances, which
+    would forbid every ACK frame; the rule is therefore in `MaySendPacket`,
+    which is handed the real `OutPacket.ptype`. -/
+def MaySend (_ : State) (_ : Frame) : Prop := True
+
+def maySend (_ : State) (_ : Frame) : Bool := true
+
+theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
+  simp [maySend, MaySend]
 
 /-- §12.3, line 4685: "Subsequent packets sent in the same packet number space
     MUST increase the packet number by at least one."; line 4692: "A QUIC
     endpoint MUST NOT reuse a packet number within the same packet number space
     in one connection."; line 4693: "If the packet number for sending reaches
     2^62 - 1, the sender MUST close the connection without sending a
-    CONNECTION_CLOSE frame or any further packets" — here only the bound; the
-    close itself belongs to WP6. -/
+    CONNECTION_CLOSE frame or any further packets" — the number at which the
+    text requires stopping is itself unusable, so the bound is `pn < maxPn`.
+    The silent close belongs to WP6 Termination. -/
 def maySendPacketNumber (s : State) (pn : Nat) : Bool :=
-  (match s.largestSent with | none => true | some m => decide (m < pn)) && decide (pn ≤ maxPn)
+  (match s.largestSent with | none => true | some m => decide (m < pn)) && decide (pn < maxPn)
+
+/-- §12.3, line 4693: the packet number for sending has reached 2^62 - 1, so
+    this space is spent and the connection must close silently.  Exported for
+    WP6 (the close) and WP12 (the composition). -/
+def pnExhausted (s : State) : Bool :=
+  match s.largestSent with
+  | none => false
+  | some m => decide (maxPn ≤ m + 1)
+
+/-- The whole packet we are about to send, as far as *this* space is concerned.
+    A packet of another space says nothing about this instance.
+
+* §12.3, line 4693: "If the packet number for sending reaches 2^62 - 1, the
+  sender MUST close the connection without sending a CONNECTION_CLOSE frame or
+  any further packets" — once this space is spent, no packet of it goes out.  `OutPacket`
+  carries no packet number, so the per-number rule stays in
+  `maySendPacketNumber`.
+* §13.2.6, line 5293: "ACK frames MUST only be carried in a packet that has the
+  same packet number space as the packet being acknowledged" — an ACK frame in
+  a packet of this space is checked against *this* space's `received`, which is
+  exactly that rule. -/
+def MaySendPacket (s : State) (p : OutPacket) : Prop :=
+  p.ptype.space = some s.space →
+    pnExhausted s = false ∧ ∀ f ∈ p.frames, AckFrameSendable s f
+
+def maySendPacket (s : State) (p : OutPacket) : Bool :=
+  !decide (p.ptype.space = some s.space)
+    || (!pnExhausted s && p.frames.all (fun f => ackFrameSendable s f))
+
+theorem maySendPacket_iff (s : State) (p : OutPacket) :
+    maySendPacket s p = true ↔ MaySendPacket s p := by
+  simp only [maySendPacket, MaySendPacket, Bool.or_eq_true, Bool.and_eq_true,
+    decide_eq_false_iff_not, Bool.not_eq_eq_eq_not, Bool.not_true, List.all_eq_true]
+  constructor
+  · rintro (h | ⟨h1, h2⟩) hsp
+    · exact absurd hsp h
+    · exact ⟨h1, fun f hf => (ackFrameSendable_iff _ _).mp (h2 f hf)⟩
+  · intro h
+    by_cases hsp : p.ptype.space = some s.space
+    · obtain ⟨h1, h2⟩ := h hsp
+      exact Or.inr ⟨h1, fun f hf => (ackFrameSendable_iff _ _).mpr (h2 f hf)⟩
+    · exact Or.inl hsp
 
 /-! ## 7. The component -/
 
@@ -674,22 +937,37 @@ def maySendPacketNumber (s : State) (pn : Nat) : Bool :=
   MaySend := MaySend
   maySend := maySend
   maySend_iff := maySend_iff
+  MaySendPacket := MaySendPacket
+  maySendPacket := maySendPacket
+  maySendPacket_iff := maySendPacket_iff
 
 /-! ## 8. Named theorems -/
 
 /-- (b) An ACK frame we may send never acknowledges a packet number we have not
     received: §13.1, line 5020 ("A packet MUST NOT be acknowledged until … all
     frames contained in the packet have been processed"). -/
-theorem maySend_ack_sound {s : State} {largest delay first : Nat} {ranges : Array AckRange}
-    {ecn : Option Ecn} (h : MaySend s (.ack largest delay first ranges ecn)) {n : Nat}
+theorem ackFrameSendable_sound {s : State} {largest delay first : Nat} {ranges : Array AckRange}
+    {ecn : Option Ecn} (h : AckFrameSendable s (.ack largest delay first ranges ecn)) {n : Nat}
     (hn : Acks largest first ranges.toList n) : Ranges.mem s.received n = true := by
-  obtain ⟨-, l, hl, hsub⟩ := h
+  obtain ⟨l, hl, hsub⟩ := h
   obtain ⟨l', hl', hmem⟩ := hn
   rw [hl] at hl'
   have : l = l' := Option.some.inj hl'
   subst this
   obtain ⟨r, hr, h1, h2⟩ := Ranges.exists_of_mem hmem
   exact Ranges.mem_of_subsetOf (hsub r hr) h1 h2
+
+/-- (b), at packet level and with the real packet type: every packet number an
+    ACK frame in a packet of this space acknowledges is one this space
+    processed — which is also §13.2.6, line 5293 ("ACK frames MUST only be
+    carried in a packet that has the same packet number space as the packet
+    being acknowledged"). -/
+theorem maySendPacket_ack_sound {s : State} {p : OutPacket} (h : MaySendPacket s p)
+    (hsp : p.ptype.space = some s.space)
+    {largest delay first : Nat} {ranges : Array AckRange} {ecn : Option Ecn}
+    (hf : Frame.ack largest delay first ranges ecn ∈ p.frames)
+    {n : Nat} (hn : Acks largest first ranges.toList n) : Ranges.mem s.received n = true :=
+  ackFrameSendable_sound ((h hsp).2 _ hf) hn
 
 /-- §13.2.3, line 5213: "A receiver MUST retain an ACK Range unless it can
     ensure that it will not subsequently accept packets with numbers in that
@@ -701,8 +979,8 @@ theorem received_mono {s s' : State} {e : Event} {fx : List Effect} (hi : Inv s)
   | process hp => exact Ranges.mem_insert_mono (Ranges.wfFrom_zero_of_wf hi.1) _ hm
   | ackOk => exact hm
   | sent => exact hm
-  | ackSent => exact hm
-  | begin => exact hm
+  | ackSent => rw [State.afterAckSent_received]; exact hm
+  | raiseMin => exact hm
 
 /-- §13.2.3, line 5218: "Receivers can discard all ACK Ranges, but they MUST
     retain the largest packet number that has been successfully processed". -/
@@ -713,8 +991,21 @@ theorem largest_mono {s s' : State} {e : Event} {fx : List Effect}
   | @process pn t ae hp => exact ⟨maxOpt s.largest pn, rfl, le_maxOpt_of_eq hm pn⟩
   | ackOk => exact ⟨m, hm, Nat.le_refl _⟩
   | sent => exact ⟨m, hm, Nat.le_refl _⟩
-  | ackSent => exact ⟨m, hm, Nat.le_refl _⟩
-  | begin => exact ⟨m, hm, Nat.le_refl _⟩
+  | ackSent => exact ⟨m, by rw [State.afterAckSent_largest]; exact hm, Nat.le_refl _⟩
+  | raiseMin => exact ⟨m, hm, Nat.le_refl _⟩
+
+/-- §12.3, line 4717: the minimum packet number never goes down, so a packet
+    number this endpoint has started dropping is never accepted again. -/
+theorem minPn_mono {s s' : State} {e : Event} {fx : List Effect}
+    (h : Step s e (.ok s' fx)) : s.minPn ≤ s'.minPn := by
+  cases h with
+  | process => exact Nat.le_refl _
+  | ackOk => exact Nat.le_refl _
+  | sent => exact Nat.le_refl _
+  | ackSent =>
+    show s.minPn ≤ (s.afterAckSent _ _ _).minPn
+    unfold State.afterAckSent; split <;> exact Nat.le_refl _
+  | @raiseMin m => exact Nat.le_max_left _ _
 
 /-- A packet number is only ever added by processing a packet — §13.1: it is
     the processing of the packet that makes it acknowledgeable. -/
@@ -725,8 +1016,8 @@ theorem received_changes_only_on_recvPacket {s s' : State} {e : Event} {fx : Lis
   | @process pn t ae hp => exact ⟨pn, t, ae, rfl⟩
   | ackOk => exact absurd rfl hne
   | sent => exact absurd rfl hne
-  | ackSent => exact absurd rfl hne
-  | begin => exact absurd rfl hne
+  | ackSent => exact absurd (State.afterAckSent_received ..) hne
+  | raiseMin => exact absurd rfl hne
 
 theorem reachable_received_mono {s₀ s : State} (hi : Inv s₀)
     (h : component.Reachable s₀ s) {n : Nat} (hm : Ranges.mem s₀.received n = true) :
@@ -752,24 +1043,31 @@ theorem processed_at_most_once {s s' s'' : State} {pn : Nat} {t t' : Time} {ae a
   have hmem'' : Ranges.mem s''.received pn = true := reachable_received_mono hi' hr hmem
   cases h2 with
   | duplicate => rfl
+  | belowMinimum => rfl
   | process hp => rw [hmem''] at hp; exact absurd hp (by simp)
-
-/-- §13.2.6, line 5293: "ACK frames MUST only be carried in a packet that has
-    the same packet number space as the packet being acknowledged". -/
-theorem ack_same_space {s : State} {largest delay first : Nat} {ranges : Array AckRange}
-    {ecn : Option Ecn} (h : MaySend s (.ack largest delay first ranges ecn)) :
-    s.assembling.space = some s.space := h.1
 
 /-- §13.2.6, line 5298: "Packets that a client sends with 0-RTT packet
     protection MUST be acknowledged by the server in packets protected by 1-RTT
-    keys."  `hz` is `FrameRules.ack_not_in_zeroRtt` (Table 3: ACK is `IH_1`). -/
-theorem appData_ack_in_oneRtt {s : State} {largest delay first : Nat} {ranges : Array AckRange}
-    {ecn : Option Ecn} (hsp : s.space = .appData)
-    (h : MaySend s (.ack largest delay first ranges ecn))
-    (hz : s.assembling ≠ .zeroRtt) : s.assembling = .oneRtt := by
-  have hs := ack_same_space h
-  rw [hsp] at hs
-  cases hc : s.assembling <;> rw [hc] at hs hz <;> simp_all [PacketType.space]
+    keys."  Proved from the two components together: `PacketType.space` puts
+    only 0-RTT and 1-RTT in the application data space, and Table 3 keeps ACK
+    out of a 0-RTT packet (`FrameRules.ack_not_in_zeroRtt`), so the only packet
+    type left is 1-RTT. -/
+theorem appData_ack_in_oneRtt {s : State} {fs : FrameRules.State} {p : OutPacket}
+    (hsp : s.space = .appData) (hp : p.ptype.space = some s.space)
+    (hfr : FrameRules.MaySendPacket fs p)
+    {largest delay first : Nat} {ranges : Array AckRange} {ecn : Option Ecn}
+    (hack : Frame.ack largest delay first ranges ecn ∈ p.frames) : p.ptype = .oneRtt := by
+  have hallow := (hfr.2 _ hack).1
+  rw [hsp] at hp
+  cases hc : p.ptype with
+  | initial => rw [hc] at hp; simp [PacketType.space] at hp
+  | zeroRtt =>
+    rw [hc, FrameRules.ack_not_in_zeroRtt] at hallow
+    exact Bool.noConfusion hallow
+  | handshake => rw [hc] at hp; simp [PacketType.space] at hp
+  | oneRtt => rfl
+  | retry => rw [hc] at hp; simp [PacketType.space] at hp
+  | versionNegotiation => rw [hc] at hp; simp [PacketType.space] at hp
 
 /-! ### §13.2 acknowledgment frequency: recommendations, not requirements -/
 
@@ -809,23 +1107,183 @@ def RecommendedAck (s : State) (largest : Nat) : Prop := s.largest = some larges
 /-- §13.2.1, line 5075: "An endpoint MUST acknowledge all ack-eliciting Initial
     and Handshake packets immediately and all ack-eliciting 0-RTT and 1-RTT
     packets within its advertised max_ack_delay, with the following exception."
-    The exception (line 5078) is buffering for want of keys, which is WP11's. -/
-def ackDeadline (s : State) : Option Time :=
-  if s.ackElicitingPending then
-    some (match s.space with
-          | .initial | .handshake => s.largestTime
-          | .appData => s.largestTime + s.maxAckDelay)
-  else none
+    The exception (line 5078) is buffering for want of keys, which is WP11's.
+
+    The deadline of a state is the earliest deadline of its outstanding
+    packets: a packet that arrives later can add an earlier obligation but can
+    never postpone one (`ackDeadline_record_le`), and it is `none` exactly when
+    nothing is owed. -/
+def ackDeadline (s : State) : Option Time := (minArrival s.outstanding).map s.deadlineOf
 
 /-- The same MUST, as a property of the moment an ACK frame is sent. -/
-def AcknowledgedInTime (s : State) (sentAt : Time) : Prop :=
-  ∀ d, ackDeadline s = some d → sentAt ≤ d
+def AcknowledgedInTime (s : State) (sentAt tolerance : Time) : Prop :=
+  ∀ d, ackDeadline s = some d → sentAt ≤ d + tolerance
+
+/-- §13.2.1, line 5075, as a property of a state and a clock reading: an
+    ack-eliciting packet is past its deadline and still unacknowledged.
+
+    `tolerance` is the processing time the checker allows the implementation.
+    §13.2.1's "immediately" is a *zero intentional delay* — §13.2.5, line 5271
+    measures "the delays intentionally introduced" — not a zero elapsed time,
+    and this model has no notion of what an endpoint costs to run.  With
+    `tolerance = 0` the predicate is the literal text; for the Initial and
+    Handshake spaces, where `ackDelayBudget = 0`, a checker must supply a
+    positive tolerance or the predicate is unsatisfiable for any real
+    endpoint. -/
+def ackOverdue (s : State) (now tolerance : Time) : Bool :=
+  match ackDeadline s with
+  | none => false
+  | some d => decide (d + tolerance < now)
+
+def AckOverdue (s : State) (now tolerance : Time) : Prop :=
+  ∃ d, ackDeadline s = some d ∧ d + tolerance < now
+
+theorem ackOverdue_iff (s : State) (now tolerance : Time) :
+    ackOverdue s now tolerance = true ↔ AckOverdue s now tolerance := by
+  simp only [ackOverdue, AckOverdue]
+  cases h : ackDeadline s with
+  | none => simp
+  | some d => simp
+
+theorem acknowledgedInTime_iff (s : State) (sentAt tolerance : Time) :
+    AcknowledgedInTime s sentAt tolerance ↔ ackOverdue s sentAt tolerance = false := by
+  simp only [AcknowledgedInTime, ackOverdue]
+  cases h : ackDeadline s with
+  | none => simp
+  | some d => simp [Nat.not_lt]
+
+/-- The obligation that no single step can express and that WP12 must carry:
+    §13.2.1, line 5075's MUST is about *sending* an acknowledgment, so a
+    deadline checked only when an ACK happens to go out does not force one to
+    go out.  A timed run is a sequence of (state, clock) observations; the
+    endpoint conforms only if no observation is overdue. -/
+def AckObligationMet (run : List (State × Time)) (tolerance : Time) : Prop :=
+  ∀ p ∈ run, ackOverdue p.1 p.2 tolerance = false
+
+/-- §13.2.1, line 5064: "Every packet SHOULD be acknowledged at least once".
+    The MUST half of that sentence is `ackDeadline`; this is the SHOULD half,
+    which covers non-ack-eliciting packets too and is a liveness property of a
+    whole run, not of a state.  `acksSent` is every ACK frame this space has
+    emitted, as `(largest, first, ranges)`. -/
+def EventuallyAcknowledged (s : State) (acksSent : List (Nat × Nat × List AckRange)) : Prop :=
+  ∀ n, Ranges.mem s.received n = true → ∃ a ∈ acksSent, Acks a.1 a.2.1 a.2.2 n
+
+@[simp] theorem State.afterAckSent_ackDelayBudget (s : State) (largest first : Nat)
+    (rs : List AckRange) :
+    (s.afterAckSent largest first rs).ackDelayBudget = s.ackDelayBudget := by
+  unfold State.afterAckSent; split <;> rfl
+
+@[simp] theorem State.afterAckSent_deadlineOf (s : State) (largest first : Nat)
+    (rs : List AckRange) (u : Time) :
+    (s.afterAckSent largest first rs).deadlineOf u = s.deadlineOf u := by
+  simp [State.deadlineOf]
+
+/-! ### The acknowledgment obligation, pinned down -/
+
+/-- `ackElicitingPending` is exactly "something is still owed": it is derived
+    from `outstanding`, not stored beside it. -/
+theorem ackElicitingPending_iff (s : State) :
+    s.ackElicitingPending = true ↔ s.outstanding ≠ [] := by
+  simp [State.ackElicitingPending]
+
+theorem ackDeadline_eq_none_iff (s : State) : ackDeadline s = none ↔ s.outstanding = [] := by
+  rw [← minArrival_eq_none_iff]
+  unfold ackDeadline
+  cases minArrival s.outstanding <;> simp
+
+/-- Every outstanding ack-eliciting packet is covered: the state's deadline is
+    at or before the deadline of that packet on its own.  Nothing can be
+    forgotten while it is still outstanding. -/
+theorem ackDeadline_le_deadlineOf {s : State} {pn : Nat} {t : Time}
+    (h : (pn, t) ∈ s.outstanding) : ∃ d, ackDeadline s = some d ∧ d ≤ s.deadlineOf t := by
+  obtain ⟨m, hm, hle⟩ := minArrival_le_of_mem h
+  refine ⟨s.deadlineOf m, ?_, s.deadlineOf_mono hle⟩
+  unfold ackDeadline; rw [hm]; rfl
+
+/-- (i) §13.2.1, line 5075: receiving a further packet can only bring the
+    acknowledgment deadline *forward*, never postpone it.  This is the property
+    the `largestTime`-based deadline broke: a later non-ack-eliciting packet
+    used to move an earlier ack-eliciting packet's deadline out. -/
+theorem ackDeadline_record_le (s : State) (pn : Nat) (t : Time) (ae : Bool) {d : Time}
+    (h : ackDeadline s = some d) :
+    ∃ d', ackDeadline (s.record pn t ae) = some d' ∧ d' ≤ d := by
+  simp only [ackDeadline, Option.map_eq_some_iff] at h
+  obtain ⟨m, hm, rfl⟩ := h
+  have hsub : ∀ p ∈ s.outstanding, p ∈ (s.record pn t ae).outstanding := by
+    intro p hp
+    rw [State.record_outstanding]
+    split
+    · exact List.mem_append_left _ hp
+    · exact hp
+  obtain ⟨m', hm', hle⟩ := minArrival_mono hsub hm
+  refine ⟨s.deadlineOf m', ?_, s.deadlineOf_mono hle⟩
+  unfold ackDeadline; rw [hm']; rfl
+
+/-- (ii) §13.2.1, line 5075: an ACK frame discharges exactly the outstanding
+    packets it acknowledges, and no others. -/
+theorem outstanding_afterAckSent {s : State} {largest first : Nat} {rs : List AckRange}
+    {l : List Rng} (h : acked largest first rs = some l) :
+    (s.afterAckSent largest first rs).outstanding =
+      s.outstanding.filter (fun p => !Ranges.mem l p.1) := by
+  unfold State.afterAckSent; rw [h]; rfl
+
+theorem mem_outstanding_afterAckSent {s : State} {largest first : Nat} {rs : List AckRange}
+    {l : List Rng} (h : acked largest first rs = some l) (p : Nat × Time) :
+    p ∈ (s.afterAckSent largest first rs).outstanding ↔
+      (p ∈ s.outstanding ∧ Ranges.mem l p.1 = false) := by
+  rw [outstanding_afterAckSent h, List.mem_filter]
+  simp
+
+/-- A partial ACK leaves the rest owed: an outstanding packet the frame does
+    not cover is still outstanding, and the deadline is still set and still no
+    later than that packet's own. -/
+theorem ackDeadline_afterAckSent_of_uncovered {s : State} {largest first : Nat}
+    {rs : List AckRange} {l : List Rng} (h : acked largest first rs = some l)
+    {pn : Nat} {t : Time} (hp : (pn, t) ∈ s.outstanding) (hnc : Ranges.mem l pn = false) :
+    ∃ d, ackDeadline (s.afterAckSent largest first rs) = some d ∧ d ≤ s.deadlineOf t := by
+  have hmem : (pn, t) ∈ (s.afterAckSent largest first rs).outstanding :=
+    (mem_outstanding_afterAckSent h (pn, t)).mpr ⟨hp, hnc⟩
+  obtain ⟨d, hd, hle⟩ := ackDeadline_le_deadlineOf hmem
+  exact ⟨d, hd, by simpa using hle⟩
+
+/-- (iii) §12.3, line 4693: 2^62 - 1 is the number at which the sender must
+    stop, so it may not itself be used. -/
+theorem maySendPacketNumber_maxPn (s : State) : maySendPacketNumber s maxPn = false := by
+  simp [maySendPacketNumber]
+
+/-- `pnExhausted` is exactly "no packet number is left in this space". -/
+theorem pnExhausted_iff (s : State) :
+    pnExhausted s = true ↔ ∀ pn, maySendPacketNumber s pn = false := by
+  cases hl : s.largestSent with
+  | none =>
+    simp only [pnExhausted, hl, maySendPacketNumber, Bool.false_eq_true, false_iff]
+    intro hc
+    have := hc 0
+    simp [maxPn] at this
+  | some m =>
+    simp only [pnExhausted, hl, maySendPacketNumber, decide_eq_true_eq,
+      Bool.and_eq_false_iff, decide_eq_false_iff_not]
+    constructor
+    · intro h pn; omega
+    · intro h
+      have := h (m + 1)
+      omega
+
+/-- Once the space is spent, no packet of it may be sent — §12.3, line 4693:
+    "If the packet number for sending reaches 2^62 - 1, the sender MUST close
+    the connection without sending a CONNECTION_CLOSE frame or any further
+    packets". -/
+theorem not_maySendPacket_of_exhausted {s : State} {p : OutPacket}
+    (h : pnExhausted s = true) (hsp : p.ptype.space = some s.space) : ¬ MaySendPacket s p := by
+  intro hm
+  rw [(hm hsp).1] at h
+  exact Bool.noConfusion h
 
 /-- A packet whose payload is nothing but ACK frames. -/
 def ackOnly (fs : List Frame) : Bool :=
   !fs.isEmpty && fs.all (fun f => match f with | .ack .. => true | _ => false)
 
-/-- §13.2.1, line 5084: "Since packets containing only ACK frames are not
+/-- §13.2.1, line 5083: "Since packets containing only ACK frames are not
     congestion controlled, an endpoint MUST NOT send more than one such packet
     in response to receiving an ack-eliciting packet."  `sent` is the payloads
     sent in response to one received packet. -/
@@ -855,10 +1313,9 @@ def AckDelayOk (s : State) (now : Time) (delay : Time) : Prop :=
 /-! ## 9. Examples (scenarios from the text) -/
 
 private def s0 : State :=
-  { space := .appData, assembling := .oneRtt, received := [], largest := none,
-    largestTime := 0, largestAckEliciting := none, ackElicitingPending := false,
-    ackElicitingSinceAck := 0, ackImmediately := false, largestSent := some 4,
-    maxAckDelay := 25000 }
+  { space := .appData, received := [], minPn := 0, largest := none,
+    largestTime := 0, largestAckEliciting := none, outstanding := [],
+    ackImmediately := false, largestSent := some 4, maxAckDelay := 25000 }
 
 -- §12.3: a fresh packet is processed …
 example : component.step s0 (.recvPacket 0 100 true)
@@ -875,31 +1332,100 @@ example : ((s0.record 0 100 true).record 2 110 true).received = [⟨0, 0⟩, ⟨
 -- immediate ACK.
 example : ((s0.record 0 100 true).record 2 110 true).ackImmediately = true := by decide
 example : (s0.record 0 100 true).ackImmediately = false := by decide
--- §13.2.2, line 5163: two ack-eliciting packets, so an ACK is recommended.
-example : 2 ≤ ((s0.record 0 100 true).record 1 110 true).ackElicitingSinceAck := by decide
+-- §13.2.2, line 5163: two ack-eliciting packets are outstanding, so an ACK is
+-- recommended.
+example : ((s0.record 0 100 true).record 1 110 true).ackElicitingSinceAck = 2 := by rfl
 
 -- §13.1, line 5030: an ACK whose largest acknowledged is above anything we
 -- sent.  Both outcomes are permitted (SHOULD), the error preferred.
 example : component.step s0 (.recvAck 9 0 []) = .error .protocolViolation := by rfl
-example : component.accepts s0 (.recvAck 9 0 []) (.ok s0 []) = true := by rfl
+example : component.accepts s0 (.recvAck 9 0 []) (.ok s0 []) = true := by decide
 -- An ACK for packets we did send is simply processed.
 example : component.step s0 (.recvAck 3 0 []) = .ok s0 [] := by rfl
 -- §19.3.1, line 7375: a negative computed packet number is FRAME_ENCODING_ERROR.
 example : component.step s0 (.recvAck 3 5 []) = .error .frameEncodingError := by rfl
 example : component.step s0 (.recvAck 3 0 [⟨5, 0⟩]) = .error .frameEncodingError := by rfl
 
--- §13.1 / §13.2.6: what we may put in an ACK frame.
-private def s1 : State := ((s0.record 0 100 true).record 1 110 true)
-example : component.maySend s1 (.ack 1 0 1 #[] none) = true := by decide
--- acknowledging a packet number we never received
-example : component.maySend s1 (.ack 2 0 2 #[] none) = false := by decide
--- §13.2.6: an ACK for the application data space may not ride in a Handshake
--- packet.
-example : component.maySend { s1 with assembling := .handshake } (.ack 1 0 1 #[] none) = false := by
+/-! ### Regressions for the three defects the audit found
+
+`a0` is the audit's starting state: application data space, 25 ms
+max_ack_delay, nothing sent yet. -/
+
+private def a0 : State :=
+  { space := .appData, received := [], minPn := 0, largest := none,
+    largestTime := 0, largestAckEliciting := none, outstanding := [],
+    ackImmediately := false, largestSent := none, maxAckDelay := 25000 }
+
+-- (1) §13.2.1, line 5075.  An ack-eliciting packet at 0 µs must be
+-- acknowledged by 25 000 µs.  A later *non*-ack-eliciting packet at 24 000 µs
+-- adds no obligation and must not postpone that deadline: it used to give
+-- 49 000.
+example : ackDeadline ((a0.record 0 0 true).record 1 24000 false) = some 25000 := by rfl
+-- The ACK Delay field still measures from the largest packet number received
+-- (§13.2.5, line 5271), which is what `largestTime` is for.
+example : ((a0.record 0 0 true).record 1 24000 false).largestTime = 24000 := by rfl
+-- A later ack-eliciting packet adds a *later* deadline of its own; the state's
+-- deadline stays the earliest.
+example : ackDeadline ((a0.record 0 0 true).record 1 24000 true) = some 25000 := by rfl
+-- An earlier-arriving packet brings the deadline forward.
+example : ackDeadline ((a0.record 5 9000 true).record 6 1000 true) = some 26000 := by rfl
+
+-- (2) §13.2.1, line 5075.  Two ack-eliciting packets; an ACK naming only
+-- packet 1 is legal to send but settles only packet 1.
+private def a2 : State := (a0.record 0 0 true).record 1 1000 true
+example : component.maySendPacket a2 ⟨.oneRtt, [.ack 1 0 0 #[] none]⟩ = true := by decide
+-- packet 0 is still outstanding, and its deadline still stands (it used to
+-- become `none`)
+example : (a2.afterAckSent 1 0 []).outstanding = [(0, 0)] := by rfl
+example : ackDeadline (a2.afterAckSent 1 0 []) = some 25000 := by rfl
+example : ackOverdue (a2.afterAckSent 1 0 []) 30000 0 = true := by rfl
+-- an ACK that names both settles both
+example : component.maySendPacket a2 ⟨.oneRtt, [.ack 1 1 1 #[] none]⟩ = true := by decide
+example : ackDeadline (a2.afterAckSent 1 1 []) = none := by rfl
+example : (a2.afterAckSent 1 1 []).ackElicitingPending = false := by rfl
+-- §13.2.6, line 5293: an ACK naming packet numbers of this space may not ride
+-- in a packet of another space — the Handshake instance's `received` is empty.
+example : component.maySendPacket { a0 with space := .handshake }
+    ⟨.handshake, [.ack 1 0 0 #[] none]⟩ = false := by decide
+-- a packet of another space says nothing about this instance
+example : component.maySendPacket a2 ⟨.handshake, [.ack 1 0 0 #[] none]⟩ = true := by decide
+-- §13.1, line 5026: an ACK may not name a packet number we never received
+example : component.maySendPacket a2 ⟨.oneRtt, [.ack 2 0 0 #[] none]⟩ = false := by decide
+
+-- (3) §12.3, line 4693.  2^62 - 1 is the number at which the sender must stop,
+-- so it is not itself usable; it used to be accepted.
+example : maySendPacketNumber a0 (2 ^ 62 - 1) = false := by decide
+example : maySendPacketNumber a0 (2 ^ 62 - 2) = true := by decide
+example : pnExhausted { a0 with largestSent := some (2 ^ 62 - 2) } = true := by decide
+example : pnExhausted { a0 with largestSent := some (2 ^ 62 - 3) } = false := by decide
+-- and once the space is spent, no packet of it may be sent at all
+example : component.maySendPacket { a0 with largestSent := some (2 ^ 62 - 2) }
+    ⟨.oneRtt, [.ping]⟩ = false := by decide
+example : component.maySendPacket { a0 with largestSent := some (2 ^ 62 - 2) }
+    ⟨.initial, [.ping]⟩ = true := by decide
+
+/-! ### The minimum packet number (§12.3, line 4717) -/
+
+-- With no minimum maintained, a fresh packet is processed and only that.
+example : component.outcomes a0 (.recvPacket 7 100 true)
+    = [.ok (a0.record 7 100 true) [.processed 7 true]] := by decide
+example : component.accepts a0 (.recvPacket 7 100 true) .drop = false := by decide
+-- Once a minimum of 10 is maintained, an endpoint that has pruned may drop
+-- packet 7, and one that has not may still process it: both are permitted, the
+-- drop preferred.
+private def m0 : State := { a0 with minPn := 10 }
+example : component.step m0 (.recvPacket 7 100 true) = .drop := by rfl
+example : component.accepts m0 (.recvPacket 7 100 true)
+    (.ok (m0.record 7 100 true) [.processed 7 true]) = true := by decide
+-- at or above the minimum nothing changes
+example : component.outcomes m0 (.recvPacket 10 100 true)
+    = [.ok (m0.record 10 100 true) [.processed 10 true]] := by decide
+-- raising the minimum is always permitted and never lowers it
+example : component.step a0 (.raiseMinimum 10) = .ok m0 [] := by rfl
+example : (component.step m0 (.raiseMinimum 3)).next m0 = m0 := by rfl
+-- a duplicate is still dropped and nothing else, minimum or no minimum
+example : component.outcomes (m0.record 12 100 true) (.recvPacket 12 200 true) = [.drop] := by
   decide
--- §12.3, line 4692: we may not reuse a packet number we have already sent.
-example : maySendPacketNumber s0 4 = false := by decide
-example : maySendPacketNumber s0 5 = true := by decide
 
 /-! ## 10. Coverage and notes
 
@@ -911,38 +1437,45 @@ of lines 4709–4713.  The rest of §12.3–§12.5 is covered in
 |---|---|---|
 | §12.3 (4685) | "Subsequent packets sent in the same packet number space MUST increase the packet number by at least one." | `maySendPacketNumber` |
 | §12.3 (4692) | "A QUIC endpoint MUST NOT reuse a packet number within the same packet number space in one connection." | `maySendPacketNumber` |
-| §12.3 (4693) | packet number reaches 2^62-1 ⇒ MUST close without CONNECTION_CLOSE | `maySendPacketNumber` bounds the number by `maxPn`; the close is out of scope: WP6 Termination |
-| §12.3 (4709) | "A receiver MUST discard a newly unprotected packet unless it is certain that it has not processed another packet with the same packet number from the same packet number space." | `Step.duplicate`, `processed_at_most_once` |
+| §12.3 (4693) | "If the packet number for sending reaches 2^62 - 1, the sender MUST close the connection without sending a CONNECTION_CLOSE frame or any further packets" | `maySendPacketNumber` (rejects `maxPn` itself: `maySendPacketNumber_maxPn`), `pnExhausted` / `pnExhausted_iff`, `MaySendPacket` / `not_maySendPacket_of_exhausted`; the silent close is WP6 Termination |
+| §12.3 (4709) | "A receiver MUST discard a newly unprotected packet unless it is certain that it has not processed another packet with the same packet number from the same packet number space." | `Step.duplicate`, `Step.belowMinimum`, `processed_at_most_once` |
+| §12.3 (4717) | "The data required for detecting duplicates can be limited by maintaining a minimum packet number below which all packets are immediately dropped." | `State.minPn`, `Event.raiseMinimum` / `Step.raiseMin`, `Step.belowMinimum`, `minPn_mono` (NOTE 3) |
+| §12.3 (4719) | "Any minimum needs to account for large variations in round trip time…" | advice, not checkable here: how far back an endpoint keeps state is an implementation choice the model leaves free — `Step.raiseMin` permits any minimum |
 | §12.3 (4711) | "Duplicate suppression MUST happen after removing packet protection" | out of scope: packet protection; `Event.recvPacket` is by construction post-decryption |
-| §13.1 (5020) | "A packet MUST NOT be acknowledged until packet protection has been successfully removed and all frames contained in the packet have been processed." | `Step.process` (records only on processing), `MaySend`, `maySend_ack_sound`, `received_changes_only_on_recvPacket` |
-| §13.1 (5026) | "a receiver acknowledges receipt by sending one or more ACK frames containing the packet number of the received packet" | `MaySend` for `.ack` |
-| §13.1 (5030) | "An endpoint SHOULD treat receipt of an acknowledgment for a packet it did not send as a connection error of type PROTOCOL_VIOLATION, if it is able to detect the condition." | `Step.ackUnsent` / `Step.ackOk`, `acksUnsent` |
+| §13.1 (5020) | "A packet MUST NOT be acknowledged until packet protection has been successfully removed and all frames contained in the packet have been processed." | `Step.process` (records only on processing), `AckFrameSendable` / `MaySendPacket`, `ackFrameSendable_sound`, `maySendPacket_ack_sound`, `received_changes_only_on_recvPacket` |
+| §13.1 (5026) | "a receiver acknowledges receipt by sending one or more ACK frames containing the packet number of the received packet" | `AckFrameSendable`; `Event.sentAck` carries the fields and `State.discharge` settles exactly what they name |
+| §13.1 (5030) | "An endpoint SHOULD treat receipt of an acknowledgment for a packet it did not send as a connection error of type PROTOCOL_VIOLATION, if it is able to detect the condition." | SHOULD that *permits*: both `Step.ackUnsent` (preferred) and `Step.ackOk` are in `outcomes`; `acksUnsent` is the detectable part (NOTE 1) |
 | §13.2 (5047) | "Endpoints acknowledge all packets they receive and process." | `Step.process` records every processed packet number |
-| §13.2 (5052) | "When sending a packet for any reason, an endpoint SHOULD attempt to include an ACK frame if one has not been sent recently." | `Recommended.withOtherFrames` |
-| §13.2.1 (5064) | "Every packet SHOULD be acknowledged at least once, and ack-eliciting packets MUST be acknowledged at least once within the maximum delay … max_ack_delay" | `ackDeadline`, `AcknowledgedInTime` |
-| §13.2.1 (5075) | "An endpoint MUST acknowledge all ack-eliciting Initial and Handshake packets immediately and all ack-eliciting 0-RTT and 1-RTT packets within its advertised max_ack_delay" | `ackDeadline` (per space), `AcknowledgedInTime` |
+| §13.2 (5052) | "When sending a packet for any reason, an endpoint SHOULD attempt to include an ACK frame if one has not been sent recently." | `Recommended.withOtherFrames`, approximated: the guard is "an ack-eliciting packet is pending", not "not sent recently", which is a time condition the state does not carry (NOTE 13) |
+| §13.2.1 (5064) | MUST half: "ack-eliciting packets MUST be acknowledged at least once within the maximum delay … max_ack_delay" | `State.outstanding`, `ackDeadline`, `AcknowledgedInTime`, `ackOverdue` / `AckObligationMet` |
+| §13.2.1 (5064) | SHOULD half: "Every packet SHOULD be acknowledged at least once" (non-ack-eliciting packets included) | `EventuallyAcknowledged` — a liveness property of a whole run, so like the other trace predicates it binds nothing until WP12 supplies the run (NOTE 11) |
+| §13.2.1 (5075) | "An endpoint MUST acknowledge all ack-eliciting Initial and Handshake packets immediately and all ack-eliciting 0-RTT and 1-RTT packets within its advertised max_ack_delay" | `State.outstanding` with `State.ackDelayBudget` / `State.deadlineOf` (per space), `ackDeadline`, `ackDeadline_le_deadlineOf`, `ackDeadline_record_le`, `outstanding_afterAckSent`, `ackDeadline_afterAckSent_of_uncovered`, `ackOverdue` / `AckObligationMet` |
 | §13.2.1 (5078) | the exception: buffering packets whose keys are not yet available | out of scope: key availability is WP11 Handshake |
-| §13.2.1 (5084) | "an endpoint MUST NOT send more than one such packet in response to receiving an ack-eliciting packet" | `AtMostOneAckOnly` |
+| §13.2.1 (5083) | "Since packets containing only ACK frames are not congestion controlled, an endpoint MUST NOT send more than one such packet in response to receiving an ack-eliciting packet." | `AtMostOneAckOnly` |
 | §13.2.1 (5087) | "An endpoint MUST NOT send a non-ack-eliciting packet in response to a non-ack-eliciting packet" | `NoAckOfNonAckEliciting` |
-| §13.2.1 (5101) | SHOULD ACK without delay on reordering or a gap | `State.outOfOrder`, `State.ackImmediately`, `Recommended.immediate` |
-| §13.2.1 (5112) | CE-marked packets SHOULD be acknowledged immediately | out of scope: ECN (§13.4) |
+| §13.2.1 (5101) | "In order to assist loss detection at the sender, an endpoint SHOULD generate and send an ACK frame without delay when it receives an ack-eliciting packet either: …" | `State.outOfOrder`, `State.ackImmediately`, `Recommended.immediate` |
+| §13.2.1 (5112) | "Similarly, packets marked with the ECN Congestion Experienced (CE) codepoint in the IP header SHOULD be acknowledged immediately" | advice, not checkable here: no event carries an IP ECN codepoint — ECN is §13.4, out of scope by assignment |
+| §13.2.1 (5127) | "When only non-ack-eliciting packets need to be acknowledged, an endpoint MAY wait until an ack-eliciting packet has been received to include an ACK frame with outgoing frames." | permitted: `Recommended.withOtherFrames` fires only when `ackElicitingPending`, so waiting is never a violation |
 | §13.2.1 (5125) | "An endpoint SHOULD send an ACK frame with other frames when there are new ack-eliciting packets to acknowledge." | `Recommended.withOtherFrames` |
 | §13.2.1 (5131) | "A receiver MUST NOT send an ack-eliciting frame in all packets that would otherwise be non-ack-eliciting" | `NotAlwaysAckEliciting` |
-| §13.2.2 (5163) | "A receiver SHOULD send an ACK frame after receiving at least two ack-eliciting packets." | `Recommended.twoAckEliciting` |
-| §13.2.2 (5171) | "A receiver MAY process multiple available packets before determining whether to send an ACK frame in response." | permitted: `Recommended` constrains only the decision, never the order of `recvPacket` events |
+| §13.2.2 (5163) | "A receiver SHOULD send an ACK frame after receiving at least two ack-eliciting packets." | `Recommended.twoAckEliciting`, `State.ackElicitingSinceAck` (NOTE 9) |
+| §13.2.2 (5171) | "A receiver MAY process multiple available packets before determining whether to send an ACK frame in response." | permitted: `Recommended` constrains only the decision, never the order or grouping of `recvPacket` events |
 | §13.2.3 (5181) | "ACK frames SHOULD always acknowledge the most recently received packets" | `RecommendedAck` |
-| §13.2.3 (5198) | a receiver can discard unacknowledged ACK Ranges to limit frame size | permitted but not modelled: this state never discards; see NOTE 3 |
+| §13.2.3 (5191) | "After receiving acknowledgments for an ACK frame, the receiver SHOULD stop tracking those acknowledged ACK Ranges." | advice, not checkable here: `received` is never pruned, so there is nothing to stop tracking; `State.minPn` is the sanctioned way to bound the state and nothing requires raising it (NOTE 3) |
+| §13.2.3 (5198) | "A receiver can discard unacknowledged ACK Ranges to limit ACK frame size" | permitted: `MaySendPacket` never requires any particular range to be present, so a smaller ACK is always sendable; `received` itself is not pruned (NOTE 3) |
+| §13.2.3 (5201) | "Receivers MAY also limit ACK frame size further to preserve space for other frames or to limit the capacity that acknowledgments consume." | permitted: same reason as line 5198 |
 | §13.2.3 (5213) | "A receiver MUST retain an ACK Range unless it can ensure that it will not subsequently accept packets with numbers in that range." | `received_mono` (nothing is ever discarded, so the MUST holds vacuously) |
 | §13.2.3 (5218) | "they MUST retain the largest packet number that has been successfully processed" | `largest_mono`, `Inv` clauses 2–3 |
 | §13.2.3 (5223) | "A receiver SHOULD include an ACK Range containing the largest received packet number in every ACK frame." | `RecommendedAck` |
-| §13.2.4 (5229) | the exemplary range-limiting algorithm | informative; not modelled |
+| §13.2.4 (5229) | "Section 13.2.4 describes an exemplary approach for determining what packets to acknowledge in each ACK frame." | informative, no normative keyword: the algorithm is one way to satisfy line 5191, which this model does not need (NOTE 3) |
 | §13.2.5 (5271) | the endpoint measures the delay since the largest packet number was received | `State.largestTime` |
-| §13.2.5 (5280) | "An endpoint MUST NOT include delays that it does not control when populating the ACK Delay field in an ACK frame." | `AckDelayOk` |
-| §13.2.5 (5282) | endpoints SHOULD include buffering delays caused by unavailability of decryption keys | out of scope: WP11 |
-| §13.2.6 (5293) | "ACK frames MUST only be carried in a packet that has the same packet number space as the packet being acknowledged" | `MaySend`, `ack_same_space` |
-| §13.2.6 (5298) | "Packets that a client sends with 0-RTT packet protection MUST be acknowledged by the server in packets protected by 1-RTT keys." | `appData_ack_in_oneRtt` (with `FrameRules.ack_not_in_zeroRtt`) |
+| §13.2.5 (5280) | "An endpoint MUST NOT include delays that it does not control when populating the ACK Delay field in an ACK frame." | `AckDelayOk`, a sound over-approximation: uncontrolled delay is unobservable in the model, so the bound is total elapsed time (NOTE 14) |
+| §13.2.5 (5282) | "However, endpoints SHOULD include buffering delays caused by unavailability of decryption keys, since these delays can be large" | advice, not checkable here: key availability and the buffering it causes are WP11 Handshake; no event here records a packet held for want of keys |
+| §13.2.5 (5286) | "When the measured acknowledgment delay is larger than its max_ack_delay, an endpoint SHOULD report the measured delay." | advice, not checkable here: the model records arrival times but never the delay an implementation actually measured, so there is nothing to compare the reported value with |
+| §13.2.6 (5293) | "ACK frames MUST only be carried in a packet that has the same packet number space as the packet being acknowledged" | `MaySendPacket` (an ACK in a packet of this space is checked against *this* space's `received`), `maySendPacket_ack_sound` |
+| §13.2.6 (5298) | "Packets that a client sends with 0-RTT packet protection MUST be acknowledged by the server in packets protected by 1-RTT keys." | `appData_ack_in_oneRtt`, proved from `MaySendPacket` and `FrameRules.MaySendPacket` together |
 | §13.2.7 (5307) | "Packets containing PADDING frames are considered to be in flight" | `FrameRules.inFlight` / `FrameRules.packetInFlight` |
-| §13.2.7 (5311) | a sender SHOULD send other frames periodically alongside PADDING | out of scope: congestion control (RFC 9002) |
+| §13.2.7 (5310) | "To avoid a deadlock, a sender SHOULD ensure that other frames are sent periodically in addition to PADDING frames to elicit acknowledgments from the receiver." | advice, not checkable here: it is about the congestion window (RFC 9002), which is out of scope by assignment, and it constrains a whole sending schedule rather than any one packet |
 | §19.3 (7236) | "QUIC implementations MUST properly handle both types" (0x02 and 0x03) | `acked` ignores the ECN counts; ECN validation is §13.4, out of scope |
 | §19.3.1 (7375) | "If any computed packet number is negative, an endpoint MUST generate a connection error of type FRAME_ENCODING_ERROR." | `Step.ackMalformed`, `acked`, `acked_isSome_iff_check` |
 | §13.3, §13.4 | retransmission, ECN validation | out of scope by assignment |
@@ -963,14 +1496,33 @@ NOTES
    `Step.ackOk` (do not) are permitted for the same event, with the error
    listed first so that `component.step` is the recommended behaviour.
 
-3. **The range set never shrinks.**  §13.2.3 permits discarding older ACK
-   Ranges and keeping a minimum packet number below which packets are dropped
-   (§12.3, line 4718).  This model keeps everything, which is the conservative
-   reading: it satisfies the MUST of line 5213 vacuously, and it makes
-   `processed_at_most_once` unconditional.  An implementation that does prune
-   would accept a packet this model drops; that divergence is listed here
-   rather than encoded, because the text leaves the minimum entirely to the
-   implementation.
+3. **The minimum packet number, and what `received` does not do.**  §12.3,
+   line 4717 permits bounding the duplicate-detection state with "a minimum
+   packet number below which all packets are immediately dropped", and §13.2.3,
+   line 5191 recommends dropping ACK Ranges once they have been acknowledged.
+   An implementation that does either **drops packets this model would process**
+   — the divergence runs that way round, not the other (an earlier version of
+   this note had it backwards).
+
+   Encoded as `State.minPn`, raised by `Event.raiseMinimum`:
+
+   * `Step.belowMinimum` makes `.drop` a permitted outcome for any packet below
+     the minimum that is not already a duplicate, and `outcomes` lists it
+     *first*, so `component.step` is the pruning behaviour and `accepts` /
+     `trackSet` follow an implementation that prunes.
+   * `Step.process` is still permitted for the same packet, because this model
+     does **not** prune `received`: it keeps at least as much information as
+     the implementation it follows, so it is still "certain" in the sense of
+     line 4709 and may process the packet.  Both outcomes are therefore listed,
+     which is the usual treatment of a permission (BRIEF).
+   * `minPn` alone bounds nothing in `received`, and `Ranges.insert` never
+     forgets, so `received_mono`, the MUST of line 5213 and
+     `processed_at_most_once` all survive unchanged: a packet number that has
+     been processed is never processed again, whatever the minimum.
+   * The cost of keeping `received` whole is that `MaySendPacket` lets us
+     acknowledge packet numbers a pruning implementation would have forgotten.
+     That is safe (`maySendPacket_ack_sound` still holds) and only makes the
+     send-side predicate looser than the implementation needs.
 
 4. **Packet numbers are not bounded in `Step`.**  §12.3 says packet numbers lie
    in `[0, 2^62-1]`, but the receive side never sees an out-of-range number:
@@ -1002,6 +1554,76 @@ NOTES
    parameter so that `Component` stays a closed structure; WP12 will hold three
    instances and route each packet to the one for its space
    (`PacketType.space`).
+
+9. **What "since receiving at least two ack-eliciting packets" counts.**
+   §13.2.2, line 5163 does not say what resets the count.  Reading chosen:
+   `State.ackElicitingSinceAck` is the number of ack-eliciting packets still
+   *outstanding*, so a partial ACK reduces it by what it covered rather than
+   zeroing it.  It is only a `Recommended` clause, so nothing rejects an
+   implementation that counts differently; it is recorded because the earlier
+   model stored an independent counter that any ACK reset to 0 even when
+   packets were still owed.
+
+10. **`largestTime` is the ACK Delay input, not the deadline input.**
+    §13.2.5, line 5271 measures the delay "between the time the packet with the
+    largest packet number is received and the time an acknowledgment is sent",
+    so `largestTime` follows the largest packet number, including a
+    non-ack-eliciting one.  The *obligation* of §13.2.1, line 5075 is per
+    ack-eliciting packet, so it lives in `State.outstanding`, and `ackDeadline`
+    is the earliest deadline among those.  Using `largestTime` for both let a
+    later non-ack-eliciting packet postpone an earlier packet's deadline;
+    `ackDeadline_record_le` now rules that out.
+
+11. **A deadline is not an obligation to act, and neither are the other trace
+    predicates.**  `ackDeadline` and
+    `AcknowledgedInTime` only say that an ACK frame, *if* one is sent, is not
+    late.  The MUST of §13.2.1, line 5075 also requires that one be sent at
+    all, which no single `Step` can express.  `ackOverdue s now` and
+    `AckObligationMet` are exported for that: WP12 must require `ackOverdue` to
+    be false at every point of a timed run of the composed endpoint.
+    Relatedly, `Event.sentAck` records an ACK frame the endpoint has already
+    checked with `MaySend`; `State.afterAckSent` discharges nothing for a frame
+    whose ranges do not compute, so a malformed ACK cannot settle anything.
+
+12. **"Immediately" is a zero *intentional* delay.**  For the Initial and
+    Handshake spaces `State.ackDelayBudget` is `0`, so `ackDeadline` is the
+    arrival time itself and `ackOverdue s now 0` is true for every `now` after
+    it — no real endpoint could satisfy it.  §13.2.5, line 5271 says what is
+    being bounded: "the delays **intentionally introduced**".  The model has no
+    notion of what an endpoint costs to run, so `ackOverdue`,
+    `AcknowledgedInTime` and `AckObligationMet` take a `tolerance` the checker
+    supplies: `0` is the literal text, and a harness gives the processing bound
+    it is willing to allow.  The appData budget (`max_ack_delay`) is already
+    positive, so only Initial and Handshake need it.
+
+13. **Two sentences under one `Recommended` clause.**  §13.2, line 5052 ("if one
+    has not been sent recently") and §13.2.1, line 5125 ("when there are new
+    ack-eliciting packets to acknowledge") are both carried by
+    `Recommended.withOtherFrames`, guarded by `ackElicitingPending`.  That is
+    line 5125's condition exactly; line 5052's "recently" is a time condition
+    the state does not carry, and adding a "time of last ACK sent" field would
+    only be read by a clause that constrains nothing.  Recorded as an
+    approximation rather than encoded.
+
+14. **`AckDelayOk` is an over-approximation.**  §13.2.5, line 5280 forbids
+    including delay the endpoint does not control; the model cannot tell
+    controlled from uncontrolled delay, so `AckDelayOk` only requires the
+    reported value not to exceed the total elapsed time since the largest
+    packet arrived.  That is implied by the MUST and therefore sound, but it is
+    weaker: an endpoint that reports kernel buffering delay satisfies
+    `AckDelayOk` and violates line 5280.
+
+15. **No `assembling`, and `MaySend` is `True`.**  An earlier version carried
+    the packet type being assembled in `State`, duplicating
+    `FrameRules.State.assembling`.  Every send-side rule here is really about a
+    frame *in a packet*, and with one instance of this component per packet
+    number space a frame-only predicate would have to hold in all three
+    instances at once — which would forbid every ACK frame, since an ACK for
+    the application data space names numbers the Initial instance never
+    received.  Both rules therefore live in `Component.MaySendPacket`, which is
+    handed the real `OutPacket.ptype` and can say "a packet of another space is
+    none of this instance's business".  `MaySend` is `True` so that it does not
+    repeat `MaySendPacket` (BRIEF) and components still compose by conjunction.
 -/
 
 end Quic.Spec.Ack

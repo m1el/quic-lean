@@ -35,8 +35,22 @@ def Role.peer : Role → Role
   | .client => .server
   | .server => .client
 
-/-- Time in microseconds.  Always supplied on events; the model never reads a clock. -/
-abbrev Time := Nat
+/-- §11, line 4434: "a generic error code (such as PROTOCOL_VIOLATION or
+    INTERNAL_ERROR) can always be used in place of specific error codes." -/
+def TransportError.isGeneric : TransportError → Bool
+  | .protocolViolation | .internalError => true
+  | _ => false
+
+/-- A network address (IP and port), opaque. -/
+structure Addr where
+  id : Nat
+  deriving DecidableEq, Repr
+
+/-- Time in microseconds.  Always supplied on events; the model never reads a clock.
+
+    A notation rather than an `abbrev`: `omega` only recognises terms whose type
+    is syntactically `Nat`, and deadlines are arithmetic. -/
+notation "Time" => Nat
 
 /-- §2.1: a stream ID is a 62-bit integer; its two low bits give the type.
     Frames carry stream IDs as bare `Nat`s; wrap them with `⟨id⟩`. -/
@@ -177,11 +191,15 @@ structure OutPacket where
   frames : List Frame
   deriving DecidableEq
 
-/-- A UDP datagram about to be sent: its payload size and the packets coalesced
-    in it. -/
+/-- A UDP datagram about to be sent: its payload size, where it is going, and
+    the packets coalesced in it.  `isPmtuProbe` marks a datagram sent to probe
+    the path MTU (§14.4), which is exempt from some size rules.  Whether a
+    packet is ack-eliciting is derivable from its frames (`FrameRules`). -/
 structure OutDatagram where
   size : Nat
   packets : List OutPacket
+  dest : Addr := ⟨0⟩
+  isPmtuProbe : Bool := false
   deriving DecidableEq
 
 /-- The usual pattern for an API that cannot tell "processed, nothing visible"
@@ -191,6 +209,17 @@ def Obs.matchesLoosely [DecidableEq ε] (seen : Obs ε) (o : Obs ε) : Bool :=
   | .ok [], .drop => true
   | .drop, .ok [] => true
   | a, b => decide (a = b)
+
+/-- `matchesLoosely`, plus §11 line 4434: where the spec names a specific error
+    code, an implementation that reports a generic one instead still conforms.
+    (The sentence before it, "MAY use any applicable error code", is broader
+    and not checkable; this is the checkable part.)  `seen` is what the
+    implementation did, `o` what the spec permits. -/
+def Obs.matchesSpec [DecidableEq ε] (seen : Obs ε) (o : Obs ε) : Bool :=
+  seen.matchesLoosely o ||
+    match seen, o with
+    | .error c, .error _ => c.isGeneric
+    | _, _ => false
 
 /-! ### The shape of a component -/
 

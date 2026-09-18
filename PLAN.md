@@ -124,6 +124,12 @@ merged.
 | 12 Endpoint | `Endpoint.State` as the product of component states; `recv`: datagram → `decodePacket` → frame legality → dispatch to components → merge outcomes; `MaySend` for a whole packet as the conjunction of component predicates; top-level theorems lifted from components |
 | 13 DiffHarness | export `Endpoint.accepts` / `maySend`; join with WP8's trace: every ngtcp2 outcome must be accepted, every ngtcp2 packet must satisfy `maySend`; seed corpus; triage doc for mismatches |
 
+### Wave 2b (added after the transport audit)
+
+| WP | Content | Text (lines) |
+|---|---|---|
+| 14 Reliability | §13.3 retransmission of information: per frame type, what is re-sent and when it MUST NOT be (e.g. no STREAM data after RESET_STREAM, blocked frames carry the current limit, PATH_RESPONSE not retransmitted, CONNECTION_CLOSE handling) as `MaySend`/`Recommended` over an abstract "declared lost" event; §13.4 ECN: the transport-level MUSTs of ECN counting and validation (counts non-decreasing, validation failure disables ECN), with RFC 9002 state abstract | 5325–5639 |
+
 ### Review agents
 
 One per wave, started when the wave's packages report done, with no access to
@@ -156,8 +162,8 @@ counterexample state and stop; do not weaken `Step` to make it provable.
 - Isolation: this is its own git repository, so each agent runs with
   `isolation: worktree`, gets its own `.lake`, and merges are trivial because
   packages own disjoint files. Only WP0 and WP12 touch `QuicModel.lean`.
-- Order: WP0 → Wave 1 (8 parallel) → review 1 → Wave 2 (3) → review 2 →
-  Wave 3 (2) → review 3. Seventeen agent runs in total.
+- Order: WP0 → Wave 1 (8 parallel) → review 1 → Wave 2 (3) + Wave 2b (1) →
+  review 2 → Wave 3 (2) → review 3.
 
 ## 4a. What Wave 1 taught us (inputs to Wave 3)
 
@@ -189,6 +195,60 @@ From the spec packages:
   send predicates (default `True`) and the free functions are folded in.
 - A server's general right to refuse a connection (CONNECTION_REFUSED, §5.2.2)
   belongs to connection acceptance in WP12, not to address validation.
+
+## 4b. Disposition of TRANSPORT_AUDIT.md
+
+The audit was written against the tree before WP2 merged; status as of the
+commit that adds this section:
+
+| Audit item | Status |
+|---|---|
+| ACK deadline can move later (§13.2.1) | confirmed; fix in progress on `wp3-ack-fix` (obligations tracked per ack-eliciting packet, separate from the ACK Delay timestamp) |
+| Partial ACK clears all obligations | confirmed; same branch (`sentAck` carries its ranges; only covered packets are discharged); plus an exported `AckOverdue` predicate so the composed endpoint can require ACKs to be *sent*, not only be timely when sent |
+| Packet-number exhaustion off by one (§12.3) | confirmed; bound fixed on `wp3-ack-fix`, the silent close added to Termination on `wp6-pn-exhaustion` (neither side owned it before) |
+| Streams missing | stale: WP2 merged (send/receive machines, final size, stream credit); stream table and connection flow control are WP9, running |
+| Handshake, migration missing | WP11 and WP10, running |
+| Endpoint integration, behavioural differential | WP12, WP13, as planned; `Core` now has packet- and datagram-level send fields and set-based tracking for them to use |
+| §13.3 / §13.4 unowned | correct: every package declared them out of scope and no package owned them. Added as WP14 |
+| `step_sound` does not validate `Step` against the prose | agreed and by design (PLAN §1, "What validates `Step` itself"); this audit and the two Wave 1 review agents are that validation, and all three ACK defects passed every proof |
+| Trace-level obligations | agreed: a per-step predicate cannot force something to happen. WP12 must state liveness-style MUSTs (ACK within max_ack_delay, RESET_STREAM owed after STOP_SENDING, second path validation) as requirements on timed traces, fed by exported predicates such as `AckOverdue` |
+| Draft-34 vs RFC 9000, extension profile | open. The model follows draft-34 plus RFC 9221 (DATAGRAM), RFC 9287 (grease bit) and RFC 9369 (v2 type codes) at the wire layer only. Needs a text diff against RFC 9000 and an explicit profile before any conformance claim |
+
+## 4c. Review of Wave 1, batch B (`reviews/wave1-b.md`): disposition
+
+HIGH and MEDIUM findings, all accepted unless noted:
+
+| Finding | Owner | Status |
+|---|---|---|
+| AV-1 anti-amplification binds a client's first packet | WP5 fix run | dispatched |
+| PV-1 duplicate/late PATH_RESPONSE accepted as PROTOCOL_VIOLATION | WP5 fix run | dispatched |
+| AV-2, AV-3 missing MAY-discard / SHOULD-proceed alternatives | WP5 fix run | dispatched |
+| AV-5 server-side Retry send rules (§17.2.5.1) unmodelled | WP5 fix run | dispatched |
+| T-1 stateless reset size rule drops the "unless" exemption | WP6 fix run | dispatched |
+| T-2 idle close mandatory at the exact deadline instant | WP6 fix run | dispatched |
+| T-5 `MaySend` in closing stricter than the text (lead's earlier instruction was wrong too) | WP6 fix run | dispatched |
+| T-6 `Recommended` drops a qualifier; T-7 `confirmed` lost on closing; wrong line numbers in §10.2 | WP6 fix run | dispatched |
+| DS-1 no `.drop` alternative for received datagrams | WP7 fix run | dispatched |
+| DS-2 NO_VIABLE_PATH offered unconditionally; DS-3 local `OutDatagram` | WP7 fix run | dispatched |
+| VN-1 CID check applied to the §6.2 abandon path | WP7 fix run | dispatched |
+| T-4 §11 generic error codes | `Core`: `Obs.matchesSpec` | done |
+| `Spec.OutDatagram` lacked destination and probe flag | `Core` | done |
+| AV-4 CONNECTION_REFUSED (§5.2.2); T-4 second half, §11.1 "MAY discard an invalid Initial even where an error is mandated"; VN-2 "MUST drop under all other circumstances"; T-3 closing-state amplification rules (§10.2.1 lines 3993, 4008); conflicting `.drop` readings between PathValidation and Termination | WP12 | recorded: composition must take the *union* for connection-level refusals and let Termination's phase gate every other component |
+
+## 4d. Review of Wave 1, batch A (`reviews/wave1-a.md`): disposition
+
+All four HIGH findings are the model being stricter than the text; none admits
+forbidden behaviour. All accepted.
+
+| Finding | Owner | Status |
+|---|---|---|
+| W4-1 `peerActiveAfter` ignores Retire Prior To already sent; W4-2, W4-3 missing MAYs; W4-4 coverage rows | WP4 fix run | queued |
+| W2-1 RESET_STREAM: FINAL_SIZE_ERROR must also be permitted when both rules fire (ngtcp2 checks final size first); W2-2 MAX_STREAM_DATA after FIN is a SHOULD; W2-3 STREAM_DATA_BLOCKED has no bounds or errors; W2-4 "can safely ignore" made mandatory; W2-5..8 | WP2 fix run | queued |
+| W2-6 §13.3 "content of a RESET_STREAM MUST NOT change when sent again" | WP2 fix run (send rule of the stream) and WP14 coverage | queued |
+| W3-1 minimum-packet-number drop (§12.3) not permitted; W3-4 `MaySendPacket` for empty packets and frame/packet-type legality; W3-5/6 coverage | WP3 fix run (already running on the audit's ACK defects; W3-3 is the same defect) | sent as addendum |
+| W1-1 duplicate parameters: first-copy-wins also conforms; W1-2 dropped SHOULDs; citation drift | WP1 fix run | queued |
+| Ruling on `Recommended` vs "advice only" | BRIEF.md | done |
+| Composition notes: `assembling` duplicated in FrameRules and Ack (both needed); `Send.written` means the harness must synthesise `appWrite`; grow-only state vs pruning implementations | WP12 / WP13 | recorded |
 
 ## 5. Risks
 
