@@ -823,7 +823,7 @@ end Examples
 | §7 (2200) | CRYPTO offsets "start from zero in each packet number space" | `Streams`, one `Crypto` per `CryptoLevel`, each starting at 0 |
 | §7 (2204) | Figure 4, the simplified handshake | examples |
 | §7 (2231) | "Endpoints MUST explicitly negotiate an application protocol" | out of scope: ALPN is inside TLS |
-| §7.1 (2257, 2289) | Figures 5 and 6, the 1-RTT and 0-RTT flows | examples |
+| §7.1 (2257, 2289) | Figures 5 and 6, the 1-RTT and 0-RTT flows | examples: `fig5` replays Figure 5 event by event at the client; Figure 6 differs only in 0-RTT, covered by the `MaySendPacket` examples |
 | §7.2 (2322) | the long header's two connection IDs | `Event.recvHeader`, `SendHeader` |
 | §7.2 (2333) | "each endpoint sets the Destination Connection ID field in subsequent packets it sends to the value of the Source Connection ID field that it received" | `State.adoptScid`, `HdrStep.cliInitialFirst`, `HdrStep.srvInitialFirst` |
 | §7.2 (2337) | the client's first DCID is unpredictable and "MUST be at least 8 bytes in length" | `SendHeader` (length); unpredictability is not a property of a trace |
@@ -844,9 +844,9 @@ end Examples
 | §7.3 (2414) | "If it sends a Retry packet, a server also includes the Source Connection ID field from the Retry packet in retry_source_connection_id" | `Step.sentRetry` |
 | §7.3 (2418) | "The values provided by a peer … MUST match the values that an endpoint used in the Destination and Source Connection ID fields of Initial packets that it sent (and received, for servers)" | `cidMismatch`, `cids_ok_iff` |
 | §7.3 (2428) | absence of initial_source_connection_id from either endpoint, or of original_destination_connection_id from the server: TRANSPORT_PARAMETER_ERROR | `missingCid`, `ParamStep.missing`, `authOutcomes_missing` |
-| §7.3 (2433–2444) | the three "TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION" bullets | `cidMismatch`, `ParamStep.mismatchTpe`/`mismatchPv`, `authOutcomes_mismatch` |
+| §7.3 (2433–2444) | the three "TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION" bullets | `cidMismatch`, `ParamStep.mismatchTpe`/`mismatchPv`, `authOutcomes_mismatch`; the three bullets split out by role and Retry in `cids_ok_client_noRetry`, `cids_ok_client_retry`, `cids_ok_server` |
 | §7.3 (2446) | "If a zero-length connection ID is selected, the corresponding transport parameter is included with a zero-length value" | `optCid`: `some []` is a legal value and compares equal to a zero-length `Cid` |
-| §7.3 (2449, 2479) | Figures 7 and 8 | examples |
+| §7.3 (2449, 2479) | Figures 7 and 8 | examples; `cids_ok_client_noRetry` is Figure 7 and `cids_ok_client_retry` Figure 8 |
 | §7.5 (2703) | "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames" | `Inv` (`4096 ≤ s.bufLimit`) |
 | §7.5 (2704) | "Endpoints MAY choose to allow more data to be buffered" | `State.bufLimit` is a parameter |
 | §7.5 (2707) | "An endpoint's buffer size does not need to remain constant" | permissive; `bufLimit` is read, never required to be fixed |
