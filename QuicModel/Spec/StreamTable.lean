@@ -289,7 +289,7 @@ which may be in the middle of that line.
 | §19.14 (7919) | STREAMS_BLOCKED above 2^60: STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR | `Step.streamsBlockedTooLarge₁/₂` |
 | §19.8 (7637) | STREAM for a locally-initiated stream not yet created, **or for a send-only stream**: STREAM_STATE_ERROR | `Step.localNotCreated` / `localNotCreatedMandatory` for the first half; WP2 (`Stream.Step.recvMissing`) for the second |
 | §19.5 (7473) | STOP_SENDING for a locally-initiated stream not yet created: STREAM_STATE_ERROR | `Step.localNotCreated`, `localNotCreatedMandatory` |
-| §19.4 (7431), §19.5 (7476), §19.10 (7736) | the *send-only / receive-only* halves of those sentences | WP2 (`Stream.Step.sendMissing`/`recvMissing`), reached through this file's routing |
+| §19.4 (7431), §19.5 (7475), §19.10 (7736) | the *send-only / receive-only* halves of those sentences | WP2 (`Stream.Step.sendMissing`/`recvMissing`), reached through this file's routing |
 | §13.3 (5409) | blocked frames carry the limit in force when transmitted | `MaySend` for DATA_BLOCKED / STREAMS_BLOCKED |
 | §13.3 (rest) | retransmission and loss | out of scope by assignment: WP14 |
 
@@ -431,7 +431,16 @@ NOTES
     on.  A citation passes only when that line is the cited one.  The convention
     is the line the sentence's first word sits on, which is often in the middle
     of the line (for instance §4.6, line 1546 begins after "…set by their peer."
-    on the same line).
+    on the same line).  68 distinct citations (211 occurrences across the six
+    files) pass; nothing in this package is unchecked.  One consequence worth
+    flagging to the lead: the sentence "An endpoint that receives a STOP_SENDING
+    frame for a receive-only stream MUST terminate the connection with error
+    STREAM_STATE_ERROR" begins with "An" at the *end* of line 7475, so this
+    package cites §19.5, line 7475, whereas WP2's `Spec/Stream.lean` cites 7476
+    under its own convention ("except where its first word or two dangle at the
+    end of the previous line — then it is the next line").  The two files
+    therefore disagree by one line on that one sentence; the rule used here is
+    the one the review asked for.
 -/
 
 end Quic.Spec.StreamTable

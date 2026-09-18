@@ -135,7 +135,7 @@ theorem freshStream_inv (s : State) (id : StreamId) : Stream.Inv (s.freshStream 
     (e : Stream.Event) :
     connSendBlocked (s.openThrough id) st e = connSendBlocked s st e := rfl
 
-/-- §2.1, line 712: after opening `id`, `id` exists … -/
+/-- §2.1, line 718: after opening `id`, `id` exists … -/
 @[simp] theorem has_openThrough_self (s : State) (id : StreamId) :
     (s.openThrough id).has id = true := by
   simp only [State.has, openThrough_opened, and_self, reduceIte, decide_eq_true_eq]

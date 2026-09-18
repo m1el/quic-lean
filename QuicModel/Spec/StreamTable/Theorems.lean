@@ -409,7 +409,7 @@ theorem openLimit_error (s : State) (id : StreamId) (e : Stream.Event)
 /-- … and the hypothesis `s.has id = false` of `openLimit_error` is free: in a
     state satisfying the invariant, a peer-initiated stream ID beyond the limit
     we advertised cannot already exist.  So `Step.openLimit` really does cover
-    every frame §4.6, line 1554 speaks of. -/
+    every frame §4.6, line 1546 speaks of. -/
 theorem not_has_of_exceeding_limit {s : State} (hi : Inv s) {id : StreamId}
     (hr : ¬ id.initiator = s.role) (hl : s.maxStreamsLocal.get id.dir ≤ id.index) :
     s.has id = false := by
