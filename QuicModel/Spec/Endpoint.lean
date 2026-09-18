@@ -55,7 +55,7 @@ Five combinators in `Endpoint/Merge.lean` and two in `Endpoint/Pipeline.lean`.
 * **A component's `.drop` discards *this packet*, not the datagram.**  `gate s l
   k` reads `.drop` as `[.ok s []]` and carries on with the state the gate
   started from, so the packets coalesced after it are still processed (§12.2,
-  line 4614).  Because the continuation resumes from the *unchanged* state,
+  line 4619).  Because the continuation resumes from the *unchanged* state,
   `gate` is not a weakening of any component: `.drop` means "nothing changed",
   and that is exactly what it does.
 
@@ -72,6 +72,17 @@ Five combinators in `Endpoint/Merge.lean` and two in `Endpoint/Pipeline.lean`.
   frames a rule says are now *owed*) are appended to an `.ok`'s effect list;
   errors and drops carry none.  A `sendPending` is not a packet going out —
   §13.2 and §13.3 decide when a frame travels and both are out of scope.
+
+* **Coalescing.**  `recvPackets` walks the packets of one datagram on a fuel
+  loop.  §12.2, line 4619 ("the receiver MAY either discard or buffer the packet
+  for later processing and MUST attempt to process the remaining packets") means
+  a packet whose protection cannot be removed leaves `Effect.skippedRest` behind
+  and the loop *continues*, at the offset `packetEndOf` computes from the long
+  header's Length field (or the end of the datagram for a short header, §12.2
+  line 4606).  It stops only where the text's "attempt" is impossible.  This was
+  wrong until the examples layer: the loop used to end there, justified by a
+  sentence that is not in draft-34.  `TRIAGE.md` `WP13-5` has the whole story,
+  including that ngtcp2 stops too.
 
 **One correction to the earlier text.**  `Endpoint/Component.lean`'s doc said
 `addAlt` is "used only for §5.2.2 line 1936, §5.2.2 line 1946 and §11.1
@@ -118,7 +129,7 @@ Every `WP12` mention under `QuicModel/Spec`, with where it landed.
 | `PathValidation` 390, 934 (NOTES 11) | §8.2.2 (3183) a PATH_RESPONSE MUST be sent on the path the PATH_CHALLENGE arrived on | `Send.PathResponsesOnPath` / `frameResponseOk`, called with `s.pathOf (datagramPath d)`. PLAN §4c left WP12 to choose between adding a local address to `OutDatagram` and conjoining by hand: `OutDatagram.src` already existed by then, so the rule is a field rule after all |
 | `PathValidation` 949 (NOTES 12) | `Termination`'s phase must gate challenge and response handling | `phaseGate` |
 | `FrameRules` 850 | the frame-by-frame walk of a payload | `processFrames` fires `.recvFrame pt f` per frame, and `.recvPacketFrames pt []` for an empty payload |
-| `Handshake` 889 | §7.1 (2264) coalescing | `recvPackets`, a fuel loop over `parseOne`; §12.2 line 4622's "discard the remainder of the datagram" leaves `Effect.skippedRest` |
+| `Handshake` 889 | §7.1 (2264) coalescing | `recvPackets`, a fuel loop over `parseOne`; §12.2 line 4619's "MUST attempt to process the remaining packets" makes an undecryptable packet leave `Effect.skippedRest` and the loop go on (`packetEndOf`) |
 | `Handshake` 914 | §7.5 (2703) buffer at least 4096 bytes of out-of-order CRYPTO | `ConfigOk.bufLimit` — a side condition on the `Config`s WP12 may build, preserved by `step_inv` |
 | `Handshake` 924 | §17.2.2 (6364) "A server sends its first Initial packet in response to a client Initial" | **Not encoded**, and reasoned: a liveness MUST with no deadline. `Obligations.lean` states only the obligations that have one (§13.2.1) or that can be checked at the end of a run (§3.5, §13.3, §13.4.1); a deadline-less "something must eventually happen" cannot be checked from a finite trace without inventing a bound |
 | `Handshake` 927 | §17.2.2 (6376) first sentence: a client's first packet always includes a CRYPTO frame | **Not encoded**, and reasoned: `Endpoint` fires `sentPacket` but carries no "have we sent anything at all" flag, and requiring a CRYPTO frame in *every* first-flight Initial would wrongly reject the second packet of a ClientHello that spans packets. The second sentence (offset 0) *is* encoded, in `Handshake.MaySendPacket`; `Examples` §11 asserts both directions |
@@ -247,7 +258,14 @@ and `quic_endpoint_ecn_feedback_owed` are end-of-run checks.
 that reaches `Quic.decodePacket` is checked with `#guard` rather than `decide`
 (`Array.all` and `decodeFrames` compile to well-founded recursion, which the
 kernel does not unfold, and `native_decide` is barred), and its NOTES list the
-three places where the model and the recorded traces differ — all of them about
-application callbacks, which the text does not govern.  `TRIAGE.md` at the
-repository root carries them as WP13's first triage entries.
+places where the model and the recorded traces differ.  `TRIAGE.md` at the
+repository root carries them as WP13's first five triage entries; all but one
+are about application callbacks, which the text does not govern, and the one
+that is not (`WP13-5`, §12.2's coalescing rule) was fixed here.
+
+Assertions about the received bytes use `#guard`, which evaluates the same
+`Decidable` instance at build time and fails the build when it is false but is
+not a proof; everything else — the send-side predicates, the obligations, the
+application and TLS event families — is `decide` or `rfl`.  `#print axioms` on
+the headline theorems shows only `propext`, `Classical.choice` and `Quot.sound`.
 -/

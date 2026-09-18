@@ -140,10 +140,11 @@ private def shortPacket (pn : UInt8) (payload : ByteArray) : ByteArray :=
 
 /-- A long-header packet of type bits `ty` (§17.2: 0 Initial, 2 Handshake),
     version 1, with the connection IDs the harness fixes.  Only an Initial
-    carries a Token field. -/
-private def longPacket (ty : UInt8) (dcid scid token : ByteArray) (pn : UInt8)
+    carries a Token field.  `tag` is the AEAD tag: `stubTag` for a packet the
+    stub protection accepts, anything else for one it rejects. -/
+private def longPacketTagged (ty : UInt8) (tag dcid scid token : ByteArray) (pn : UInt8)
     (payload : ByteArray) : ByteArray :=
-  let body := padTo 4 payload ++ stubTag
+  let body := padTo 4 payload ++ tag
   let pnAndBody := (ByteArray.empty.push pn) ++ body
   let b0 : UInt8 := (0xc0 : UInt8) ||| (ty <<< 4)
   let preTok := (ByteArray.empty.push b0) ++ bytes [0, 0, 0, 1] ++
@@ -158,6 +159,10 @@ private def longPacket (ty : UInt8) (dcid scid token : ByteArray) (pn : UInt8)
     preamble.extract 1 preamble.size ++
     (ByteArray.empty.push (pn ^^^ byteAt mask 1)) ++ body
 
+private def longPacket (ty : UInt8) (dcid scid token : ByteArray) (pn : UInt8)
+    (payload : ByteArray) : ByteArray :=
+  longPacketTagged ty stubTag dcid scid token pn payload
+
 private def dgram (pn : UInt8) (fs : List Frame) : ByteArray :=
   shortPacket pn (encodeFrames fs.toArray)
 
@@ -166,6 +171,12 @@ private def initialDgram (pn : UInt8) (fs : List Frame) : ByteArray :=
 
 private def handshakeDgram (pn : UInt8) (fs : List Frame) : ByteArray :=
   longPacket 2 localCid peerCid ByteArray.empty pn (encodeFrames fs.toArray)
+
+/-- A Handshake packet whose AEAD tag is wrong, so `Protection.stub` refuses it
+    (`PacketErr.decryptFailed`). -/
+private def badHandshakePacket : ByteArray :=
+  longPacketTagged 2 ⟨Array.replicate 16 0⟩ localCid peerCid ByteArray.empty 0
+    (encodeFrames #[.ping])
 
 /-- The event one received datagram is. -/
 private def dgEvent (b : ByteArray) (now : Time := 0) : Event :=
@@ -341,6 +352,25 @@ connection error of type PROTOCOL_VIOLATION." -/
 #guard (recvNext cli 0 [.handshakeDone]).hs.confirmed = true
 #guard (recvNext cli 0 [.handshakeDone]).term.handshakeConfirmed = true
 #guard (recvNext cli 0 [.handshakeDone]).mig.handshakeConfirmed = true
+
+/-- A client that has the keys but whose handshake TLS has not yet reported as
+    complete.  §19.20, line 8208's PROTOCOL_VIOLATION is written for a *server*;
+    the WP11 review added `Handshake.Step.doneEarlyClose`, which lets a client in
+    this state close too rather than only ignore the frame.  Both are permitted,
+    so both are `accepts`. -/
+private def cliIncomplete : State :=
+  tls (tls (tls (tls (init (cfgOf false))
+    (.tlsKeys .read .handshake)) (.tlsKeys .write .handshake))
+    (.tlsKeys .read .oneRtt)) (.tlsKeys .write .oneRtt)
+
+example : cliIncomplete.hs.complete = false := by rfl
+
+#guard acceptsC cliIncomplete (dgEvent (dgram 0 [.handshakeDone]))
+  (.error .protocolViolation) = 1
+-- Ignoring it is the preferred outcome, and it does *not* confirm anything.
+#guard outcomeErrorC (recv cliIncomplete 0 [.handshakeDone]) = 0xffffffff
+#guard outcomeCbsC (recv cliIncomplete 0 [.handshakeDone]) = []
+#guard (recvNext cliIncomplete 0 [.handshakeDone]).hs.confirmed = false
 
 /-! ## 9. `harness/scripts/07-local-stream-write`
 
@@ -611,7 +641,46 @@ private def fig5_9 : State := recvNext fig5_8 1 srvFlight3
 -- …and only now may the client migrate (§9.2, line 3345).
 #guard (step prot fig5_9 (.local (.migrate ⟨⟨5⟩, peerAddr⟩) 0) != Outcome.drop) = true
 
-/-! ## 12. The phase gate, and what a closing endpoint may send -/
+/-! ## 12. §12.2: coalesced packets, and a packet that will not unprotect
+
+Not one of the eight scripts — `conn_trace.c` sends one packet per datagram —
+but writing them turned up a defect in the pipeline, so the case that reveals it
+is kept.
+
+§12.2, line 4619: "The receiver of coalesced QUIC packets MUST individually
+process each QUIC packet and separately acknowledge them, as if they were
+received as the payload of different UDP datagrams.  For example, if decryption
+fails (because the keys are not available or any other reason), the receiver MAY
+either discard or buffer the packet for later processing and MUST attempt to
+process the remaining packets."
+
+`Endpoint/Pipeline.lean` used to stop the loop at the first packet it could not
+unprotect, quoting a sentence ("an endpoint MUST discard the remainder of the
+datagram") that does not occur in draft-34 — the text says the opposite.  The
+fix is in `recvPackets`, which now skips the failing packet and carries on;
+`packetEndOf` is how it finds the next one.
+
+ngtcp2 stops too (`conn_recv_cpkt` returns 0 on `NGTCP2_ERR_DISCARD_PKT`), so
+the model is now deliberately stricter than the implementation it is tested
+against, which PLAN §1's "spec fidelity beats provability" and PLAN §5's
+"expected mismatches … should be listed in WP13's triage doc" both call for.
+The case is unreachable through `conn_trace.c` as it stands — its stub AEAD
+"verifies nothing", so decryption never fails.  `TRIAGE.md` `WP13-5`. -/
+
+private def coalesced : ByteArray :=
+  badHandshakePacket ++ dgram 0 [.stream 0 0 false abc]
+
+-- The first packet really is undecryptable, and the datagram really is two
+-- packets long.
+#guard (Quic.decodePacket prot coalesced 8 0).isOk = false
+#guard coalesced.size = badHandshakePacket.size + (dgram 0 [.stream 0 0 false abc]).size
+
+-- The STREAM frame in the second packet is processed all the same.
+#guard outcomeErrorC (recvOut srv coalesced) = 0xffffffff
+#guard outcomeCbsC (recvOut srv coalesced) = ["stream_open", "recv_stream_data"]
+#guard (recvNextB srv coalesced).st.recvTotal = 3
+
+/-! ## 13. The phase gate, and what a closing endpoint may send -/
 
 private def withPhase (s : State) (p : Termination.Phase) : State :=
   { s with term := { s.term with phase := p } }
@@ -642,7 +711,7 @@ example : maySendPacket srvClosing
     ⟨.handshake, [.connectionClose 10 (some 0) ByteArray.empty]⟩ = false := by decide
 example : maySendPacket srvClosing ⟨.oneRtt, [.ping]⟩ = false := by decide
 
-/-! ## 13. §8, line 2735: the anti-amplification budget -/
+/-! ## 14. §8, line 2735: the anti-amplification budget -/
 
 private def outDg (size : Nat) (fs : List Frame) : OutDatagram :=
   { size, packets := [⟨.oneRtt, fs⟩], dest := peerAddr, src := selfAddr }
@@ -656,7 +725,7 @@ example : maySendDatagram srv (outDg 1 [.ping]) = false := by decide
 -- §8.1, line 2818: "Clients are only constrained by the congestion controller."
 example : maySendDatagram cli (outDg 1200 [.ping]) = true := by decide
 
-/-! ## 14. §13.4.2.2, line 5626: ECN, once validation has failed -/
+/-! ## 15. §13.4.2.2, line 5626: ECN, once validation has failed -/
 
 private def srvEcnFailed : State :=
   { srv01 with ecnAppData := { srv01.ecnAppData with phase := .failed } }
@@ -712,13 +781,21 @@ private def srvEcnFailed : State :=
    is not a transport MUST), and the `TIME … expiry=` column (RFC 9002 timers are
    out of scope, and `Endpoint.State.pto` is carried rather than computed).
 
-6. **Citations corrected while writing this file** (the draft the previous run
+6. **A defect the examples turned up.**  §12 above is a case none of the eight
+   scripts reaches, kept because writing it showed `Endpoint.recvPackets` to be
+   stricter than §12.2 line 4619.  The fix is described there and in `TRIAGE.md`
+   `WP13-5`; it is the only change this layer made outside `Examples.lean`,
+   apart from doc comments.
+
+7. **Citations corrected while writing this file** (the draft the previous run
    left behind had them wrong, and they are fixed above): §4.6's "Endpoints MUST
    NOT exceed the limit set by their peer" is line 1546, not 1553; §4.5's "More
    generally, this is one higher than the offset of the byte with the largest
    offset sent" is line 1481, not 1479; §19.11's MAX_STREAMS bound is line 7803,
-   not 7802; and "A server MUST treat receipt of a HANDSHAKE_DONE frame" is
-   line 8208, while line 8207 is the sentence before it.
+   not 7802; "A server MUST treat receipt of a HANDSHAKE_DONE frame" is
+   line 8208, while line 8207 is the sentence before it; and §12.2's coalescing
+   sentences are lines 4597, 4606 and 4619 — the "line 4622" `Pipeline.lean` and
+   `Basic.lean` cited carried a sentence that is not in the draft at all.
 -/
 
 end Quic.Spec.Endpoint.Examples

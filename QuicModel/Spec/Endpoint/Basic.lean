@@ -381,9 +381,13 @@ inductive Effect where
   /-- A frame the endpoint now owes its peer.  It is *not* a packet going out:
       §13.2 and §13.3 decide when it actually travels, which is out of scope. -/
   | sendPending (f : Frame)
-  /-- A packet of the received datagram was skipped: §12.2, line 4622, "if the
-      packet cannot be processed, an endpoint MUST discard the remainder of the
-      datagram". -/
+  /-- A packet of the received datagram could not be unprotected and was
+      skipped.  §12.2, line 4619: "if decryption fails (because the keys are not
+      available or any other reason), the receiver MAY either discard or buffer
+      the packet for later processing and MUST attempt to process the remaining
+      packets" — so this marks *one* packet, and the coalesced packets after it
+      are still processed.  (The constructor's name is historical: an earlier
+      draft of this file read §12.2 as ending the datagram there.) -/
   | skippedRest
   deriving DecidableEq
 
