@@ -14,20 +14,21 @@ namespace Quic.Spec.AddressValidation
 
 /-! ## 1. State, events, effects
 
-`Addr` is `Spec.Addr` — §8.2, line 3074: "an address is the two-tuple of IP
+`Addr` is `Spec.Addr` — §8.2, line 3075: "an address is the two-tuple of IP
 address and port".  An opaque handle; the model never inspects it. -/
 
 /-- §8, line 2735: per-address anti-amplification accounting.
 
-    `received` counts, per §8.1 line 2777, "all of the payload bytes received in
-    datagrams that are uniquely attributed to a single connection", whether the
-    packets in them were processed or discarded.  `sent` counts the UDP payload
-    bytes sent to the address. -/
+    `received` counts, per §8.1 line 2776, "For the purposes of avoiding
+    amplification prior to address validation, servers MUST count all of the
+    payload bytes received in datagrams that are uniquely attributed to a single
+    connection", whether the packets in them were processed or discarded.
+    `sent` counts the UDP payload bytes sent to the address. -/
 structure AddrState where
   validated : Bool := false
   received : Nat := 0
   sent : Nat := 0
-  /-- §9.3, line 3378: "Receiving a packet from a new peer address containing a
+  /-- §9.3, line 3379: "Receiving a packet from a new peer address containing a
       non-probing frame indicates that the peer has migrated to that address."
       Set when we first hear from an address the peer moved to, and only then;
       it decides whether the limit of §9.3.1 line 3431 binds a *client* towards
@@ -45,11 +46,12 @@ inductive TokenSource where
   deriving DecidableEq, Repr
 
 /-- The outcome of the server's (opaque) token check for a client Initial
-    packet — §8.1.3, line 2987: "it MUST attempt to validate the token".
+    packet — §8.1.3, line 2987: "When a server receives an Initial packet with
+    an address validation token, it MUST attempt to validate the token".
 
     `valid src addrUnchanged` additionally reports whether the token's record of
     the client address still matches the address the Initial arrived from
-    (§8.1.4, lines 3046 and 3050).  How the check is performed, and the token's
+    (§8.1.4, lines 3045 and 3050).  How the check is performed, and the token's
     encryption and integrity protection (§8.1.4), are out of scope. -/
 inductive TokenCheck where
   | absent
@@ -75,8 +77,8 @@ structure State where
   role : Role
   /-- Anti-amplification accounting, per peer address. -/
   addrs : Map Addr AddrState
-  /-- §17.2.5.3, line 6656 (client): the token copied into every subsequent
-      Initial packet, with where it came from. -/
+  /-- §17.2.5.3, line 6655 (client): "The value of the Token field is copied to
+      all subsequent Initial packets" — the token, with where it came from. -/
   token : Option ClientToken
   /-- §17.2.5.2, line 6621 (client): Retry packets accepted in this connection
       attempt.  The invariant keeps it ≤ 1. -/
@@ -105,9 +107,9 @@ def State.info (s : State) (a : Addr) : AddrState := (s.addrs.get? a).getD {}
 def State.upd (s : State) (a : Addr) (f : AddrState → AddrState) : State :=
   { s with addrs := s.addrs.set a (f (s.info a)) }
 
-/-- §8.1, line 2777 counts the bytes.  `newPath` is the caller's judgement that
+/-- §8.1, line 2776 counts the bytes.  `newPath` is the caller's judgement that
     the datagram came from an address the peer has migrated to (§9.3, line
-    3378); it is only believed while we have sent nothing there, since an
+    3379); it is only believed while we have sent nothing there, since an
     address we have already written to is not new to us.  That restriction is
     what makes `State.limited` monotone, and hence `antiAmplification` true. -/
 def State.addRecv (s : State) (a : Addr) (n : Nat) (newPath : Bool) : State :=
@@ -133,7 +135,7 @@ theorem info_upd_ne (s : State) {a a' : Addr} (f : AddrState → AddrState) (h :
     (s.upd a f).role = s.role := rfl
 
 inductive Event where
-  /-- §8.1, line 2777: `n` payload bytes arrived from `a` in a datagram uniquely
+  /-- §8.1, line 2776: `n` payload bytes arrived from `a` in a datagram uniquely
       attributed to this connection (processed or discarded — both count).
       `newPath` marks a datagram from an address the peer migrated to. -/
   | datagramRecv (a : Addr) (n : Nat) (newPath : Bool)
@@ -167,9 +169,10 @@ inductive Effect where
   | addressValidated (a : Addr)
   /-- §8.1.2, line 2830: the server requests address validation with a Retry. -/
   | sendRetry (a : Addr)
-  /-- The server lets the cryptographic handshake proceed (§8.1.3, line 2994). -/
+  /-- The server lets the cryptographic handshake proceed (§8.1.3, line 2993). -/
   | handshakeProceeds (a : Addr)
-  /-- §17.2.5.3, line 6656: this token is copied to all subsequent Initials. -/
+  /-- §17.2.5.3, line 6655: "The value of the Token field is copied to all
+      subsequent Initial packets." -/
   | useToken (token : ByteArray)
   /-- §17.2.5.1, line 6601: this value is used as the Destination Connection ID
       of subsequent packets. -/
@@ -183,8 +186,9 @@ abbrev Out := Outcome State Effect
 /-! ## 2. The specification -/
 
 inductive Step : State → Event → Out → Prop
-  /-- §8.1, line 2777: "servers MUST count all of the payload bytes received in
-      datagrams that are uniquely attributed to a single connection.  This
+  /-- §8.1, line 2776: "For the purposes of avoiding amplification prior to
+      address validation, servers MUST count all of the payload bytes received
+      in datagrams that are uniquely attributed to a single connection.  This
       includes datagrams that contain packets that are successfully processed
       and datagrams that contain packets that are all discarded." -/
   | recv {s a n b} : Step s (.datagramRecv a n b) (.ok (s.addRecv a n b) [])
@@ -219,8 +223,9 @@ inductive Step : State → Event → Out → Prop
       Step s (.serverInitialProcessed a) .drop
   /-- A client does not receive client Initial packets. -/
   | initialWrongRole {s a chk} (h : s.role = .client) : Step s (.clientInitial a chk) .drop
-  /-- §8.1.3, line 2987: "it MUST attempt to validate the token, unless it has
-      already completed address validation." -/
+  /-- §8.1.3, line 2987: "When a server receives an Initial packet with an
+      address validation token, it MUST attempt to validate the token, unless it
+      has already completed address validation." -/
   | initialValidated {s a chk} (h : s.role ≠ .client) (hv : (s.info a).validated = true) :
       Step s (.clientInitial a chk) (.ok s [.handshakeProceeds a])
   /-- §8.1.3, line 2919: "Servers MAY discard any Initial packet that does not
@@ -241,7 +246,7 @@ inductive Step : State → Event → Out → Prop
       carry the expected token" — an Initial with no token at all. -/
   | initialAbsentDiscard {s a} (h : s.role ≠ .client) (hv : (s.info a).validated = false) :
       Step s (.clientInitial a .absent) .drop
-  /-- §8.1.3, line 2994: "If the validation succeeds, the server SHOULD then
+  /-- §8.1.3, line 2993: "If the validation succeeds, the server SHOULD then
       allow the handshake to proceed", and the address is validated. -/
   | initialValidRetryProceed {s a} (h : s.role ≠ .client) (hv : (s.info a).validated = false) :
       Step s (.clientInitial a (.valid .retry true))
@@ -261,7 +266,7 @@ inductive Step : State → Event → Out → Prop
   | initialValidRetryMovedRefuse {s a}
       (h : s.role ≠ .client) (hv : (s.info a).validated = false) :
       Step s (.clientInitial a (.valid .retry false)) (.error .connectionRefused)
-  /-- §8.1.3, line 2994: validation succeeded with a NEW_TOKEN token from the
+  /-- §8.1.3, line 2993: validation succeeded with a NEW_TOKEN token from the
       same address. -/
   | initialValidNewProceed {s a} (h : s.role ≠ .client) (hv : (s.info a).validated = false) :
       Step s (.clientInitial a (.valid .newToken true))
@@ -281,8 +286,9 @@ inductive Step : State → Event → Out → Prop
   | initialValidNewMovedRetry {s a}
       (h : s.role ≠ .client) (hv : (s.info a).validated = false) :
       Step s (.clientInitial a (.valid .newToken false)) (.ok s [.sendRetry a])
-  /-- §8.1.2, line 2876: "Instead, the server SHOULD immediately close
-      (Section 10.2) the connection with an INVALID_TOKEN error." -/
+  /-- §8.1.2, line 2876: "server SHOULD immediately close (Section 10.2) the
+      connection with an INVALID_TOKEN error" (the sentence opens with
+      "Instead," at the end of line 2875). -/
   | initialInvalidRetryClose {s a} (h : s.role ≠ .client) (hv : (s.info a).validated = false) :
       Step s (.clientInitial a (.invalid .retry)) (.error .invalidToken)
   /-- §8.1.2, line 2873: "The server can discard such a packet and allow the
@@ -416,7 +422,8 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
           · exact .cidValidates
           · exact .cidNoValidate _
         · simp only [List.mem_singleton] at h; subst h; exact .cidNoValidate _
-    | pathValidated a => simp only [outcomes, List.mem_singleton] at h; subst h; exact .pathValidates
+    | pathValidated a =>
+        simp only [outcomes, List.mem_singleton] at h; subst h; exact .pathValidates
     | serverInitialProcessed a =>
         simp only [outcomes] at h
         split at h
@@ -608,9 +615,11 @@ component's `MaySendDatagram` field. -/
     valid, an endpoint limits the amount of data it sends to that address."
 
     And whom it does *not* bind — §8.1, line 2818: "Clients are only constrained
-    by the congestion controller."  §21.1.1.1, line 8462: "The anti-amplification
-    limit does not apply to clients when establishing a new connection or when
-    initiating connection migration."
+    by the congestion controller."  §21.1.1.1, line 8451: "The anti-amplification
+    limit only applies when an endpoint responds to packets received from an
+    unvalidated address.", and line 8461: "The anti-amplification limit does not
+    apply to clients when establishing a new connection or when initiating
+    connection migration."
 
     So: a server is bound towards every client address it has not validated; a
     client only towards an address the peer migrated to (`newPeerAddr`) and that
@@ -682,7 +691,10 @@ def maySendRetry (h : RetryHeader) : Bool :=
 theorem maySendRetry_iff (h : RetryHeader) : maySendRetry h = true ↔ MaySendRetry h := by
   simp [maySendRetry, MaySendRetry]
 
-/-- §17.2.5.1, line 6615: "A server MUST NOT send more than one Retry packet in
+instance instDecidableMaySendRetry (h : RetryHeader) : Decidable (MaySendRetry h) :=
+  decidable_of_iff _ (maySendRetry_iff h)
+
+/-- §17.2.5.1, line 6616: "A server MUST NOT send more than one Retry packet in
     response to a single UDP datagram."  A received datagram may coalesce several
     Initial packets, so this constrains the effects produced while processing one
     whole received datagram, not one sent datagram: WP12 conjoins it over the
@@ -708,13 +720,13 @@ def Recommended (s : State) (e : Event) (o : Out) : Prop :=
   | .clientInitial a chk =>
       s.role = .client ∨ (s.info a).validated = true ∨
         (match chk with
-         -- §8.1.2, line 2876: "Instead, the server SHOULD immediately close
-         -- (Section 10.2) the connection with an INVALID_TOKEN error."
+         -- §8.1.2, line 2876: "server SHOULD immediately close (Section 10.2)
+         -- the connection with an INVALID_TOKEN error."
          | .invalid .retry => o = .error .invalidToken
          -- §8.1.3, line 2989: "the server SHOULD proceed as if the client did
          -- not have a validated address, including potentially sending a Retry."
          | .invalid .newToken => o = .ok s [.sendRetry a] ∨ o = .ok s [.handshakeProceeds a]
-         -- §8.1.3, line 2994: "If the validation succeeds, the server SHOULD
+         -- §8.1.3, line 2993: "If the validation succeeds, the server SHOULD
          -- then allow the handshake to proceed."
          | .valid _ true => o = .ok (s.validate a) [.addressValidated a, .handshakeProceeds a]
          | .valid _ false => o = .ok s [.handshakeProceeds a]
@@ -947,7 +959,7 @@ private def svV : State := sv.validate a1
 private def cl : State := init .client c0
 
 -- P5.1 (AV-1, fixed): a brand-new client may send its 1200-byte Initial, and
--- anything else — §8.1 line 2818, §21.1.1.1 line 8462.
+-- anything else — §8.1 line 2818, §21.1.1.1 lines 8451 and 8461.
 example : maySendTo (init .client c0) a1 1200 = true := by decide
 example : maySendTo (init .client c0) a1 1 = true := by decide
 example : maySendTo (init .client c0) a1 1000000 = true := by decide
@@ -1006,7 +1018,7 @@ example : component.accepts sv (.clientInitial a1 (.valid .retry true))
 
 -- Figure 9 (line 2895): Initial without a token → the server sends a Retry …
 example : component.step sv (.clientInitial a1 .absent) = .ok sv [.sendRetry a1] := by decide
--- §8.1.3, line 2994: Initial+Token with a valid Retry token → validated, proceed.
+-- §8.1.3, line 2993: Initial+Token with a valid Retry token → validated, proceed.
 example : component.step sv (.clientInitial a1 (.valid .retry true)) =
     .ok svV [.addressValidated a1, .handshakeProceeds a1] := by decide
 -- §8.1.2, line 2836: a second Retry is not an option there.
@@ -1063,22 +1075,22 @@ line the quoted sentence starts on.
 | §8.1 (2761) | MAY consider validated if the peer uses a CID we chose with ≥ 64 bits of entropy | `Step.cidValidates` / `.cidNoValidate` |
 | §8.1 (2765) | the client validates the server address by processing any packet | `Step.serverInitial` |
 | §8.1 (2773) | servers MUST NOT send more than 3× the bytes received prior to validation | `State.limited`, `MaySendTo` |
-| §8.1 (2777) | servers MUST count all payload bytes of datagrams uniquely attributed to the connection, processed or discarded | `Step.recv` (the caller supplies `n`) |
+| §8.1 (2776) | "For the purposes of avoiding amplification prior to address validation, servers MUST count all of the payload bytes received in datagrams that are uniquely attributed to a single connection" | `Step.recv` (the caller supplies `n`) |
 | §8.1 (2783) | clients MUST pad Initial datagrams to ≥ 1200 bytes | out of scope: WP7 DatagramSize |
-| §8.1 (2795) | clients MUST send a packet on a PTO | out of scope: loss recovery (RFC 9002) |
-| §8.1 (2805) | that packet MUST be an Initial in a ≥ 1200-byte datagram, else a Handshake packet | out of scope: WP7 DatagramSize / RFC 9002 |
+| §8.1 (2794) | "To prevent this deadlock, clients MUST send a packet on a probe timeout" | out of scope: loss recovery (RFC 9002) |
+| §8.1 (2796) | "Specifically, the client MUST send an Initial packet in a UDP datagram that contains at least 1200 bytes if it does not have Handshake keys, and otherwise send a Handshake packet" | out of scope: WP7 DatagramSize / RFC 9002 |
 | §8.1 (2818) | "Clients are only constrained by the congestion controller." | `State.limited`'s role clause; probes P5.1 |
 | §8.1.1 (2823) | a token MUST be constructed so the server can identify how it was provided | `TokenSource`, carried on `TokenCheck`; construction itself out of scope |
 | §8.1.2 (2830) | the server can request address validation by sending a Retry | `Step.initialAbsentRetry` |
 | §8.1.2 (2832) | the token MUST be repeated by the client in all Initials after the Retry | `Effect.useToken`, `State.token`; see NOTES 4 |
 | §8.1.2 (2836) | after a Retry token, the server can only refuse or proceed — no second Retry | `Step.initialValidRetry{Proceed,Refuse}`; no `sendRetry` outcome exists |
 | §8.1.2 (2873) | the server can discard an Initial with an invalid Retry token | `Step.initialInvalidRetryDiscard` |
-| §8.1.2 (2876) | SHOULD immediately close (Section 10.2) with INVALID_TOKEN | SHOULD → `Recommended`; `Step.initialInvalidRetryClose`, the preferred outcome |
+| §8.1.2 (2876) | "server SHOULD immediately close (Section 10.2) the connection with an INVALID_TOKEN error" | SHOULD → `Recommended`; `Step.initialInvalidRetryClose`, the preferred outcome |
 | §8.1.3 (2899) | a server MAY provide tokens for later connections with NEW_TOKEN | `Step.newTokenStore` |
-| §8.1.3 (2917) | the client MUST include the token in all Initials unless a Retry replaces it | `State.token` / `Effect.useToken`; see NOTES 4 |
+| §8.1.3 (2917) | "MUST include the token in all Initial packets it sends, unless a Retry replaces the token with a newer one" (the sentence opens "The client" at the end of line 2908, across a page break) | `State.token` / `Effect.useToken`; see NOTES 4 |
 | §8.1.3 (2918) | the client MUST NOT use a Retry token for future connections | `ClientToken.src`; see NOTES 4 |
 | §8.1.3 (2919) | servers MAY discard an Initial that does not carry the expected token | `Step.initialAbsentDiscard`, `.initialValidatedDiscard`, `.initialInvalidNewDiscard`, `.initialInvalidRetryDiscard` |
-| §8.1.3 (2923) | a token SHOULD have an expiration time | SHOULD → advice, not checkable here: token construction is opaque (`TokenCheck`) |
+| §8.1.3 (2924) | "Thus, a token SHOULD have an expiration time" | SHOULD → advice, not checkable here: token construction is opaque (`TokenCheck`) |
 | §8.1.3 (2930) | a NEW_TOKEN token MUST NOT include linkable information | out of scope: token construction |
 | §8.1.3 (2934) | a server MUST ensure every NEW_TOKEN frame it sends is unique across clients | out of scope: token construction; no cross-connection state here |
 | §8.1.3 (2936) | information distinguishing Retry from NEW_TOKEN tokens MAY be visible to others | out of scope: token construction |
@@ -1088,25 +1100,26 @@ line the quoted sentence starts on.
 | §8.1.3 (2960) | a Retry token MUST be used immediately and cannot be used in later attempts | `ClientToken.src`; see NOTES 4 |
 | §8.1.3 (2973) | a client SHOULD NOT reuse a NEW_TOKEN token for different connection attempts | SHOULD → advice, not checkable here: the component models one connection attempt, so reuse across attempts is not observable in its state |
 | §8.1.3 (2987) | on an Initial with a token the server MUST attempt validation unless already validated | `Step.initialValidated` (the exception) plus the `chk` cases |
-| §8.1.3 (2989) | invalid token ⇒ SHOULD proceed as if unvalidated, possibly with a Retry | SHOULD → `Recommended`; `Step.initialInvalid{Retry,New}{Proceed,Retry}` |
-| §8.1.3 (2994) | validation succeeds ⇒ SHOULD allow the handshake to proceed | SHOULD → `Recommended`; `Step.initialValid{Retry,New}Proceed` preferred |
+| §8.1.3 (2989) | "If the token is invalid then the server SHOULD proceed as if the client did not have a validated address, including potentially sending a Retry" | SHOULD → `Recommended`; `Step.initialInvalid{Retry,New}{Proceed,Retry}` |
+| §8.1.3 (2993) | "If the validation succeeds, the server SHOULD then allow the handshake to proceed" | SHOULD → `Recommended`; `Step.initialValid{Retry,New}Proceed` preferred |
 | §8.1.3 (3013) | clients MAY use tokens from one connection for any attempt using the same version | out of scope: token selection policy, no version state here |
 | §8.1.4 (3031) | an address validation token MUST be difficult to guess | out of scope: token construction |
 | §8.1.4 (3037) | the token MUST be covered by integrity protection | out of scope: token construction |
-| §8.1.4 (3046) | Retry tokens SHOULD let the server verify the source IP and port | SHOULD → advice, not checkable here: token construction; its *effect* is the `addrUnchanged` flag of `TokenCheck.valid` |
+| §8.1.4 (3045) | "Tokens sent in Retry packets SHOULD include information that allows the server to verify that the source IP address and port in client packets remain constant" | SHOULD → advice, not checkable here: token construction; its *effect* is the `addrUnchanged` flag of `TokenCheck.valid` |
 | §8.1.4 (3050) | NEW_TOKEN tokens MUST let the server verify the client IP | out of scope: token construction; effect is `addrUnchanged` |
 | §8.1.4 (3054) | if the client IP changed the server MUST adhere to the anti-amplification limit | `Step.initialValid*Moved*` do not validate the address |
 | §8.1.4 (3060) | servers MUST ensure replay of tokens is prevented or limited | out of scope: server token store (opaque `TokenCheck`) |
-| §8.1.4 (3061) | servers SHOULD accept Retry tokens only for a short time | SHOULD → advice, not checkable here: no clock and no server token store |
-| §8.1.4 (3064) | NEW_TOKEN tokens SHOULD NOT be accepted multiple times | SHOULD → advice, not checkable here: same reason |
+| §8.1.4 (3061) | "Servers SHOULD ensure that tokens sent in Retry packets are only accepted for a short time" | SHOULD → advice, not checkable here: no clock and no server token store |
+| §8.1.4 (3063) | "Tokens that are provided in NEW_TOKEN frames (Section 19.7) need to be valid for longer, but SHOULD NOT be accepted multiple times" | SHOULD → advice, not checkable here: same reason |
 | §8.1.4 (3066) | tokens MAY include extra information to narrow applicability or reuse | out of scope: token construction |
-| §17.2.5 (6579) | a client MUST ignore the bits of the Unused field | out of scope: header decoding (`QuicModel/Packet.lean`); no bit of it reaches `Event` |
+| §17.2.5 (6580) | "The value in the Unused field is set to an arbitrary value by the server; a client MUST ignore these bits" | out of scope: header decoding (`QuicModel/Packet.lean`); no bit of it reaches `Event` |
 | §17.2.5.1 (6592) | the Retry DCID is the client's Initial SCID | `MaySendRetry` |
 | §17.2.5.1 (6597) | the Retry SCID MUST NOT equal the client's Initial DCID (**server send**) | `MaySendRetry` |
 | §17.2.5.1 (6598) | a client MUST discard a Retry whose SCID equals its Initial's DCID (**client receive**) | `Step.retrySameCid` |
 | §17.2.5.1 (6601) | the client MUST use the Retry SCID as the DCID of subsequent packets | `Step.retryAccept`, `Effect.useDcid` |
-| §17.2.5.1 (6613) | a server MAY send Retry packets in response to Initial and 0-RTT packets | `Effect.sendRetry` for the Initial case; 0-RTT is out of scope (WP11 Handshake) |
-| §17.2.5.1 (6615) | a server MUST NOT send more than one Retry per received UDP datagram | `AtMostOneRetry` / `atMostOneRetry`, exported for WP12 |
+| §17.2.5.1 (6613) | "A server MAY send Retry packets in response to Initial and 0-RTT packets" | `Effect.sendRetry` for the Initial case; 0-RTT is out of scope (WP11 Handshake) |
+| §17.2.5.1 (6615) | "A server can send multiple Retry packets as it receives Initial or 0-RTT packets" | several `Effect.sendRetry`s across separate received datagrams are permitted |
+| §17.2.5.1 (6616) | "A server MUST NOT send more than one Retry packet in response to a single UDP datagram" | `AtMostOneRetry` / `atMostOneRetry`, exported for WP12 |
 | §17.2.5.2 (6621) | a client MUST accept and process at most one Retry per connection attempt | `Inv`, `atMostOneRetryAccepted` |
 | §17.2.5.2 (6622) | after an Initial or Retry from the server, discard later Retries | `Step.retryLate`, `retry_discarded_after` |
 | §17.2.5.2 (6626) | discard Retries whose Retry Integrity Tag cannot be validated | `Step.retryBadTag` (the tag check is the opaque `integrityOk`) |
@@ -1116,19 +1129,21 @@ line the quoted sentence starts on.
 | §17.2.5.2 (6646) | a Retry has no packet number and cannot be acknowledged | out of scope: WP3 FrameRules / ACK generation |
 | §17.2.5.3 (6651) | subsequent Initials carry the Retry's CID and token | `Effect.useDcid`, `Effect.useToken` |
 | §17.2.5.3 (6671) | the client MUST use the same cryptographic handshake message | out of scope: WP11 Handshake |
-| §17.2.5.3 (6673) | a server MAY treat a different handshake message as an error or discard it | out of scope: WP11 Handshake |
+| §17.2.5.3 (6672) | "A server MAY treat a packet that contains a different cryptographic handshake message as a connection error or discard it" | out of scope: WP11 Handshake |
 | §17.2.5.3 (6679) | a client MAY attempt 0-RTT after a Retry | out of scope: WP11 Handshake |
 | §17.2.5.3 (6682) | the client MUST NOT reset the packet number after a Retry | out of scope: WP3 / WP11 |
 | §17.2.5.3 (6691) | a server MAY abort the connection if it detects a reset packet number | out of scope: WP3 / WP11 |
 | §17.2.5.3 (6694) | Retry CIDs are copied to transport parameters and validated | out of scope: WP1 TransportParams, §7.3 |
-| §8.2 (3070–3271) | path validation | `Spec/PathValidation.lean` |
+| §8.2 (3070–3270) | path validation | `Spec/PathValidation.lean` |
 
 Sentences from outside the assigned range that this file relies on, listed so a
-reviewer can check the import: §9.3 line 3378 (a packet from a new peer address
+reviewer can check the import: §9.3 line 3379 (a packet from a new peer address
 means the peer migrated) and §9.3.1 line 3431 (an endpoint limits what it sends
 to an unvalidated peer address) justify `AddrState.newPeerAddr`; §21.1.1.1 line
-8462 (the limit does not apply to clients establishing a connection or
-initiating migration) is the authority for the client exemption.  §9 as a whole
+8451 (the limit "only applies when an endpoint responds to packets received from
+an unvalidated address") and line 8461 (it "does not apply to clients when
+establishing a new connection or when initiating connection migration") are the
+authority for the client exemption.  §9 as a whole
 is WP10 Migration's.
 
 NOTES
@@ -1136,9 +1151,10 @@ NOTES
 1. **Whom the limit binds (review AV-1).**  The first version applied the 3×
    budget to every unvalidated address of either role, which made a fresh
    client's very first Initial illegal: nothing had been received, so the budget
-   was zero.  §8.1 line 2818 and §21.1.1.1 line 8462 are explicit that a client
-   establishing a connection or initiating migration is exempt, and §8's own
-   sentence binds an endpoint only "after receiving packets from" the address.
+   was zero.  §8.1 line 2818 and §21.1.1.1 lines 8451 and 8461 are explicit that
+   a client establishing a connection or initiating migration is exempt, and
+   §8's own sentence binds an endpoint only "after receiving packets from" the
+   address.
    `State.limited` now binds a server towards any unvalidated client address, and
    a client only towards an address the *peer* moved to.  `newPeerAddr` is set
    from the receive event and only while nothing has been sent to that address —
@@ -1187,7 +1203,7 @@ NOTES
    `Spec.OutPacket` cannot express because it carries no connection IDs.
 
 7. **Ambiguity: may a server still send a Retry after a *valid* NEW_TOKEN
-   token?**  Line 2994 says it SHOULD allow the handshake to proceed, and line
+   token?**  Line 2993 says it SHOULD allow the handshake to proceed, and line
    2836's prohibition is explicitly restricted to tokens "provided in a Retry
    packet"; line 3052 ("Servers can use tokens from NEW_TOKEN in deciding not to
    send a Retry packet") presupposes that sending one is still a choice.  The
@@ -1199,7 +1215,7 @@ NOTES
    changed, even with a valid NEW_TOKEN token.  The reading encoded here extends
    that to Retry tokens as well (the `addrUnchanged` flag gates address
    validation for both sources), which is the conservative choice; a server
-   whose Retry tokens do verify the address pair — line 3046's SHOULD — never
+   whose Retry tokens do verify the address pair — line 3045's SHOULD — never
    sees `valid .retry false`.
 
 9. **Ambiguity: does line 2989 reach an invalid *Retry* token (review AV-3)?**

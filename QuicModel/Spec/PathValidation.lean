@@ -3,9 +3,12 @@ import QuicModel.Spec.AddressValidation
 /-
   WP5b: §8.2 path validation — PATH_CHALLENGE and PATH_RESPONSE.
 
-  Text: draft-ietf-quic-transport-34 lines 3070–3271 (§8.2 and its four
-  subsections).  The anti-amplification limit the datagram-expansion rules refer
-  to lives in `Spec/AddressValidation.lean`; migration policy (§9) is WP10's.
+  Text: draft-ietf-quic-transport-34 lines 3070–3270 (§8.2 and its four
+  subsections), plus two imports from §19 that the coverage table lists: §19.17
+  line 8086 (the Data field is 8 bytes) and §19.18 line 8110 (an unmatched
+  PATH_RESPONSE MAY be a PROTOCOL_VIOLATION).  The anti-amplification limit the
+  datagram-expansion rules refer to lives in `Spec/AddressValidation.lean`;
+  migration policy (§9) is WP10's.
 
   File order as in `Spec/Template.lean`.
 -/
@@ -16,14 +19,15 @@ namespace Quic.Spec.PathValidation
     are the two imports from §19, listed in the coverage table. -/
 def challengeSize : Nat := 8
 
-/-- §8.2.1, line 3154: "the smallest allowed maximum datagram size of 1200
+/-- §8.2.1, line 3155: "the smallest allowed maximum datagram size of 1200
     bytes"; the same constant as §14's (WP7 `DatagramSize`). -/
 def minDatagramSize : Nat := 1200
 
 /-! ## 1. State, events, effects -/
 
-/-- A network path: a local address and a peer address (§8.2, line 3074).  An
-    opaque handle; the model never inspects it. -/
+/-- A network path: a local address and a peer address — §8.2, line 3075:
+    "an address is the two-tuple of IP address and port".  An opaque handle; the
+    model never inspects it. -/
 structure Path where
   id : Nat
   deriving DecidableEq, Repr
@@ -382,7 +386,7 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
     **This MUST is not in `MaySend`, and cannot be** (review finding PV-3):
     neither `Frame` nor `Spec.OutPacket` nor `Spec.OutDatagram` carries a path,
     and `Spec.OutDatagram.dest` is a peer address, not the local/peer pair that
-    §8.2, line 3074 calls a path.  `component.maySend` alone therefore does
+    §8.2, line 3075 calls a path.  `component.maySend` alone therefore does
     *not* enforce line 3183; WP12 must call this function with the path the
     datagram is about to leave on.  See NOTES 11. -/
 def MaySendResponseOn (s : State) (d : ByteArray) (p : Path) : Prop := (d, p) ∈ s.pending
@@ -513,7 +517,7 @@ theorem isValidated_setStatus_ne (s : State) {p q : Path} (st : PathStatus) (h :
 
 /-- **(c)** A path becomes validated only by a PATH_RESPONSE that carries the
     data of one of our outstanding challenges for that path.
-    §8.2.3, lines 3212–3215; §8.2.4, line 3253: "a PATH_RESPONSE frame with
+    §8.2.3, lines 3212–3215; §8.2.4, line 3254: "a PATH_RESPONSE frame with
     appropriate data is required for path validation to succeed." -/
 theorem validated_only_by_response {s s' : State} {e : Event} {fx : List Effect} {p : Path}
     (h : Step s e (.ok s' fx)) (h0 : s.isValidated p = false) (h1 : s'.isValidated p = true) :
@@ -771,30 +775,33 @@ example : maySendResponseOn { s0 with pending := [(d2, p2)] } d2 p1 = false := b
 | §8.2 (3115) | an endpoint uses a new connection ID for probes from a new local address | out of scope: WP4 ConnIds / WP10 Migration (§9.5) |
 | §8.2.1 (3131) | initiate validation by sending PATH_CHALLENGE with an unpredictable payload | `Step.start`, `Effect.sendChallenge` |
 | §8.2.1 (3141) | an endpoint MAY send multiple PATH_CHALLENGE frames | several `Step.start`s on one path are permitted |
-| §8.2.1 (3142) | SHOULD NOT send multiple PATH_CHALLENGE frames in a single packet | `RecommendedPacket` (advice, not `MaySend`) |
-| §8.2.1 (3145) | SHOULD NOT probe more often than it would send an Initial | out of scope: pacing, RFC 9002; NOTES 5 |
+| §8.2.1 (3142) | "However, an endpoint SHOULD NOT send multiple PATH_CHALLENGE frames in a single packet" | SHOULD → `RecommendedPacket` (advice, not `MaySend`/`MaySendPacket`) |
+| §8.2.1 (3145) | "An endpoint SHOULD NOT probe a new path with packets containing a PATH_CHALLENGE frame more frequently than it would send an Initial packet" | SHOULD → advice, not checkable here: it constrains *when* a packet leaves, and `Component` has no send queue and no elapsed time between events (NOTES 5) |
 | §8.2.1 (3150) | MUST use unpredictable data in every PATH_CHALLENGE | `Step.start`'s freshness guard + `MaySend (.pathChallenge …)`; NOTES 2 |
-| §8.2.1 (3154) | MUST expand PATH_CHALLENGE datagrams to ≥ 1200 bytes unless the anti-amplification limit forbids it | `MaySendDatagram` |
-| §8.2.1 (3161) | MUST perform a second, expanded path validation when the first could not be expanded | not encoded; NOTES 3 |
+| §8.2.1 (3154) | "An endpoint MUST expand datagrams that contain a PATH_CHALLENGE frame to at least the smallest allowed maximum datagram size of 1200 bytes, unless the anti-amplification limit for the path does not permit sending a datagram of this size" | `MaySendDatagramOn`; NOTES 10 |
+| §8.2.1 (3163) | "To ensure that the path MTU is large enough, the endpoint MUST perform a second path validation by sending a PATH_CHALLENGE frame in a datagram of at least 1200 bytes" | not encoded; NOTES 3 |
 | §8.2.1 (3171) | MUST NOT discard datagrams that look too small when they carry PATH_CHALLENGE/PATH_RESPONSE | `challenge_never_dropped`, `response_never_dropped` |
 | §8.2.2 (3177) | MUST respond by echoing the PATH_CHALLENGE data in a PATH_RESPONSE | `Step.challenge`, `Effect.queueResponse`, `MaySend` |
-| §8.2.2 (3179) | MUST NOT delay a packet containing PATH_RESPONSE except for congestion control | out of scope: no scheduling in this model; NOTES 5 |
-| §8.2.2 (3183) | PATH_RESPONSE MUST be sent on the path the PATH_CHALLENGE was received on | the path in `Effect.queueResponse` / `State.pending`; `MaySendResponseOn` |
+| §8.2.2 (3179) | "An endpoint MUST NOT delay transmission of a packet containing a PATH_RESPONSE frame unless constrained by congestion control" | not checkable here: `Component` has no notion of *when* a packet leaves (NOTES 5) |
+| §8.2.2 (3183) | "A PATH_RESPONSE frame MUST be sent on the network path where the PATH_CHALLENGE was received" | the path in `Effect.queueResponse` / `State.pending`; `MaySendResponseOn` / `maySendResponseOn` — **not** `component.maySend`, which cannot see a path (NOTES 11) |
 | §8.2.2 (3186) | this requirement MUST NOT be enforced by the initiator of path validation | `Step.responseMatch` ignores the path a response arrives on |
-| §8.2.2 (3197) | MUST expand PATH_RESPONSE datagrams to ≥ 1200 bytes, MUST NOT past the anti-amplification limit | `MaySendDatagram` |
+| §8.2.2 (3197) | "An endpoint MUST expand datagrams that contain a PATH_RESPONSE frame to at least the smallest allowed maximum datagram size of 1200 bytes" | `MaySendDatagramOn` |
+| §8.2.2 (3200) | "However, an endpoint MUST NOT expand the datagram containing the PATH_RESPONSE if the resulting data exceeds the anti-amplification limit" | `MaySendDatagramOn`, the anti-amplification disjunct |
 | §8.2.2 (3205) | MUST NOT send more than one PATH_RESPONSE per PATH_CHALLENGE | `Step.responseSent`, `response_once` |
 | §8.2.3 (3212) | validation succeeds on a PATH_RESPONSE carrying the data of a previous PATH_CHALLENGE | `Step.responseMatch`, `validated_only_by_response` |
 | §8.2.3 (3214) | a PATH_RESPONSE on any path validates the path the challenge was sent on | `Challenge.path`, not the event's path |
-| §8.2.3 (3219) | after validation the endpoint can send more than 3× the data received | `AddressValidation.Step.pathValidates`, driven by `Effect.pathValidated` |
+| §8.2.3 (3220) | "the endpoint can now send more than three times the amount of data that has been received" | `AddressValidation.Step.pathValidates`, driven by `Effect.pathValidated` |
 | §8.2.3 (3221) | MUST initiate another validation with an expanded datagram | not encoded; NOTES 3 |
 | §8.2.3 (3225) | an acknowledgment of a PATH_CHALLENGE is not adequate validation | only `Step.responseMatch` validates; `validated_only_by_response` |
 | §8.2.4 (3231) | validation fails only when the endpoint abandons the attempt | `Step.timeoutFail` is the only failing step |
-| §8.2.4 (3234) | endpoints SHOULD abandon path validation based on a timer, 3×PTO RECOMMENDED | `Challenge.deadline`, supplied on `startValidation`; NOTES 4 |
-| §8.2.4 (3253) | a PATH_RESPONSE with appropriate data is required for validation to succeed | `validated_only_by_response` |
+| §8.2.4 (3234) | "Endpoints SHOULD abandon path validation based on a timer" (3×PTO RECOMMENDED) | SHOULD → `Recommended` + `step_recommended`; the deadline itself is `Challenge.deadline`, supplied on `startValidation`; NOTES 4 |
+| §8.2.4 (3254) | "a PATH_RESPONSE frame with appropriate data is required for path validation to succeed" | `validated_only_by_response` |
 | §8.2.4 (3257) | an abandoned path is unusable; the connection need not fail | `PathStatus.failed`, `Effect.pathFailed` |
-| §8.2.4 (3262) | an endpoint with no valid path MAY signal NO_VIABLE_PATH | out of scope: connection-level, WP6 Termination; NOTES 6 |
+| §8.2.4 (3261) | "An endpoint that has no valid network path to its peer MAY signal this using the NO_VIABLE_PATH connection error" | out of scope: connection-level, WP6 Termination / WP10 Migration; NOTES 6 |
 | §8.2.4 (3267) | validation may be abandoned because a migration started | out of scope: WP10 Migration |
-| §19.18 | an unmatched PATH_RESPONSE MAY be a PROTOCOL_VIOLATION | `Step.responseIgnore` / `Step.responseViolation` |
+| §19.18 (8110) | *(import from outside the assigned range)* "If the content of a PATH_RESPONSE frame does not match the content of a PATH_CHALLENGE frame previously sent by the endpoint, the endpoint MAY generate a connection error of type PROTOCOL_VIOLATION" | `Step.responseIgnore` (always) / `Step.responseViolation` (only when the content was never sent — `State.challenged`); NOTES 8 |
+| §19.17 (8086) | *(import from outside the assigned range)* "Data:  This 8-byte field contains arbitrary data" | `challengeSize`, `Inv` |
+| §19.17 (8092) | "The recipient of this frame MUST generate a PATH_RESPONSE frame (Section 19.18) containing the same Data" | `Step.challenge` — the same rule as §8.2.2 line 3177 |
 
 NOTES
 
@@ -813,7 +820,7 @@ NOTES
    picks its 8 bytes from a counter is accepted; one that reuses live data is
    not.
 
-3. **The second, expanded validation (lines 3161 and 3221) is not encoded.**
+3. **The second, expanded validation (lines 3163 and 3221) is not encoded.**
    Both sentences are obligations to start *another* path validation at some
    unspecified later time ("after a PATH_RESPONSE is successfully received or
    when enough bytes have been received on the path").  A liveness obligation
@@ -838,7 +845,7 @@ NOTES
    no notion of a send queue or of elapsed time between events.  They are listed
    here so a reviewer can see they were read and deliberately dropped.
 
-6. **NO_VIABLE_PATH is deliberately absent from `Step`.**  §8.2.4 line 3262
+6. **NO_VIABLE_PATH is deliberately absent from `Step`.**  §8.2.4 line 3261
    makes it a MAY, and hedges it further ("only possible if the network path
    exists but does not support the required MTU").  Admitting it as an outcome
    of `timeout` would let the model accept a connection error after any failed
@@ -852,30 +859,98 @@ NOTES
    path validated, so a failed MTU probe marks nothing.  `validated_persists`
    depends on this reading.
 
-8. **Ambiguity: which outstanding challenges does a success clear?**  Line 3212
-   says validation succeeds; it does not say what happens to the other
-   PATH_CHALLENGEs sent on the same path to guard against loss (line 3141).  The
-   reading encoded here: `Step.responseMatch` clears *all* outstanding challenges
-   for that path, so a late second PATH_RESPONSE for the same path is then an
-   unmatched one (ignored, or PROTOCOL_VIOLATION).  The alternative — keep them
-   and let each be answered — would make the same later response validate an
-   already validated path, which is harmless but leaves the timer of §8.2.4
-   armed on a validated path.
+8. **Which outstanding challenges does a success clear, and what a
+   PROTOCOL_VIOLATION needs (review PV-1).**  Line 3212 says validation
+   succeeds; it does not say what happens to the other PATH_CHALLENGEs sent on
+   the same path to guard against loss (line 3141).  The reading encoded here is
+   unchanged: `Step.responseMatch` clears *all* outstanding challenges for that
+   path.  The alternative — keep them and let each be answered — would make the
+   same later response validate an already validated path, which is harmless but
+   leaves the timer of §8.2.4 armed on a validated path.
+
+   What *did* change is the consequence.  Clearing the path leaves `matching`
+   returning `none` for a duplicated PATH_RESPONSE, for a reordered response to
+   a second challenge on the same path, and for a response that arrives after
+   the abandon timer of §8.2.4 — and the first version offered
+   `.error .protocolViolation` for all three.  §19.18 line 8110 authorises that
+   error only when the content "does not match the content of a PATH_CHALLENGE
+   frame previously sent by the endpoint", which none of the three is: we did
+   send that data.  `State.challenged` therefore remembers the data of every
+   PATH_CHALLENGE ever sent (grow-only, never cleared by `clearPath`,
+   `markValidated` or `markFailed`), `Step.responseViolation` requires
+   `everChallenged d = false`, and `Step.responseIgnore` — "no effect" — covers
+   every response that answers no outstanding challenge.  A response carrying
+   data we never sent still admits both outcomes, which is what line 8110 makes
+   a MAY.
+
+   Freshness (`State.hasData`, §8.2.1 line 3150) deliberately still looks only
+   at `outstanding`: reusing data that is *live* breaks the association the
+   sentence asks for, while reusing data whose challenge has been answered or
+   abandoned does not, and `challenged` then keeps that reuse out of line
+   8110's reach as well.
 
 9. **`pending` is a multiset.**  Receiving the same PATH_CHALLENGE data twice
-   entitles the peer to two PATH_RESPONSEs — line 3207: "The peer is expected to
+   entitles the peer to two PATH_RESPONSEs — line 3206: "The peer is expected to
    send more PATH_CHALLENGE frames as necessary to evoke additional
    PATH_RESPONSE frames."  One entry per received challenge, one removed per
    response sent, is what makes line 3205 a counting property rather than a
    set-membership one.
 
-10. **Composition.**  `MaySendDatagram` takes the `AddressValidation` state
-    explicitly rather than duplicating the budget here, so WP12 can pass the
-    anti-amplification state of the peer address of the path.  The two
-    components are joined at two points: `Effect.pathValidated` should fire
-    `AddressValidation.Event.pathValidated` for that address (§8.2.3, line
-    3219), and the byte counters are updated by `AddressValidation`'s own
-    datagram events.
+10. **The datagram rules cannot be this `Component`'s `MaySendDatagram` field,
+    and why.**  Both §8.2.1 line 3154 and §8.2.2 lines 3197/3200 are conditioned
+    on the anti-amplification limit, which lives in `AddressValidation.State`.
+    `Component.MaySendDatagram : State → OutDatagram → Prop` can only see
+    *this* component's state, and this state deliberately does not duplicate the
+    per-address byte counters.  A field written from `PathValidation.State`
+    alone would have to be `True` — "MUST expand unless the limit forbids it" is
+    unfalsifiable without the limit — and the BRIEF forbids a `MaySend*` that is
+    stricter than the text, so a guessed field would be worse than none.  The
+    field is therefore left at its default and the rule is the free-standing
+    two-state predicate `MaySendDatagramOn av dg`, stated over `Spec.OutDatagram`
+    so that the fold-in is a one-line conjunction for WP12:
+
+    ```
+    AddressValidation.component.maySendDatagram av dg    -- the 3× budget
+      && PathValidation.maySendDatagramOn av dg          -- the expansion rules
+      && (∀ pkt ∈ dg.packets, ∀ f ∈ pkt.frames, PathValidation.component.maySend s f)
+    ```
+
+    `dg.dest` supplies the peer address (WP10 maps a `Migration.Path` to it, and
+    `PathValidation.Path` to that — `Migration.lean` NOTES 1), `dg.size` the UDP
+    payload size, and `dg.packets` the frames.  The two components are joined at
+    two further points: `Effect.pathValidated` should fire
+    `AddressValidation.Event.pathValidated` for that address (§8.2.3, line 3220),
+    and the byte counters are updated by `AddressValidation`'s own datagram
+    events.
+
+11. **§8.2.2 line 3183 is a MUST that `component.maySend` does not enforce
+    (review PV-3).**  "A PATH_RESPONSE frame MUST be sent on the network path
+    where the PATH_CHALLENGE was received" is about a path, and no send-side
+    type in `Core` carries one: `Frame` has only the echoed data,
+    `Spec.OutPacket` has a packet type and frames, and `Spec.OutDatagram.dest`
+    is a peer address, not the local/peer pair §8.2 line 3075 calls a path (an
+    endpoint with two local addresses has two paths to the same `dest`).  So
+    `MaySend (.pathResponse d)` asks only that `d` be one we owe, and
+    `MaySendResponseOn s d p` / `maySendResponseOn` is the real rule.  **WP12
+    must call it with the path the datagram is about to leave on**; checking
+    only `component.maySend` silently drops the MUST.  The examples above show
+    the gap (`maySend` true, `maySendResponseOn` false for the wrong path).
+    Fixing this in `Core` would mean giving `OutDatagram` a local address as
+    well as `dest`; that is a `Core` change and is reported, not made here.
+
+12. **Received PATH_CHALLENGE/PATH_RESPONSE are never dropped, which collides
+    with the closing state (review PV-4).**  `challenge_never_dropped` and
+    `response_never_dropped` say `.drop` is in no state's outcomes for either
+    receive event.  That is right for §8.2.1 line 3171, which is about
+    *size*-based discards, but it is stronger than that sentence, and §10.2.1
+    line 3984 ("An endpoint that is closing is not required to process any
+    received frame") says a closing endpoint may process nothing.  The two are
+    consistent only if the phase gate is applied *before* this component sees
+    the event.  **Composition constraint for WP12**: `Termination`'s phase must
+    gate dispatch, so that a closing or draining endpoint never presents a
+    `recvChallenge`/`recvResponse` event here; within the active phase these two
+    theorems hold as stated.  This is the same decision `PLAN.md` §4c records
+    for the lead ("let Termination's phase gate every other component").
 -/
 
 end Quic.Spec.PathValidation
