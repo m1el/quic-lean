@@ -770,9 +770,9 @@ example : component.maySendPacket cliOneRtt ⟨.oneRtt, [.crypto 0 (bytes (List.
     = true := by decide
 example : component.maySendPacket cliOneRtt ⟨.oneRtt, [.crypto 0 (bytes (List.replicate 8 0))]⟩
     = false := by decide
--- §17.2.3, line 6476 is the exact rule, and it is not "before the handshake
--- completes": a complete client may still send 0-RTT until it processes a 1-RTT
--- packet from the server (NOTE 9).
+-- §17.2.3, line 6476 is the exact rule, and it is not handshake completion: a
+-- complete client may still send 0-RTT until it processes a 1-RTT packet from
+-- the server (NOTE 9).
 private def cli0rttDone : State := { cli0rtt with complete := true }
 example : component.maySendPacket cli0rttDone ⟨.zeroRtt, [.ping]⟩ = true := by decide
 example : component.maySendPacket cli0rttDone.sawOneRtt ⟨.zeroRtt, [.ping]⟩ = false := by decide
