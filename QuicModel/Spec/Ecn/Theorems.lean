@@ -229,6 +229,19 @@ example : (s6.recordRecv .ce true).phase = .failed := by decide
 example : mayMarkEcn s6 true = false := by decide
 example : mayMarkEcn s6 false = true := by decide
 
+-- NOTE 4: the *peer-reported* counts this model stores are deliberately not
+-- monotone, because draft-34 §13.4.2.1 has no sentence requiring them to be.
+-- peerEct0 = 5 drops to 0 through an ACK frame that neither of the checks at
+-- lines 5583 and 5589 rejects, because its large CE count absorbs the
+-- difference and no ECT-marked packet is newly acknowledged.
+private def sx : State :=
+  { space := .appData, peerEct0 := 5, peerCe := 0, sentEct0 := 10,
+    largestAcked := some 0, phase := .unknown }
+example : component.step sx (.recvAck 1 (some ⟨0, 0, 10⟩) ⟨1, 0, 0⟩)
+    = .ok (sx.recordCounts 1 (some ⟨0, 0, 10⟩) ⟨1, 0, 0⟩) [] := by rfl
+example : sx.peerEct0 = 5 ∧ (sx.recordCounts 1 (some ⟨0, 0, 10⟩) ⟨1, 0, 0⟩).peerEct0 = 0 := by
+  decide
+
 -- Following an implementation we cannot see inside.
 example : component.track s0 (.recvPacket .ce true) (.ok []) = some { s0 with ce := 1 } := by
   decide

@@ -114,9 +114,13 @@ NOTES
    truncated-subtraction reading.  Consequently a decrease does fail whenever the
    frame newly acknowledges at least one marked packet, and does not fail when it
    acknowledges none — which is what the text says, and which is why the stored
-   peer counts are **not** monotone (see the final report: `peerEct0` can go down
-   through a frame with a large CE count).  Adding a monotonicity check would be
-   stricter than draft-34 and is deliberately omitted.
+   peer counts are **not** monotone: the last examples of `Ecn/Theorems.lean`
+   exhibit a state whose `peerEct0` drops from 5 to 0 through an ACK frame that
+   neither check rejects, because a large CE count absorbs the difference while
+   no ECT-marked packet is newly acknowledged.  Adding a monotonicity check
+   would be stricter than draft-34 and is deliberately omitted; the *received*
+   counts (theorem (a), `counts_mono`) are monotone, because §19.3.2, line 7407
+   makes them totals.
 
 5. **"All marked packets lost" is fail-preferred, not fail-only.**  Line 5549
    says the condition indicates failure and line 5626 then makes disabling
