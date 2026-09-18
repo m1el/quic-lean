@@ -10,17 +10,22 @@ namespace Quic.Spec.Migration
 
 Two facts a reachable state never loses:
 
-* the "last validated peer address" of §9.3.2, line 3452 really is validated,
-  which is what makes reverting to it meaningful (theorem `revert_is_validated`);
-* §9.5, line 3603: a connection ID in use as a Destination Connection ID is in
-  use from one local address only.  Line 3608's companion rule is *not* part of
-  the invariant: the MAY of line 3611 breaks it, see `cid_reuse_counterexample`. -/
+* the "last validated peer address" of §9.3.2, line 3451 really is validated,
+  which is what makes reverting to it meaningful (theorem `revert_or_close`);
+* §9.5, line 3603: every connection ID in use as a Destination Connection ID is
+  in use from the one local address the *history* (`dcidFrom`) records for it.
+  Since `dcidFrom` is never rewritten, this is the reuse prohibition and not
+  merely a statement about the current `dcidOn`.  Line 3608's companion rule is
+  *not* part of the invariant: the MAY of line 3611 breaks it, see the
+  counterexample section of `Migration/Theorems.lean`. -/
 
 def InvLastValidated (s : State) : Prop :=
   ∀ q, s.lastValidated = some q → s.statusOf q = .validated
 
+/-- §9.5, line 3603, over the grow-only record: the connection ID in use on a
+    path has only ever been sent from that path's local address. -/
 def InvOneLocalAddrPerCid (s : State) : Prop :=
-  ∀ e₁ ∈ s.dcidOn, ∀ e₂ ∈ s.dcidOn, e₁.2 = e₂.2 → e₁.1.loc = e₂.1.loc
+  ∀ e ∈ s.dcidOn, s.dcidFrom.get? e.2 = some e.1.loc
 
 def Inv (s : State) : Prop := InvLastValidated s ∧ InvOneLocalAddrPerCid s
 
@@ -28,7 +33,8 @@ def Inv (s : State) : Prop := InvLastValidated s ∧ InvOneLocalAddrPerCid s
 /-! ### Projection lemmas
 
 Every state update in this component either leaves `paths` alone or rewrites one
-entry without touching its `status`, and only `beginSendOn` touches `dcidOn`. -/
+entry without touching its `status`, and only `beginSendOn` touches `dcidOn` or
+`dcidFrom`. -/
 
 namespace State
 
@@ -168,15 +174,85 @@ theorem statusOf_succStay_self (s : State) (p : Path) :
 @[simp] theorem dcidOn_succSwitch (s : State) (p : Path) :
     (s.succSwitch p).dcidOn = s.dcidOn := rfl
 
+@[simp] theorem dcidFrom_setInfo (s : State) (p : Path) (f : PathInfo → PathInfo) :
+    (s.setInfo p f).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_markValidating (s : State) (p : Path) :
+    (s.markValidating p).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_markValidated (s : State) (p : Path) :
+    (s.markValidated p).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_markFailed (s : State) (p : Path) :
+    (s.markFailed p).dcidFrom = s.dcidFrom := by unfold markFailed; split <;> rfl
+
+@[simp] theorem dcidFrom_recordRecv (s : State) (p : Path) (pn : Nat) (pr : Bool) (d : Nat) :
+    (s.recordRecv p pn pr d).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_switchTo (s : State) (p : Path) :
+    (s.switchTo p).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_revertTo (s : State) (p : Path) :
+    (s.revertTo p).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_observe (s : State) (p : Path) (pn : Nat) (pr : Bool) (d : Nat) :
+    (s.observe p pn pr d).dcidFrom = s.dcidFrom := by unfold observe; split <;> rfl
+
+@[simp] theorem dcidFrom_permit (s : State) (p : Path) (pn : Nat) (pr : Bool) (d : Nat) :
+    (s.permit p pn pr d).dcidFrom = s.dcidFrom := by unfold permit; split <;> rfl
+
+@[simp] theorem dcidFrom_startProbe (s : State) (p : Path) :
+    (s.startProbe p).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_succStay (s : State) (p : Path) :
+    (s.succStay p).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidFrom_succSwitch (s : State) (p : Path) :
+    (s.succSwitch p).dcidFrom = s.dcidFrom := rfl
+
+@[simp] theorem dcidOn_recordPeerCid (s : State) (seq : Nat) (cid : CidBytes) :
+    (s.recordPeerCid seq cid).dcidOn = s.dcidOn := by unfold recordPeerCid; split <;> rfl
+
+@[simp] theorem dcidFrom_recordPeerCid (s : State) (seq : Nat) (cid : CidBytes) :
+    (s.recordPeerCid seq cid).dcidFrom = s.dcidFrom := by unfold recordPeerCid; split <;> rfl
+
+@[simp] theorem lastValidated_recordPeerCid (s : State) (seq : Nat) (cid : CidBytes) :
+    (s.recordPeerCid seq cid).lastValidated = s.lastValidated := by
+  unfold recordPeerCid; split <;> rfl
+
+@[simp] theorem statusOf_recordPeerCid (s : State) (q : Path) (seq : Nat) (cid : CidBytes) :
+    (s.recordPeerCid seq cid).statusOf q = s.statusOf q := by
+  unfold recordPeerCid; split <;> rfl
+
+/-- The history is grow-only: `recordCidUse` never rewrites an entry. -/
+theorem dcidFrom_recordCidUse_of_some (s : State) (p : Path) (n : Nat) {l : LocalAddr}
+    (h : s.dcidFrom.get? n = some l) : (s.recordCidUse p n).dcidFrom = s.dcidFrom := by
+  show (match s.dcidFrom.get? n with
+        | some _ => s.dcidFrom
+        | none => s.dcidFrom.set n p.loc) = s.dcidFrom
+  rw [h]
+
+theorem dcidFrom_recordCidUse_of_none (s : State) (p : Path) (n : Nat)
+    (h : s.dcidFrom.get? n = none) :
+    (s.recordCidUse p n).dcidFrom = s.dcidFrom.set n p.loc := by
+  show (match s.dcidFrom.get? n with
+        | some _ => s.dcidFrom
+        | none => s.dcidFrom.set n p.loc) = s.dcidFrom.set n p.loc
+  rw [h]
+
+@[simp] theorem dcidOn_recordCidUse (s : State) (p : Path) (n : Nat) :
+    (s.recordCidUse p n).dcidOn = s.dcidOn := rfl
+
 end State
 
 /-! ### Preservation -/
 
-theorem invOneLocal_congr {s t : State} (hi : InvOneLocalAddrPerCid s) (h : t.dcidOn = s.dcidOn) :
-    InvOneLocalAddrPerCid t := by
-  intro e₁ h₁ e₂ h₂ h12
-  rw [h] at h₁ h₂
-  exact hi e₁ h₁ e₂ h₂ h12
+theorem invOneLocal_congr {s t : State} (hi : InvOneLocalAddrPerCid s) (h : t.dcidOn = s.dcidOn)
+    (hf : t.dcidFrom = s.dcidFrom) : InvOneLocalAddrPerCid t := by
+  intro e he
+  rw [h] at he
+  rw [hf]
+  exact hi e he
 
 theorem invLast_congr {s t : State} (hi : InvLastValidated s)
     (hl : t.lastValidated = s.lastValidated) (hs : ∀ q, t.statusOf q = s.statusOf q) :
@@ -238,28 +314,42 @@ theorem mem_set_weak {κ ν : Type} [DecidableEq κ] (m : Map κ ν) (k : κ) (v
         · exact Or.inl h
         · exact Or.inr (List.mem_cons_of_mem _ h)
 
+/-- The history records `n` as sent from `p.loc` once `p` has used it, provided
+    §9.5 line 3603 permitted the use in the first place. -/
+theorem get?_dcidFrom_recordCidUse_self {s : State} {p : Path} {n : Nat}
+    (hr : s.reusedAcrossLocal p n = false) :
+    (s.recordCidUse p n).dcidFrom.get? n = some p.loc := by
+  cases h : s.dcidFrom.get? n with
+  | none => rw [State.dcidFrom_recordCidUse_of_none s p n h, Map.get?_set_self]
+  | some l =>
+    rw [State.dcidFrom_recordCidUse_of_some s p n h, h]
+    have : (decide (l ≠ p.loc)) = false := by
+      simpa only [State.reusedAcrossLocal, h] using hr
+    simp only [decide_eq_false_iff_not, Decidable.not_not] at this
+    rw [this]
+
+/-- Entries for other connection IDs are untouched. -/
+theorem get?_dcidFrom_recordCidUse_ne {s : State} {p : Path} {n k : Nat} (h : k ≠ n) :
+    (s.recordCidUse p n).dcidFrom.get? k = s.dcidFrom.get? k := by
+  cases hn : s.dcidFrom.get? n with
+  | none => rw [State.dcidFrom_recordCidUse_of_none s p n hn, Map.get?_set_of_ne _ _ h]
+  | some l => rw [State.dcidFrom_recordCidUse_of_some s p n hn]
+
 /-- §9.5, line 3603 is exactly what keeps `InvOneLocalAddrPerCid` true. -/
 theorem invOneLocal_useCid {s : State} {p : Path} {n : Nat}
     (hi : InvOneLocalAddrPerCid s) (hr : s.reusedAcrossLocal p n = false) :
     InvOneLocalAddrPerCid (s.useCid p n) := by
-  have key : ∀ e ∈ s.dcidOn, e.2 = n → e.1.loc = p.loc := by
-    intro e he h2
-    cases hl : decide (e.1.loc = p.loc) with
-    | true => exact of_decide_eq_true hl
-    | false =>
-      have hne : e.1.loc ≠ p.loc := of_decide_eq_false hl
-      have hcon : s.reusedAcrossLocal p n = true := by
-        simp only [State.reusedAcrossLocal, List.any_eq_true]
-        exact ⟨e, he, by simp [h2, hne]⟩
-      rw [hr] at hcon
-      exact Bool.noConfusion hcon
-  intro e₁ h₁ e₂ h₂ h12
-  simp only [State.useCid] at h₁ h₂
-  rcases mem_set_weak _ _ _ _ h₁ with rfl | h₁ <;> rcases mem_set_weak _ _ _ _ h₂ with rfl | h₂
-  · rfl
-  · exact (key e₂ h₂ (by simpa using h12.symm)).symm
-  · exact key e₁ h₁ (by simpa using h12)
-  · exact hi e₁ h₁ e₂ h₂ h12
+  intro e he
+  simp only [State.useCid] at he ⊢
+  rcases mem_set_weak _ _ _ _ he with rfl | he
+  · exact get?_dcidFrom_recordCidUse_self hr
+  · have hold := hi e he
+    by_cases hk : e.2 = n
+    · subst hk
+      rw [State.dcidFrom_recordCidUse_of_some s p e.2 hold]
+      exact hold
+    · rw [get?_dcidFrom_recordCidUse_ne hk]
+      exact hold
 
 theorem reusedAcrossLocal_false_of_cidCase {s : State} {p : Path} {n : Nat}
     (h : cidCase s p n = .rebind ∨ cidCase s p n = .fresh) :
@@ -281,37 +371,39 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
   obtain ⟨hA, hB⟩ := hi
   cases h with
   | recvUnsolicitedKeep hc | recvQuiet hc | recvRefuse hc =>
-    exact ⟨invLast_congr hA (by simp) (by simp), invOneLocal_congr hB (by simp)⟩
+    exact ⟨invLast_congr hA (by simp) (by simp), invOneLocal_congr hB (by simp) (by simp)⟩
   | recvBannedMigrate hc | recvMigrate hc =>
-    refine ⟨?_, invOneLocal_congr hB (by simp)⟩
+    refine ⟨?_, invOneLocal_congr hB (by simp) (by simp)⟩
     unfold State.permit
     refine invLast_switchTo _ _ (invLast_congr hA ?_ ?_)
     · split <;> rfl
     · intro q; split <;> simp
-  | succStay hc | succKeep hc => exact ⟨invLast_succStay _ _ hA, invOneLocal_congr hB (by simp)⟩
+  | succStay hc | succKeep hc => exact ⟨invLast_succStay _ _ hA, invOneLocal_congr hB (by simp) (by simp)⟩
   | succMustSwitch hc | succSwitch hc =>
-    exact ⟨invLast_switchTo _ _ (invLast_succStay _ _ hA), invOneLocal_congr hB (by simp)⟩
+    exact ⟨invLast_switchTo _ _ (invLast_succStay _ _ hA), invOneLocal_congr hB (by simp) (by simp)⟩
   | failRevert hc =>
-    exact ⟨invLast_revertTo _ _ (invLast_markFailed _ _ hA), invOneLocal_congr hB (by simp)⟩
+    exact ⟨invLast_revertTo _ _ (invLast_markFailed _ _ hA), invOneLocal_congr hB (by simp) (by simp)⟩
   | failNoPath hc | failOtherGiveUp hc =>
-    exact ⟨invLast_discard _ (invLast_markFailed _ _ hA), invOneLocal_congr hB (by simp)⟩
+    exact ⟨invLast_discard _ (invLast_markFailed _ _ hA), invOneLocal_congr hB (by simp) (by simp)⟩
   | failOther hc | failOtherWait hc =>
-    exact ⟨invLast_markFailed _ _ hA, invOneLocal_congr hB (by simp)⟩
+    exact ⟨invLast_markFailed _ _ hA, invOneLocal_congr hB (by simp) (by simp)⟩
   | migValidateFirst hc | probeStart hc =>
-    exact ⟨invLast_congr hA (by simp) (by simp), invOneLocal_congr hB (by simp)⟩
+    exact ⟨invLast_congr hA (by simp) (by simp), invOneLocal_congr hB (by simp) (by simp)⟩
   | migAlready hc | migDefer hc =>
-    exact ⟨invLast_switchTo _ _ hA, invOneLocal_congr hB (by simp)⟩
+    exact ⟨invLast_switchTo _ _ hA, invOneLocal_congr hB (by simp) (by simp)⟩
   | migFresh hc =>
     exact ⟨invLast_switchTo _ _ (invLast_congr hA (by simp) (by simp)),
-           invOneLocal_congr hB (by simp)⟩
-  | confirmed => exact ⟨invLast_congr hA rfl (fun _ => rfl), invOneLocal_congr hB rfl⟩
-  | preferredLearn h => exact ⟨invLast_congr hA rfl (fun _ => rfl), invOneLocal_congr hB rfl⟩
-  | cidZeroLen hc => exact ⟨invLast_congr hA rfl (fun _ => rfl), invOneLocal_congr hB rfl⟩
+           invOneLocal_congr hB (by simp) (by simp)⟩
+  | confirmed => exact ⟨invLast_congr hA rfl (fun _ => rfl), invOneLocal_congr hB rfl rfl⟩
+  | preferredLearn h => exact ⟨invLast_congr hA rfl (fun _ => rfl), invOneLocal_congr hB rfl rfl⟩
+  | cidZeroLen hc => exact ⟨invLast_congr hA rfl (fun _ => rfl), invOneLocal_congr hB rfl rfl⟩
   | cidRebindKeep hc =>
     exact ⟨invLast_congr hA rfl (fun _ => rfl),
            invOneLocal_useCid hB (reusedAcrossLocal_false_of_cidCase (Or.inl hc))⟩
   | cidFresh hc =>
     exact ⟨invLast_congr hA rfl (fun _ => rfl),
            invOneLocal_useCid hB (reusedAcrossLocal_false_of_cidCase (Or.inr hc))⟩
+  | peerCidLearn =>
+    exact ⟨invLast_congr hA (by simp) (by simp), invOneLocal_congr hB (by simp) (by simp)⟩
 
 end Quic.Spec.Migration
