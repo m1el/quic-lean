@@ -385,7 +385,7 @@ theorem disableMigration_blocks (s : State) (d : OutDatagram) (pkt : OutPacket)
 
 /-- **(e)**, the converse: the ban of §9, line 3284 applies exactly in that
     situation.  In particular it lifts once the endpoint "has acted on a
-    preferred_address transport parameter from the peer" (§5.2.2, line 1979:
+    preferred_address transport parameter from the peer" (§5.2.2, line 1977:
     "The disable_active_migration transport parameter does not prohibit
     connection migration after a client has acted on a preferred_address
     transport parameter"), and it never applies to a destination other than the

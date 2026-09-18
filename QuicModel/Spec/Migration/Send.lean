@@ -24,12 +24,12 @@ def maySend (_ : State) : Frame → Bool := fun _ => true
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by
   cases f <;> simp [maySend, MaySend]
 
-/-- The path a datagram leaves on: §8.2, line 3074, "an endpoint … an address
+/-- The path a datagram leaves on: §8.2, line 3075, "an address
     is … the two-tuple of IP address and port", and §9's paths are the pair of
     a local and a peer address. -/
 def pathOf (d : OutDatagram) : Path := ⟨⟨d.src.id⟩, d.dest⟩
 
-/-- §9.3.2, line 3460: "MUST close the connection silently by discarding all
+/-- §9.3.2, line 3461: "MUST close the connection silently by discarding all
     connection state" — a discarded connection sends nothing.  This is the only
     §9 send-side rule that does not look at the path, so it is the only one
     left at packet level; the rest are in `MaySendDatagram`. -/
@@ -64,7 +64,7 @@ theorem maySendPacket_iff (s : State) (pkt : OutPacket) :
        non-probing packets from its original address until it receives a
        non-probing packet from the client at its preferred address and until the
        server has validated the new path."
-    4. §9.6.1, line 3710: "If path validation fails, the client MUST continue
+    4. §9.6.1, line 3709: "If path validation fails, the client MUST continue
        sending all future packets to the server's original IP address." -/
 def MaySendOn (s : State) (p : Path) (pkt : OutPacket) : Prop :=
   (s.handshakeConfirmed = true ∨ FrameRules.packetProbing pkt.frames = true ∨

@@ -305,12 +305,16 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
         split at h
         · rename_i hc; simp only [List.mem_singleton] at h; subst h
           exact .doneClient hr hc
-        · rename_i hc; simp only [List.mem_singleton] at h; subst h
-          exact .doneEarly hr (by simpa using hc)
+        · rename_i hc
+          simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+          rcases h with h | h <;> subst h
+          · exact .doneEarly hr (by simpa using hc)
+          · exact .doneEarlyClose hr (by simpa using hc)
     · intro h
       cases h with
       | doneClient hr hc => simp [outcomes, hr, hc]
       | doneEarly hr hc => simp [outcomes, hr, hc]
+      | doneEarlyClose hr hc => simp [outcomes, hr, hc]
       | doneServer hr => simp [outcomes, hr]
   | sentPacket pt =>
     constructor
@@ -584,6 +588,124 @@ theorem maySendPacket_iff (s : State) (p : OutPacket) :
   cases hp : p.ptype <;>
     simp [maySendPacket, MaySendPacket, hp, levelOf, cryptoLevelOf, List.all_eq_true]
 
+/-! ### §7.2 on the send side, as a datagram rule
+
+The rules of §7.2 are about the connection ID *fields* of the packets we send.
+`Spec.OutPacket` carries only a packet type and a frame list, but
+`Spec.OutDatagram` carries one `dcid`/`scid` pair — one per datagram, because
+§12.2, line 4613 says "Senders MUST NOT coalesce QUIC packets with different
+connection IDs into a single UDP datagram" — so they are the component's
+`MaySendDatagram`.  `none` on either field means, as
+`Core` documents, that the rule being checked does not look at them; then this
+rule looks at nothing rather than inventing a value. -/
+
+/-- §7.2, line 2337: "When an Initial packet is sent by a client that has not
+    previously received an Initial or Retry packet from the server, the client
+    populates the Destination Connection ID field with an unpredictable
+    value" — the first flight, where lines 2340 and 2341 apply. -/
+def State.firstFlight (s : State) : Bool :=
+  (s.role == .client) && !s.sawPeerInitial && !s.retrySeen
+
+/-- The connection IDs the peer has issued in NEW_CONNECTION_ID frames (§19.15),
+    which WP4 `ConnIds.Remote` owns and this component never sees.  `none` means
+    "not supplied": then §7.2, line 2380's alternative is not checked at all,
+    never the other way round — an unknown set must not make the rule stricter
+    than the text.  WP12 supplies `some (WP4's issued connection IDs)`. -/
+abbrev PeerCids := Option (List Cid)
+
+/-- Which Destination Connection ID a long-header packet we send may carry.
+
+* §7.2, line 2341: "Until a packet is received from the server, the client MUST
+  use the same Destination Connection ID value on all packets in this
+  connection" — in the first flight, only `dcidSent`;
+* line 2332: after processing the peer's first Initial (and, for a client, after
+  a Retry) it is the Source Connection ID received, which is again `dcidSent`:
+  `adoptScid`/`adoptRetryScid` are the only things that move it;
+* lines 2380–2382: "Any further changes to the Destination Connection ID are
+  only permitted if the values are taken from NEW_CONNECTION_ID frames" — so
+  once the first flight is over, any connection ID the peer issued is also
+  permitted.  Retiring one is §5.1.2's rule and WP4's, not this one's. -/
+def DcidAllowed (s : State) (peerCids : PeerCids) (dcid : Cid) : Prop :=
+  s.dcidSent = some dcid ∨
+    (s.firstFlight = false ∧ (match peerCids with | none => True | some cids => dcid ∈ cids))
+
+def dcidAllowed (s : State) (peerCids : PeerCids) (dcid : Cid) : Bool :=
+  (s.dcidSent == some dcid) ||
+    (!s.firstFlight &&
+      (match peerCids with | none => true | some cids => decide (dcid ∈ cids)))
+
+theorem dcidAllowed_iff (s : State) (peerCids : PeerCids) (dcid : Cid) :
+    dcidAllowed s peerCids dcid = true ↔ DcidAllowed s peerCids dcid := by
+  cases peerCids <;> simp [dcidAllowed, DcidAllowed]
+
+/-- §7.2, lines 2332–2382, for one long-header packet we are about to send:
+
+* line 2357: "The client populates the Source Connection ID field with a value
+  of its choosing" — and keeps it (§17.2.5.2, line 6641: "The client MUST NOT
+  change the Source Connection ID");
+* line 2340: "This Destination Connection ID MUST be at least 8 bytes in
+  length", of the client's first flight;
+* `DcidAllowed`: lines 2341, 2332 and 2380.
+
+Line 2361 ("The first flight of 0-RTT packets use the same Destination
+Connection ID and Source Connection ID values as the client's first Initial
+packet") is the same rule applied to `.zeroRtt`.  Short headers carry no Source
+Connection ID and may use any connection ID the peer issued (line 2380, WP4 and
+WP10), so `.oneRtt`, `.retry` and Version Negotiation are unconstrained here. -/
+def SendHeader (s : State) (pt : PacketType) (dcid scid : Cid)
+    (peerCids : PeerCids := none) : Prop :=
+  match pt with
+  | .initial | .zeroRtt | .handshake =>
+    scid = s.localScid ∧ DcidAllowed s peerCids dcid ∧
+      (s.firstFlight = true → 8 ≤ dcid.length)
+  | _ => True
+
+def sendHeader (s : State) (pt : PacketType) (dcid scid : Cid)
+    (peerCids : PeerCids := none) : Bool :=
+  match pt with
+  | .initial | .zeroRtt | .handshake =>
+    (scid == s.localScid) && dcidAllowed s peerCids dcid &&
+      (!s.firstFlight || decide (8 ≤ dcid.length))
+  | _ => true
+
+theorem bool_imp {b : Bool} {q : Prop} [Decidable q] :
+    ((!b) || decide q) = true ↔ (b = true → q) := by cases b <;> simp
+
+theorem sendHeader_iff (s : State) (pt : PacketType) (dcid scid : Cid) (peerCids : PeerCids) :
+    sendHeader s pt dcid scid peerCids = true ↔ SendHeader s pt dcid scid peerCids := by
+  cases pt <;>
+    simp only [sendHeader, SendHeader, Bool.and_eq_true, beq_iff_eq, bool_imp, dcidAllowed_iff,
+      and_assoc, iff_self]
+
+/-- §7.2 over a whole datagram, with the peer-issued connection IDs supplied
+    from outside (WP4), in the shape `Migration.MaySendDatagramOn` already uses
+    for a rule that needs another component's state. -/
+def MaySendDatagramOn (peerCids : PeerCids) (s : State) (d : OutDatagram) : Prop :=
+  match d.dcid, d.scid with
+  | some dcid, some scid => ∀ p ∈ d.packets, SendHeader s p.ptype dcid scid peerCids
+  | _, _ => True
+
+def maySendDatagramOn (peerCids : PeerCids) (s : State) (d : OutDatagram) : Bool :=
+  match d.dcid, d.scid with
+  | some dcid, some scid => d.packets.all (fun p => sendHeader s p.ptype dcid scid peerCids)
+  | _, _ => true
+
+theorem maySendDatagramOn_iff (peerCids : PeerCids) (s : State) (d : OutDatagram) :
+    maySendDatagramOn peerCids s d = true ↔ MaySendDatagramOn peerCids s d := by
+  rcases hd : d.dcid with _ | dcid <;> rcases hs : d.scid with _ | scid <;>
+    simp [maySendDatagramOn, MaySendDatagramOn, hd, hs, List.all_eq_true, sendHeader_iff]
+
+/-- The component's datagram rule: §7.2 as far as this component's own state
+    reaches.  The NEW_CONNECTION_ID values of line 2380 are WP4's, so the field
+    passes `none` ("not supplied", hence not checked) and WP12 conjoins
+    `MaySendDatagramOn (some …)` with WP4's set. -/
+def MaySendDatagram (s : State) (d : OutDatagram) : Prop := MaySendDatagramOn none s d
+
+def maySendDatagram (s : State) (d : OutDatagram) : Bool := maySendDatagramOn none s d
+
+theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
+    maySendDatagram s d = true ↔ MaySendDatagram s d := maySendDatagramOn_iff none s d
+
 /-! ## 7. The component -/
 
 @[reducible] def component : Component where
@@ -602,5 +724,8 @@ theorem maySendPacket_iff (s : State) (p : OutPacket) :
   MaySendPacket := MaySendPacket
   maySendPacket := maySendPacket
   maySendPacket_iff := maySendPacket_iff
+  MaySendDatagram := MaySendDatagram
+  maySendDatagram := maySendDatagram
+  maySendDatagram_iff := maySendDatagram_iff
 
 end Quic.Spec.Handshake

@@ -17,7 +17,7 @@ namespace Quic.Spec.Migration
 
 /-- The peer's transport address, shared with `AddressValidation` so that WP12
     can look up the anti-amplification budget of a path's peer address without a
-    translation table (§8.2, line 3074: "an address is the two-tuple of IP
+    translation table (§8.2, line 3075: "an address is the two-tuple of IP
     address and port").  WP5 dropped its own copy of the type in favour of
     `Spec.Addr` (which `Spec.OutDatagram.dest` also uses), so this names exactly
     the type `AddressValidation.State` is keyed by. -/
@@ -256,14 +256,14 @@ def isPreferredPath (s : State) (p : Path) : Bool :=
                | some a => decide (p.loc = a)
                | none => false
 
-/-- §9, line 3326: "If a client receives packets from an unknown server
+/-- §9, line 3325: "If a client receives packets from an unknown server
     address, the client MUST discard these packets."  The addresses a client
     knows are the one the handshake ran on and the preferred address. -/
 def knownServerAddr (s : State) (a : PeerAddr) : Bool :=
   decide (a = s.handshakePath.peer) ||
     (match s.preferredPeer with | some b => decide (a = b) | none => false)
 
-/-- §9.6, line 3680: "If a client receives packets from a new server address
+/-- §9.6, line 3679: "If a client receives packets from a new server address
     when the client has not initiated a migration to that address, the client
     SHOULD discard these packets."  Only reachable for the preferred address,
     since an entirely unknown one is already covered by `knownServerAddr`. -/
@@ -284,7 +284,7 @@ def sendBanned (s : State) (p : Path) : Bool :=
 
 /-- Receive side, the mirror of `sendBanned`: the peer is sending to us from a
     new address of its own while we sent `disable_active_migration` and it has
-    not acted on our `preferred_address` — §9, line 3289: "If the peer violates
+    not acted on our `preferred_address` — §9, line 3288: "If the peer violates
     this requirement …". -/
 def peerViolatesDisableMigration (s : State) (p : Path) : Bool :=
   s.ourDisableMigration && decide (p.peer ≠ s.active.peer) &&

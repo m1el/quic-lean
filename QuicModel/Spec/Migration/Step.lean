@@ -117,7 +117,7 @@ inductive Step : State → Event → Out → Prop
       address, the client MUST discard these packets." -/
   | recvUnknownServer {s p pn pr d} (hc : recvCase s p pn pr = .unknownServer) :
       Step s (.recvPacket p pn pr d) .drop
-  /-- §9.6, line 3680: "If a client receives packets from a new server address
+  /-- §9.6, line 3679: "If a client receives packets from a new server address
       when the client has not initiated a migration to that address, the client
       SHOULD discard these packets."  The recommended outcome. -/
   | recvUnsolicitedDrop {s p pn pr d} (hc : recvCase s p pn pr = .unsolicited) :
@@ -192,7 +192,7 @@ inductive Step : State → Event → Out → Prop
   | failOther {s p} (hc : failCase s p = .otherPath) :
       Step s (.validationFailed p) (.ok (s.markFailed p) [])
   /-- Same sentence, when no alternative is left — the connection may still
-      continue (§9, line 3318: "An endpoint capable of connection migration MAY
+      continue (§9, line 3317: "An endpoint capable of connection migration MAY
       wait for a new path to become available before discarding connection
       state"). -/
   | failOtherWait {s p} (hc : failCase s p = .otherPathNoneLeft) :
@@ -216,7 +216,7 @@ inductive Step : State → Event → Out → Prop
   | migValidateFirst {s p} (hc : migCase s p = .validateFirst) :
       Step s (.requestMigrate p) (.ok (s.startProbe p) [.startValidation p])
   /-- §9.3, line 3394: "An endpoint MAY skip validation of a peer address if
-      that address has been seen recently"; §9, line 3313: "unless it has
+      that address has been seen recently"; §9, line 3314: "unless it has
       previously validated that address." -/
   | migAlready {s p} (hc : migCase s p = .already) :
       Step s (.requestMigrate p) (.ok (s.switchTo p) [.switchPath p])
@@ -241,7 +241,7 @@ inductive Step : State → Event → Out → Prop
       Step s (.requestProbe p) (.ok (s.startProbe p) [.startValidation p])
   /-- §9, line 3281: the handshake is confirmed. -/
   | confirmed {s} : Step s .handshakeConfirmed (.ok { s with handshakeConfirmed := true } [])
-  /-- §18.2, line 7066: "This transport parameter is only sent by a server." -/
+  /-- §18.2, line 7067: "This transport parameter is only sent by a server." -/
   | preferredWrongRole {s a} (h : s.role = .server) : Step s (.learnPreferredAddress a) .drop
   /-- §9.6.1, line 3686: "A server conveys a preferred address by including the
       preferred_address transport parameter in the TLS handshake." -/
