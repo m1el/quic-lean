@@ -425,26 +425,42 @@ theorem duplicated_perm {l₁ l₂ : Raw} (h : l₁.Perm l₂) : duplicated l₁
   have : (knownIds l₁).Perm (knownIds l₂) := (knownEntries_perm h).map Prod.fst
   simp only [duplicated, this.nodup_iff]
 
-/-- **(c)** Validation does not depend on the order the parameters appear in:
-    the reference implementation's outcome is the same for any permutation.
-    With no repeated identifier the whole outcome list agrees
-    (`interpret_perm`); with a repeated identifier it is the error either way
-    (`step_of_duplicated`).  The accepted *record* is order dependent when a
-    parameter repeats — see the counterexample in section 9. -/
-theorem step_perm (s : State) {raw₁ raw₂ : Raw} (hp : raw₁.Perm raw₂) (hwf : RawWF raw₁) :
-    component.step s (.recvParams (encodeRaw raw₁))
-      = component.step s (.recvParams (encodeRaw raw₂)) := by
+/-- With no repeated known parameter, the *whole* list of permitted outcomes is
+    order independent — not just the preferred one.  (With a repeat it is not:
+    the last-copy and first-copy records swap places, which is exactly the
+    ambiguity of NOTES 2.) -/
+theorem outcomes_perm (s : State) {raw₁ raw₂ : Raw} (hp : raw₁.Perm raw₂)
+    (hwf : RawWF raw₁) (hnd : (knownIds raw₁).Nodup) :
+    outcomes s (.recvParams (encodeRaw raw₁)) = outcomes s (.recvParams (encodeRaw raw₂)) := by
   have hwf₂ : RawWF raw₂ := fun e he => hwf e (hp.mem_iff.mpr he)
   have h₁ : decodeRaw (encodeRaw raw₁) = .ok raw₁ := decodeRaw_encodeRaw _ hwf
   have h₂ : decodeRaw (encodeRaw raw₂) = .ok raw₂ := decodeRaw_encodeRaw _ hwf₂
+  have hdup₁ : duplicated raw₁ = false := by simp [duplicated, hnd]
+  have hdup₂ : duplicated raw₂ = false := by rw [← duplicated_perm hp]; exact hdup₁
+  have hint : interpret raw₁ = interpret raw₂ := interpret_perm hp hnd
+  simp only [outcomes, h₁, h₂, validate, hint, hdup₁, hdup₂, Bool.false_eq_true,
+    ↓reduceIte]
+
+/-- **(c)** Validation does not depend on the order the parameters appear in:
+    the reference implementation's outcome is the same for any permutation.
+    Unchanged by the first-copy alternative of `Step.acceptFirst`, because with
+    a repeated identifier the *preferred* outcome is the error either way
+    (`step_of_duplicated`), and with no repeat the two readings coincide
+    (`interpretFirst_eq_interpret`), so the whole outcome list agrees
+    (`outcomes_perm`).
+
+    The accepted *record* is still order dependent when a parameter repeats:
+    both the last-copy and the first-copy record are permitted, and a
+    permutation exchanges them — see the counterexample in section 9. -/
+theorem step_perm (s : State) {raw₁ raw₂ : Raw} (hp : raw₁.Perm raw₂) (hwf : RawWF raw₁) :
+    component.step s (.recvParams (encodeRaw raw₁))
+      = component.step s (.recvParams (encodeRaw raw₂)) := by
   by_cases hnd : (knownIds raw₁).Nodup
-  · have hdup₁ : duplicated raw₁ = false := by simp [duplicated, hnd]
-    have hdup₂ : duplicated raw₂ = false := by rw [← duplicated_perm hp]; exact hdup₁
-    have hint : interpret raw₁ = interpret raw₂ := interpret_perm hp hnd
-    refine step_congr ?_
-    simp only [outcomes, h₁, h₂, validate, hint, hdup₁, hdup₂, Bool.false_eq_true,
-      ↓reduceIte]
-  · have hdup₁ : duplicated raw₁ = true := by simp [duplicated, hnd]
+  · exact step_congr (outcomes_perm s hp hwf hnd)
+  · have hwf₂ : RawWF raw₂ := fun e he => hwf e (hp.mem_iff.mpr he)
+    have h₁ : decodeRaw (encodeRaw raw₁) = .ok raw₁ := decodeRaw_encodeRaw _ hwf
+    have h₂ : decodeRaw (encodeRaw raw₂) = .ok raw₂ := decodeRaw_encodeRaw _ hwf₂
+    have hdup₁ : duplicated raw₁ = true := by simp [duplicated, hnd]
     have hdup₂ : duplicated raw₂ = true := by rw [← duplicated_perm hp]; exact hdup₁
     rw [step_of_duplicated h₁ hdup₁, step_of_duplicated h₂ hdup₂]
 
@@ -571,6 +587,19 @@ example : component.outcomes cli (.recvParams (ext [(0x04, [0x0a]), (0x05, [0x14
 -- A repeated *reserved* identifier is not a duplicate (NOTES 1).
 example : component.outcomes srv (.recvParams (ext [(27, [0x01]), (27, [0x02])]))
     = [.ok ⟨.server, some defaults⟩ [.paramsApplied defaults]] := by decide
+
+-- Order independence at the level of the whole outcome list, when nothing
+-- repeats (`outcomes_perm`).
+example : component.outcomes cli (.recvParams (ext [(0x04, [0x0a]), (0x05, [0x14])]))
+    = component.outcomes cli (.recvParams (ext [(0x05, [0x14]), (0x04, [0x0a])])) := by decide
+-- With a repeat the two accepting outcomes swap places, so the list is only
+-- equal up to permutation — but the preferred outcome (the error) does not move.
+example : component.outcomes cli (.recvParams (ext [(0x04, [0x14]), (0x04, [0x0a])]))
+    = [.error .transportParameterError,
+       .ok ⟨.client, some { defaults with initialMaxData := 10 }⟩
+         [.paramsApplied { defaults with initialMaxData := 10 }],
+       .ok ⟨.client, some { defaults with initialMaxData := 20 }⟩
+         [.paramsApplied { defaults with initialMaxData := 20 }]] := by decide
 
 -- Order independence, and the counterexample that makes duplicates an error:
 -- with no repeat, swapping two parameters changes nothing …
