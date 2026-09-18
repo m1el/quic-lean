@@ -251,6 +251,21 @@ forbidden behaviour. All accepted.
 | Ruling on `Recommended` vs "advice only" | BRIEF.md | done |
 | Composition notes: `assembling` duplicated in FrameRules and Ack (both needed); `Send.written` means the harness must synthesise `appWrite`; grow-only state vs pruning implementations | WP12 / WP13 | recorded |
 
+## 4e. Review of Wave 2 (`reviews/wave2.md`): disposition
+
+| Finding | Owner | Status |
+|---|---|---|
+| S-1 HIGH connection credit charged from the frame's end offset, deleting the §4.5 "ignore" outcome and mis-accounting §4.5 line 1495 | WP9 fix run | dispatched |
+| S-2 STREAM_STATE_ERROR mandated for all five frames on an uncreated local *bidirectional* stream; S-3, S-4 coverage; S-5 `MaySend` false on non-existent streams (WP13 must synthesise `appOpenStream`); S-6 ~20 wrong citations incl. four error-code rules | WP9 fix run | dispatched |
+| M-1 HIGH a retired connection ID may be reused from a second local address (`dcidOn` overwritten; §9.5 line 3603) | WP10 fix run | queued |
+| M-2 send rules read the state's send context instead of `OutDatagram.src/dest/dcid/scid`; M-3 `recvCase` narrows §9.3 line 3379; M-4 citations; witness for the theorem-(c) counterexample should be the reachable route | WP10 fix run | queued |
+| K-1 fold Handshake's `SendHeader` into `MaySendDatagram` (now expressible); K-3, K-4, K-5 | WP11 small fix run | queued |
+| K-2 `recvHeader` only after successful unprotection is a hard requirement | WP12 | in the WP12 brief |
+| Three copies of "handshake confirmed"; `.drop` precedence for Migration's MUST-discards; events WP13 must synthesise | WP12 / WP13 | recorded |
+
+Both WP10 theorems reported false as written were confirmed against the text
+by the reviewer (reachable, conformant counterexamples).
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
