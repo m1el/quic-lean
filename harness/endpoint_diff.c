@@ -174,13 +174,16 @@ extern lean_object *quic_h_local_sent_packet(uint8_t ptype, uint64_t pn, uint8_t
 extern lean_object *quic_h_local_sent_frame_in(uint8_t ptype, uint64_t src,
                                                uint64_t dest, lean_object *f);
 extern lean_object *quic_h_local_sent_datagram(uint64_t dest, uint64_t n);
+extern lean_object *quic_h_local_local_error(uint64_t code, uint64_t frame_type);
 extern lean_object *quic_h_frames_of_bytes(lean_object *buf);
 extern uint64_t quic_h_frames_length(lean_object *fs);
 extern lean_object *quic_h_frames_get(lean_object *fs, uint64_t i);
 extern lean_object *quic_h_out_packet(uint8_t ptype, lean_object *fs);
 extern uint8_t quic_h_ack_eliciting(lean_object *fs);
 extern lean_object *quic_h_frames_dump(lean_object *fs);
-extern lean_object *quic_h_presend_actions(lean_object *fs);
+extern lean_object *quic_h_presend_actions(lean_object *fs, uint64_t src,
+                                           uint64_t dest, uint64_t now,
+                                           uint64_t deadline);
 extern lean_object *quic_h_advance_all(lean_object *ss, lean_object *e, uint8_t only_ok,
                                        uint64_t cap);
 extern uint64_t quic_h_states_length(lean_object *ss);
@@ -272,10 +275,21 @@ typedef struct {
 
 static mm_entry g_mm[MAX_MISMATCH_KINDS];
 static int g_summary_done;
+
+/* "Soft" findings: cases where ngtcp2 reported strictly fewer callbacks than
+   the model's effects, in order.  Not mismatches; listed at the end so that
+   the triage document can name them. */
+typedef struct {
+  uint64_t sig;
+  unsigned long count;
+  char key[160];
+} soft_entry;
+static soft_entry g_soft[128];
+static int g_nsoft;
 static int g_nmm;
 static unsigned long g_mm_total;
 static unsigned long g_steps_compared, g_steps_skipped, g_send_checks;
-static unsigned long g_steps_loose;
+static unsigned long g_steps_loose, g_steps_subseq;
 static unsigned long g_runs;
 static const uint8_t *g_input;
 static size_t g_inputlen;
@@ -293,14 +307,38 @@ static void mm_summary(void) {
   g_summary_done = 1;
   fprintf(stderr,
           "\n=== endpoint_diff summary ===\n"
-          "runs=%lu  steps compared=%lu (%lu only after excluding "
-          "stream_close/acked_stream_data_offset)  steps not compared=%lu  "
-          "send checks=%lu\n"
+          "runs=%lu  steps compared=%lu (exact; %lu needed the "
+          "stream_close/acked_stream_data_offset exclusion, %lu the "
+          "subsequence rule)  steps not compared=%lu  send checks=%lu\n"
           "distinct mismatches=%d  total mismatches=%lu\n",
-          g_runs, g_steps_compared, g_steps_loose, g_steps_skipped, g_send_checks,
-          g_nmm, g_mm_total);
+          g_runs, g_steps_compared, g_steps_loose, g_steps_subseq, g_steps_skipped,
+          g_send_checks, g_nmm, g_mm_total);
   for (i = 0; i < g_nmm; ++i)
     fprintf(stderr, "  sig=%016" PRIx64 " x%lu\n", g_mm[i].sig, g_mm[i].count);
+  if (g_nsoft) {
+    fprintf(stderr,
+            "soft (ngtcp2 reported a subsequence of the model's effects): "
+            "%d distinct, %lu steps\n",
+            g_nsoft, g_steps_subseq);
+    for (i = 0; i < g_nsoft; ++i)
+      fprintf(stderr, "  x%-6lu %s\n", g_soft[i].count, g_soft[i].key);
+  }
+}
+
+static void soft_seen(uint64_t sig, const char *key) {
+  int i;
+  for (i = 0; i < g_nsoft; ++i) {
+    if (g_soft[i].sig == sig) {
+      ++g_soft[i].count;
+      return;
+    }
+  }
+  if (g_nsoft < (int)(sizeof(g_soft) / sizeof(g_soft[0]))) {
+    g_soft[g_nsoft].sig = sig;
+    g_soft[g_nsoft].count = 1;
+    snprintf(g_soft[g_nsoft].key, sizeof(g_soft[g_nsoft].key), "%s", key);
+    ++g_nsoft;
+  }
 }
 
 /* Returns 1 the first time this signature is seen. */
@@ -622,7 +660,7 @@ static int observed_names(harness *h, const char **out, int cap) {
    from *both* sides.  Returns 1 when the outcome |o| looks like what ngtcp2
    did. */
 static int outcome_matches(lean_object *o, int is_error, uint64_t code,
-                           const char **names, int nnames) {
+                           const char **names, int nnames, int subseq) {
   uint64_t err;
   uint8_t isdrop;
   lean_inc(o);
@@ -645,11 +683,12 @@ static int outcome_matches(lean_object *o, int is_error, uint64_t code,
       while (!lean_is_scalar(q)) {
         const char *nm = lean_string_cstr(l_head(q));
         if (!cb_excluded(nm)) {
-          if (i >= nnames || strcmp(nm, names[i]) != 0) {
+          if (i < nnames && strcmp(nm, names[i]) == 0) {
+            ++i;
+          } else if (!subseq) {
             lean_dec(cbs);
             return 0;
           }
-          ++i;
         }
         q = l_tail(q);
       }
@@ -662,7 +701,7 @@ static int outcome_matches(lean_object *o, int is_error, uint64_t code,
 /* The candidates that survive the loose comparison.  Owned result, possibly
    the empty list. */
 static lean_object *track_loose(harness *h, mstate *m, const evspec *e,
-                                int is_error, uint64_t code) {
+                                int is_error, uint64_t code, int subseq) {
   const char *names[64];
   int nnames = observed_names(h, names, 64);
   lean_object *out = l_nil(), **tailp = &out;
@@ -674,7 +713,8 @@ static lean_object *track_loose(harness *h, mstate *m, const evspec *e,
     lean_object *os = ev_outcomes(e, s), *q = os;
     while (!lean_is_scalar(q)) {
       lean_object *o = l_head(q);
-      if (kept < m->max_cands && outcome_matches(o, is_error, code, names, nnames)) {
+      if (kept < m->max_cands &&
+          outcome_matches(o, is_error, code, names, nnames, subseq)) {
         lean_object *c;
         lean_inc(s);
         lean_inc(o);
@@ -728,9 +768,28 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
   /* Second chance: the same comparison with the two callbacks that name the
      same transport state at a different moment of the trace removed from both
      sides (TRIAGE WP13-1, WP13-6). */
-  next = track_loose(h, m, e, is_error, code);
+  next = track_loose(h, m, e, is_error, code, 0);
   if (!lean_is_scalar(next)) {
     ++g_steps_loose;
+    set_cands(m, next);
+    return;
+  }
+  lean_dec(next);
+
+  /* Third chance: the names ngtcp2 printed are a *subsequence* of the effects
+     the model produced, in order.  ngtcp2 then reported strictly fewer events
+     than the spec says happened, at the same points -- a property of its
+     callback contract, not of the transport (the commonest case is §2.1
+     line 718's implicit opening of the lower-numbered streams, which ngtcp2
+     performs but does not announce).  This is recorded as a *soft* finding: it
+     is counted and listed at the end, and the run carries on with the narrowed
+     set, but it is not a mismatch. */
+  next = track_loose(h, m, e, is_error, code, 1);
+  if (!lean_is_scalar(next)) {
+    char softkey[512];
+    ++g_steps_subseq;
+    snprintf(softkey, sizeof(softkey), "%s|subsequence|%.300s", e->name, cbtext);
+    soft_seen(fnv(softkey), softkey);
     set_cands(m, next);
     return;
   }
@@ -886,6 +945,21 @@ static int obs_error(int rv, uint64_t *code) {
   return 1;
 }
 
+/* §11.1: ngtcp2 answers a failing read_pkt with a CONNECTION_CLOSE carrying this
+   code, so the model's `Termination` has to hear about the decision or every
+   frame of that close is one the spec forbids. */
+static void md_local_error(harness *h, uint64_t code) {
+  evspec e;
+  mstate *m = M(h);
+  if (!m || !m->alive) return;
+  e.kind = EV_LOCAL;
+  e.arg = quic_h_local_local_error(code, 0);
+  e.now = model_now(h);
+  e.name = "localError";
+  synth_step(h, &e);
+  lean_dec(e.arg);
+}
+
 static void md_recv(harness *h, const uint8_t *pkt, size_t len, int rv) {
   mstate *m = M(h);
   evspec e;
@@ -910,7 +984,11 @@ static void md_recv(harness *h, const uint8_t *pkt, size_t len, int rv) {
     idx = quic_h_frames_max_stream_index(fs);
     lean_dec(fs);
     if (idx > m->max_stream_index) {
+      /* The model cannot be advanced past this packet, so it is no longer in
+         step with ngtcp2; comparing the rest of the run would produce false
+         mismatches.  Stop tracking this run. */
       ++g_steps_skipped;
+      m->alive = 0;
       return;
     }
   }
@@ -927,6 +1005,7 @@ static void md_recv(harness *h, const uint8_t *pkt, size_t len, int rv) {
   track_step(h, &e, is_err, code, cbs, cbtext.p, what);
   free(cbtext.p);
   lean_dec(e.arg);
+  if (is_err > 0) md_local_error(h, code);
 }
 
 static void md_time(harness *h, int rv) {
@@ -950,6 +1029,7 @@ static void md_time(harness *h, int rv) {
   snprintf(what, sizeof(what), "handle_expiry now=%" PRIu64, model_now(h));
   track_step(h, &e, is_err, code, cbs, cbtext.p, what);
   free(cbtext.p);
+  if (is_err > 0) md_local_error(h, code);
 }
 
 /* An application event: ngtcp2 reports a return code but the callbacks it fires
@@ -1134,7 +1214,8 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     lean_object *acts;
     uint64_t na, k;
     lean_inc(ps[i].frames);
-    acts = quic_h_presend_actions(ps[i].frames);
+    acts = quic_h_presend_actions(ps[i].frames, ADDR_SELF, ADDR_PEER,
+                                  model_now(h), model_now(h) + 3 * CFG_PTO);
     lean_inc(acts);
     na = quic_h_actions_length(acts);
     for (k = 0; k < na; ++k) {

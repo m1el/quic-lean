@@ -197,16 +197,26 @@ private def sortBySeq : List (Nat × LocalAction) → List (Nat × LocalAction)
   | x :: t => insertBySeq x (sortBySeq t)
 
 @[export quic_h_presend_actions]
-def presendActions (fs : List Frame) : List LocalAction :=
+def presendActions (fs : List Frame) (src dest now deadline : UInt64) : List LocalAction :=
   (sortBySeq (fs.filterMap fun f =>
       match f with
       | .newConnectionId seq rpt cid token =>
         some (seq, LocalAction.issueCid cid.toList token.toList rpt)
       | _ => none)).map (·.2) ++
-    fs.filterMap fun f =>
+    fs.filterMap (fun f =>
       match f with
       | .retireConnectionId seq => some (LocalAction.retireCid seq)
-      | _ => none
+      | _ => none) ++
+    -- §8.2.1, line 3131: a PATH_CHALLENGE on the wire means path validation has
+    -- begun.  ngtcp2 decides to start one inside the writer and shows it only
+    -- as the frame (and the `get_path_challenge_data` callback), so the harness
+    -- reads the decision, and the challenge data, back off the wire.
+    fs.filterMap (fun f =>
+      match f with
+      | .pathChallenge d =>
+        some (LocalAction.startPathValidation ⟨⟨src.toNat⟩, ⟨dest.toNat⟩⟩ d deadline.toNat)
+      | _ => none)
+  where _unusedNow := now
 
 @[export quic_h_actions_length]
 def actionsLength (as : List LocalAction) : UInt64 := as.length.toUInt64
