@@ -531,11 +531,11 @@ def cryptoFrameOk (s : State) (l : CryptoLevel) : Frame → Bool
 /-- Packet-level send rules:
 
 * no packet may be sent at a level whose write keys we do not have, or have
-  discarded (§17.2.2.1, line 6396: "A client stops both sending and processing
+  discarded (§17.2.2.1, line 6398: "A client stops both sending and processing
   Initial packets when it sends its first Handshake packet");
-* §17.2.3, line 6453: a 0-RTT packet carries "early data from the client to the
-  server", and line 6482: "A client MUST NOT send 0-RTT packets once it starts
-  processing 1-RTT packets from the server";
+* §17.2.3, line 6415: a 0-RTT packet carries early data "from the client to the
+  server as part of the first flight", and line 6476: "A client MUST NOT send
+  0-RTT packets once it starts processing 1-RTT packets from the server";
 * §19.6: a CRYPTO frame must be within what TLS handed over *at this packet's
   level* — the frame-level rule cannot see the level. -/
 def MaySendPacket (s : State) (p : OutPacket) : Prop :=

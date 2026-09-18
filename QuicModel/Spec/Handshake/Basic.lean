@@ -30,13 +30,13 @@ abbrev Params := Quic.Spec.TransportParams.TransportParams
 
 /-! ## 0. Encryption levels and keys -/
 
-/-- §7, line 2198: "The CRYPTO frame can be sent in different packet number
+/-- §7, line 2199: "The CRYPTO frame can be sent in different packet number
     spaces"; RFC 9001 calls the four key sets encryption levels. -/
 inductive Level where | initial | zeroRtt | handshake | oneRtt
   deriving DecidableEq, Repr
 
-/-- The three levels that carry a CRYPTO stream.  §19.6, line 7511: a CRYPTO
-    frame "can be sent in all packet types except 0-RTT"; line 7540: "each
+/-- The three levels that carry a CRYPTO stream.  §19.6, line 7512: a CRYPTO
+    frame "can be sent in all packet types except 0-RTT"; line 7541: "each
     encryption level is treated as a separate CRYPTO stream of data". -/
 inductive CryptoLevel where | initial | handshake | oneRtt
   deriving DecidableEq, Repr
@@ -65,7 +65,7 @@ def cryptoLevelOf : PacketType → Option CryptoLevel
 inductive KeyDir where | read | write
   deriving DecidableEq, Repr
 
-/-- §17.2.2.1, line 6404: "Initial packet protection keys are discarded".
+/-- §17.2.2.1, line 6403: "Initial packet protection keys are discarded".
     Discarding is final: the transport never asks for a key back. -/
 inductive KeyState where | absent | present | discarded
   deriving DecidableEq, Repr
@@ -119,7 +119,7 @@ theorem get_set (st : Streams) (l l' : CryptoLevel) (c : Crypto) :
   cases l <;> cases l' <;> simp [get, set]
 end Streams
 
-/-- §17.2.3, line 6455: "As part of the TLS handshake, the server can accept or
+/-- §17.2.3, line 6417: "As part of the TLS handshake, the server can accept or
     reject this early data." -/
 inductive ZeroRtt where | notOffered | offered | accepted | rejected
   deriving DecidableEq, Repr
@@ -149,30 +149,30 @@ structure State where
   confirmed : Bool := false
   /-- What TLS said about 0-RTT. -/
   zeroRtt : ZeroRtt := .notOffered
-  /-- §17.2.3, line 6482: "A client MUST NOT send 0-RTT packets once it starts
+  /-- §17.2.3, line 6476: "A client MUST NOT send 0-RTT packets once it starts
       processing 1-RTT packets from the server." -/
   processed1Rtt : Bool := false
-  /-- §7.2, line 2373: the value we put in the Source Connection ID field of the
-      first Initial packet we sent; §7.3, line 2427 requires it to be reported
+  /-- §7.2, line 2357: the value we put in the Source Connection ID field of the
+      first Initial packet we sent; §7.3, line 2399 requires it to be reported
       in `initial_source_connection_id`. -/
   localScid : Cid := []
-  /-- §7.2, line 2359: the value we currently put in the Destination Connection
+  /-- §7.2, line 2333: the value we currently put in the Destination Connection
       ID field of the long-header packets we send.  A server has none until it
       has seen the client's first Initial. -/
   dcidSent : Option Cid := none
-  /-- §7.3, line 2429: "the Destination Connection ID field from the first
+  /-- §7.3, line 2402: "the Destination Connection ID field from the first
       Initial packet it received from the client"; for a client, the value it
       chose for its own first Initial. -/
   originalDcid : Option Cid := none
   /-- The Source Connection ID of the peer's first Initial packet. -/
   peerScid : Option Cid := none
-  /-- §7.3, line 2433: "the Source Connection ID field from the Retry packet",
+  /-- §7.3, line 2414: "the Source Connection ID field from the Retry packet",
       if there was a Retry. -/
   retryScid : Option Cid := none
   /-- A Retry happened in this connection (received, for a client; sent, for a
       server). -/
   retrySeen : Bool := false
-  /-- An Initial packet from the peer has been processed (§7.2, line 2384: "Once
+  /-- An Initial packet from the peer has been processed (§7.2, line 2371: "Once
       a client has received a valid Initial packet from the server"). -/
   sawPeerInitial : Bool := false
   /-- How many times `dcidSent` has been set in response to a packet from the
@@ -185,7 +185,7 @@ structure State where
 
 /-- A client at the start of a connection attempt: it has chosen its own Source
     Connection ID and the unpredictable Destination Connection ID of §7.2 line
-    2366, and Initial keys are derived from the latter (RFC 9001 §5.2), so they
+    2337, and Initial keys are derived from the latter (RFC 9001 §5.2), so they
     exist in both directions from the outset. -/
 def initClient (scid dcid : Cid) (bufLimit : Nat := 4096) : State :=
   { role := .client, bufLimit, localScid := scid,
@@ -204,7 +204,7 @@ def stream (s : State) (l : CryptoLevel) : Crypto := s.streams.get l
 def setStream (s : State) (l : CryptoLevel) (c : Crypto) : State :=
   { s with streams := s.streams.set l c }
 
-/-- §17.2.2.1, line 6404: keys are discarded in both directions at once. -/
+/-- §17.2.2.1, line 6403: keys are discarded in both directions at once. -/
 def discardKeys (s : State) (l : Level) : State :=
   { s with read := s.read.set l .discarded, write := s.write.set l .discarded }
 
@@ -223,17 +223,17 @@ def readKeyFor (s : State) (pt : PacketType) : KeyState :=
   | none => .present
   | some l => s.read.get l
 
-/-- §7.2, line 2359: "each endpoint sets the Destination Connection ID field in
+/-- §7.2, line 2333: "each endpoint sets the Destination Connection ID field in
     subsequent packets it sends to the value of the Source Connection ID field
     that it received." -/
 def adoptScid (s : State) (scid : Cid) : State :=
   { s with dcidSent := some scid, peerScid := some scid, sawPeerInitial := true,
            dcidChanges := s.dcidChanges + 1 }
 
-/-- §17.2.3, line 6482: a 1-RTT packet from the server has been processed. -/
+/-- §17.2.3, line 6476: a 1-RTT packet from the server has been processed. -/
 def sawOneRtt (s : State) : State := { s with processed1Rtt := true }
 
-/-- §7.2, line 2381: a client's response to a Retry — the same change of
+/-- §7.2, line 2365: a client's response to a Retry — the same change of
     Destination Connection ID, but the Retry carries no peer Initial. -/
 def adoptRetryScid (s : State) (scid : Cid) : State :=
   { s with dcidSent := some scid, retryScid := some scid, retrySeen := true,
@@ -251,14 +251,14 @@ inductive Event where
   /-- TLS hands over `len` further bytes of handshake data to send at `lvl`. -/
   | tlsSend (lvl : CryptoLevel) (len : Nat)
   /-- TLS delivers the peer's `quic_transport_parameters` extension, which it
-      has authenticated (§7, line 2193; §7.3, line 2415). -/
+      has authenticated (§7, line 2192; §7.3, line 2421). -/
   | tlsPeerParams (encoded : ByteArray)
-  /-- TLS reports that 0-RTT was accepted or rejected (§17.2.3, line 6455). -/
+  /-- TLS reports that 0-RTT was accepted or rejected (§17.2.3, line 6417). -/
   | tlsZeroRtt (accepted : Bool)
   /-- TLS reports handshake completion. -/
   | tlsComplete
   /-- TLS raises an alert; §19.6's carrier maps it to CRYPTO_ERROR 0x100+alert
-      (§20.1, line 8365). -/
+      (§20.1, line 8339). -/
   | tlsAlert (alert : UInt8)
   /-- The header of a packet that arrived: its type and its two connection ID
       fields (§17.2).  Short-header packets have no Source Connection ID; the
@@ -276,7 +276,7 @@ inductive Event where
   deriving DecidableEq
 
 inductive Effect where
-  /-- Hand `[off, off + len)` of `lvl`'s CRYPTO stream to TLS.  §7, line 2168:
+  /-- Hand `[off, off + len)` of `lvl`'s CRYPTO stream to TLS.  §7, line 2167:
       "QUIC provides reliable, ordered delivery of the cryptographic handshake
       data", so these are always contiguous and in order. -/
   | deliverCrypto (lvl : CryptoLevel) (off len : Nat)
@@ -304,42 +304,43 @@ One arm per sentence; `HdrStep` below has one constructor per arm. -/
 
 def cidOutcomes (s : State) (pt : PacketType) (dcid scid : Cid) : List Out :=
   match s.role, pt with
-  -- §7.2, line 2381: "Upon first receiving an Initial or Retry packet from the
+  -- §7.2, line 2365: "Upon first receiving an Initial or Retry packet from the
   -- server, the client uses the Source Connection ID supplied by the server as
   -- the Destination Connection ID for subsequent packets".
   | .client, .initial =>
     if s.sawPeerInitial then
-      -- line 2384: "Once a client has received a valid Initial packet from the
+      -- line 2371: "Once a client has received a valid Initial packet from the
       -- server, it MUST discard any subsequent packet it receives on that
       -- connection with a different Source Connection ID."
       if s.peerScid = some scid then [.ok s []] else [.drop]
     else [.ok (s.adoptScid scid) [.dcidChanged scid]]
   | .client, .retry =>
-    -- line 2389: "A client MUST change the Destination Connection ID it uses
+    -- line 2376: "A client MUST change the Destination Connection ID it uses
     -- for sending packets in response to only the first received Initial or
     -- Retry packet."  §17.2.5.2, line 6621 makes a later Retry a discard (WP5).
     if s.sawPeerInitial || s.retrySeen then [.drop]
     else [.ok (s.adoptRetryScid scid) [.dcidChanged scid]]
   | .client, .handshake =>
-    -- line 2384 again: a different Source Connection ID after the server's
+    -- line 2371 again: a different Source Connection ID after the server's
     -- first Initial MUST be discarded.
     if s.sawPeerInitial && s.peerScid ≠ some scid then [.drop] else [.ok s []]
-  -- §17.2.3, line 6482: 1-RTT packets from the server end 0-RTT sending.
+  -- §17.2.3, line 6476: 1-RTT packets from the server end 0-RTT sending.
   | .client, .oneRtt => [.ok s.sawOneRtt []]
-  -- A client never has 0-RTT read keys; §5.2.1, line 1891.
+  -- A client never has 0-RTT read keys: §17.2.3, line 6415, a 0-RTT packet
+  -- carries early data "from the client to the server".
   | .client, .zeroRtt => [.drop]
   -- WP7 owns Version Negotiation.
   | .client, .versionNegotiation => [.ok s []]
-  -- §7.2, line 2391: "A server MUST set the Destination Connection ID it uses
+  -- §7.2, line 2378: "A server MUST set the Destination Connection ID it uses
   -- for sending packets based on the first received Initial packet", and
-  -- §7.3, line 2429 records that packet's Destination Connection ID.
+  -- §7.3, line 2402 records that packet's Destination Connection ID.
   | .server, .initial =>
     if s.sawPeerInitial then
-      -- line 2394: "if subsequent Initial packets include a different Source
+      -- line 2381: "if subsequent Initial packets include a different Source
       -- Connection ID, they MUST be discarded."
       if s.peerScid = some scid then [.ok s []] else [.drop]
     else [.ok { (s.adoptScid scid) with originalDcid := some dcid } [.dcidChanged scid]]
-  -- §17.2.2.1, line 6398: "A server stops sending and processing Initial
+  -- §17.2.2.1, line 6399: "A server stops sending and processing Initial
   -- packets when it receives its first Handshake packet."
   | .server, .handshake =>
     if s.read.get .initial = .discarded then [.ok s []]
@@ -365,7 +366,7 @@ def headerOutcomes (s : State) (pt : PacketType) (dcid scid : Cid) : List Out :=
     the kernel can evaluate. -/
 def optCid (c : Option Cid) : Option ByteArray := c.map bytes
 
-/-- §7.3, line 2440: "An endpoint MUST treat absence of the
+/-- §7.3, line 2428: "An endpoint MUST treat absence of the
     initial_source_connection_id transport parameter from either endpoint or
     absence of the original_destination_connection_id transport parameter from
     the server as a connection error of type TRANSPORT_PARAMETER_ERROR." -/
@@ -373,7 +374,7 @@ def missingCid (s : State) (tp : Params) : Bool :=
   tp.initialSourceConnectionId.isNone ||
     ((s.role == .client) && tp.originalDestinationConnectionId.isNone)
 
-/-- §7.3, line 2445: the three situations an endpoint "MUST treat … as a
+/-- §7.3, line 2433: the three situations an endpoint "MUST treat … as a
     connection error of type TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION":
     a missing `retry_source_connection_id` after a Retry, a present one without
     a Retry, and any mismatch with the connection ID fields of the Initial
@@ -414,7 +415,7 @@ def deliverFx (lvl : CryptoLevel) (c c' : Crypto) : List Effect :=
 
 def cryptoOutcomes (s : State) (lvl : CryptoLevel) (off len : Nat) : List Out :=
   -- §17.2.2.1, line 6407: "Any data in CRYPTO frames is discarded … when
-  -- Initial keys are discarded"; §17.2.4, line 6552 says the same of Handshake.
+  -- Initial keys are discarded"; §17.2.4, line 6546 says the same of Handshake.
   if s.read.get lvl.level = .discarded then [.drop]
   -- §19.6, line 7545: FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
   else if maxCryptoOffset < off + len then
@@ -444,47 +445,47 @@ def cryptoOutcomes (s : State) (lvl : CryptoLevel) (off len : Nat) : List Out :=
 
 /-- §7.2 and the key-availability rules, for one received packet header. -/
 inductive HdrStep : State → PacketType → Cid → Cid → Out → Prop
-  /-- §17.2.2.1, line 6395: an endpoint "stops … processing Initial packets"
+  /-- §17.2.2.1, line 6398: an endpoint "stops … processing Initial packets"
       once their keys are discarded; RFC 9001 §4.9 generalises it. -/
   | keysDiscarded {s pt d c} (h : s.readKeyFor pt = .discarded) : HdrStep s pt d c .drop
   /-- §5.2.1, line 1895: "The client MAY drop these packets, or MAY buffer them
       in anticipation of later packets that allow it to compute the key"; §12.2,
-      line 4624 says the same for either endpoint.  Buffering. -/
+      line 4622 says the same for either endpoint.  Buffering. -/
   | keysAbsentBuffer {s pt d c} (h : s.readKeyFor pt = .absent) : HdrStep s pt d c (.ok s [])
   /-- Same sentence: dropping. -/
   | keysAbsentDrop {s pt d c} (h : s.readKeyFor pt = .absent) : HdrStep s pt d c .drop
-  /-- §7.2, line 2381: "Upon first receiving an Initial or Retry packet from the
+  /-- §7.2, line 2365: "Upon first receiving an Initial or Retry packet from the
       server, the client uses the Source Connection ID supplied by the server as
       the Destination Connection ID for subsequent packets". -/
   | cliInitialFirst {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .client)
       (hs : s.sawPeerInitial = false) :
       HdrStep s .initial d c (.ok (s.adoptScid c) [.dcidChanged c])
-  /-- §7.2, line 2384, satisfied: a further Initial with the same Source
-      Connection ID (§17.2.2, line 6360: "A server MAY send multiple Initial
+  /-- §7.2, line 2371, satisfied: a further Initial with the same Source
+      Connection ID (§17.2.2, line 6365: "A server MAY send multiple Initial
       packets"). -/
   | cliInitialSame {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .client)
       (hs : s.sawPeerInitial = true) (hc : s.peerScid = some c) :
       HdrStep s .initial d c (.ok s [])
-  /-- §7.2, line 2384: "it MUST discard any subsequent packet it receives on
+  /-- §7.2, line 2371: "it MUST discard any subsequent packet it receives on
       that connection with a different Source Connection ID." -/
   | cliInitialOther {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .client)
       (hs : s.sawPeerInitial = true) (hc : s.peerScid ≠ some c) :
       HdrStep s .initial d c .drop
-  /-- §7.2, line 2381 for a Retry, and §17.2.5.3, line 6650: "The client copies
+  /-- §7.2, line 2365 for a Retry, and §17.2.5.3, line 6652: "The client copies
       the Source Connection ID field from the Retry packet to the Destination
       Connection ID field". -/
   | cliRetryFirst {s d c} (hk : s.readKeyFor .retry = .present) (hr : s.role = .client)
       (hs : s.sawPeerInitial = false) (ht : s.retrySeen = false) :
       HdrStep s .retry d c (.ok (s.adoptRetryScid c) [.dcidChanged c])
-  /-- §7.2, line 2389: "A client MUST change the Destination Connection ID it
+  /-- §7.2, line 2376: "A client MUST change the Destination Connection ID it
       uses for sending packets in response to only the first received Initial or
-      Retry packet"; §17.2.5.2, line 6621: "After the client has received and
+      Retry packet"; §17.2.5.2, line 6622: "After the client has received and
       processed an Initial or Retry packet from the server, it MUST discard any
       subsequent Retry packets that it receives." -/
   | cliRetryLate {s d c} (hk : s.readKeyFor .retry = .present) (hr : s.role = .client)
       (h : s.sawPeerInitial = true ∨ s.retrySeen = true) :
       HdrStep s .retry d c .drop
-  /-- §7.2, line 2384 applied to a Handshake packet. -/
+  /-- §7.2, line 2371 applied to a Handshake packet. -/
   | cliHandshakeOther {s d c} (hk : s.readKeyFor .handshake = .present) (hr : s.role = .client)
       (hs : s.sawPeerInitial = true) (hc : s.peerScid ≠ some c) :
       HdrStep s .handshake d c .drop
@@ -492,19 +493,20 @@ inductive HdrStep : State → PacketType → Cid → Cid → Out → Prop
   | cliHandshakeOk {s d c} (hk : s.readKeyFor .handshake = .present) (hr : s.role = .client)
       (h : s.sawPeerInitial = false ∨ s.peerScid = some c) :
       HdrStep s .handshake d c (.ok s [])
-  /-- §17.2.3, line 6482: "A client MUST NOT send 0-RTT packets once it starts
+  /-- §17.2.3, line 6476: "A client MUST NOT send 0-RTT packets once it starts
       processing 1-RTT packets from the server." -/
   | cliOneRtt {s d c} (hk : s.readKeyFor .oneRtt = .present) (hr : s.role = .client) :
       HdrStep s .oneRtt d c (.ok s.sawOneRtt [])
-  /-- A client is never the recipient of a 0-RTT packet (§17.2.3, line 6453:
-      0-RTT carries "early data from the client to the server"). -/
+  /-- A client is never the recipient of a 0-RTT packet (§17.2.3, line 6415: a
+      0-RTT packet carries early data "from the client to the server as part of
+      the first flight"). -/
   | cliZeroRtt {s d c} (hk : s.readKeyFor .zeroRtt = .present) (hr : s.role = .client) :
       HdrStep s .zeroRtt d c .drop
   /-- Version Negotiation is WP7's (§6). -/
   | cliVn {s d c} (hr : s.role = .client) : HdrStep s .versionNegotiation d c (.ok s [])
-  /-- §7.2, line 2391: "A server MUST set the Destination Connection ID it uses
+  /-- §7.2, line 2378: "A server MUST set the Destination Connection ID it uses
       for sending packets based on the first received Initial packet"; §7.3,
-      line 2429 keeps that packet's Destination Connection ID for
+      line 2402 keeps that packet's Destination Connection ID for
       `original_destination_connection_id`. -/
   | srvInitialFirst {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .server)
       (hs : s.sawPeerInitial = false) :
@@ -514,12 +516,12 @@ inductive HdrStep : State → PacketType → Cid → Cid → Out → Prop
   | srvInitialSame {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .server)
       (hs : s.sawPeerInitial = true) (hc : s.peerScid = some c) :
       HdrStep s .initial d c (.ok s [])
-  /-- §7.2, line 2394: "if subsequent Initial packets include a different Source
+  /-- §7.2, line 2381: "if subsequent Initial packets include a different Source
       Connection ID, they MUST be discarded." -/
   | srvInitialOther {s d c} (hk : s.readKeyFor .initial = .present) (hr : s.role = .server)
       (hs : s.sawPeerInitial = true) (hc : s.peerScid ≠ some c) :
       HdrStep s .initial d c .drop
-  /-- §17.2.2.1, line 6398: "A server stops sending and processing Initial
+  /-- §17.2.2.1, line 6399: "A server stops sending and processing Initial
       packets when it receives its first Handshake packet." -/
   | srvHandshakeDiscard {s d c} (hk : s.readKeyFor .handshake = .present) (hr : s.role = .server)
       (hd : s.read.get .initial ≠ .discarded) :
@@ -542,9 +544,9 @@ inductive HdrStep : State → PacketType → Cid → Cid → Out → Prop
 inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
   /-- §17.2.2.1, line 6407: "Any data in CRYPTO frames is discarded - and no
       longer retransmitted - when Initial keys are discarded"; §17.2.4, line
-      6552 repeats it for Handshake keys. -/
+      6546 repeats it for Handshake keys. -/
   | levelGone {s l o n} (h : s.read.get l.level = .discarded) : CryptoStep s l o n .drop
-  /-- §19.6, line 7545: "Receipt of a frame that exceeds this limit MUST be
+  /-- §19.6, line 7546: "Receipt of a frame that exceeds this limit MUST be
       treated as a connection error of type FRAME_ENCODING_ERROR or
       CRYPTO_BUFFER_EXCEEDED."  First alternative. -/
   | tooLargeEncoding {s l o n} (hk : s.read.get l.level ≠ .discarded)
@@ -553,11 +555,11 @@ inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
   | tooLargeBuffer {s l o n} (hk : s.read.get l.level ≠ .discarded)
       (h : maxCryptoOffset < o + n) : CryptoStep s l o n (.error .cryptoBufferExceeded)
   /-- §7.5, line 2716: "…and all CRYPTO frames received in the future"; line
-      2720: "Packets containing discarded CRYPTO frames MUST be acknowledged". -/
+      2719: "Packets containing discarded CRYPTO frames MUST be acknowledged". -/
   | alreadyDiscarding {s l o n} (hk : s.read.get l.level ≠ .discarded)
       (h : o + n ≤ maxCryptoOffset) (hd : (s.stream l).discarding = true) :
       CryptoStep s l o n (.ok s [])
-  /-- §7, line 2168: "QUIC provides reliable, ordered delivery of the
+  /-- §7, line 2167: "QUIC provides reliable, ordered delivery of the
       cryptographic handshake data" — in-order bytes go to TLS, the rest is
       buffered (§7.5, line 2698). -/
   | accept {s l o n} (hk : s.read.get l.level ≠ .discarded) (h : o + n ≤ maxCryptoOffset)
@@ -590,21 +592,21 @@ inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
 
 /-- WP1's decode and validity checks, then §7.3's connection-ID checks. -/
 inductive ParamStep : State → ByteArray → Out → Prop
-  /-- §7.4, line 2536 and §18: whatever `TransportParams.component` rejects is
+  /-- §7.4, line 2535 and §18: whatever `TransportParams.component` rejects is
       rejected here with the same code. -/
   | wp1Error {s b e} (h : TransportParams.Step ⟨s.role, s.peerParams⟩ (.recvParams b) (.error e)) :
       ParamStep s b (.error e)
   /-- `TransportParams.component` never discards, but if it did, so would we. -/
   | wp1Drop {s b} (h : TransportParams.Step ⟨s.role, s.peerParams⟩ (.recvParams b) .drop) :
       ParamStep s b .drop
-  /-- §7.3, line 2440: "An endpoint MUST treat absence of the
+  /-- §7.3, line 2428: "An endpoint MUST treat absence of the
       initial_source_connection_id transport parameter from either endpoint or
       absence of the original_destination_connection_id transport parameter from
       the server as a connection error of type TRANSPORT_PARAMETER_ERROR." -/
   | missing {s b tps fx tp} (h : TransportParams.Step ⟨s.role, s.peerParams⟩ (.recvParams b)
         (.ok tps fx)) (hp : tps.peer = some tp) (hm : missingCid s tp = true) :
       ParamStep s b (.error .transportParameterError)
-  /-- §7.3, line 2445: "An endpoint MUST treat the following as a connection
+  /-- §7.3, line 2433: "An endpoint MUST treat the following as a connection
       error of type TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION: absence of
       the retry_source_connection_id … after receiving a Retry packet, presence
       … when no Retry packet was received, or a mismatch between values received
@@ -618,7 +620,7 @@ inductive ParamStep : State → ByteArray → Out → Prop
   | mismatchPv {s b tps fx tp} (h : TransportParams.Step ⟨s.role, s.peerParams⟩ (.recvParams b)
         (.ok tps fx)) (hp : tps.peer = some tp) (hm : missingCid s tp = false)
       (hc : cidMismatch s tp = true) : ParamStep s b (.error .protocolViolation)
-  /-- §7.3, line 2415: "Endpoints MUST validate that received transport
+  /-- §7.3, line 2421: "Endpoints MUST validate that received transport
       parameters match received Connection ID values."  They do. -/
   | accept {s b tps fx tp} (h : TransportParams.Step ⟨s.role, s.peerParams⟩ (.recvParams b)
         (.ok tps fx)) (hp : tps.peer = some tp) (hm : missingCid s tp = false)
@@ -633,7 +635,7 @@ inductive Step : State → Event → Out → Prop
   /-- Keys arrive from TLS.  A discarded key never comes back (§17.2.2.1). -/
   | keys {s dir l} : Step s (.tlsKeys dir l) (.ok (s.provideKey dir l) [])
   /-- RFC 9001 §4.9's discards, which the transport draft refers to at line
-      6404; the Initial case of §17.2.2.1 is driven by `sentPacket` and by a
+      6403; the Initial case of §17.2.2.1 is driven by `sentPacket` and by a
       server's first Handshake packet instead. -/
   | discard {s l} (h : s.keysGone l = false) :
       Step s (.tlsDiscardKeys l) (.ok (s.discardKeys l) [.keysDiscarded l])
@@ -644,9 +646,9 @@ inductive Step : State → Event → Out → Prop
       Step s (.tlsSend l n) (.ok (s.setStream l { s.stream l with handed := (s.stream l).handed + n }) [])
   /-- §7.4 and §7.3, composed: `TransportParams.component` then `ParamStep`. -/
   | params {s b o} (h : ParamStep s b o) : Step s (.tlsPeerParams b) o
-  /-- §17.2.3, line 6455: the server accepted the early data. -/
+  /-- §17.2.3, line 6417: the server accepted the early data. -/
   | zeroRttAccepted {s} : Step s (.tlsZeroRtt true) (.ok { s with zeroRtt := .accepted } [])
-  /-- §17.2.3, line 6455: it rejected it, and the 0-RTT keys go with it
+  /-- §17.2.3, line 6417: it rejected it, and the 0-RTT keys go with it
       (RFC 9001 §4.9.3). -/
   | zeroRttRejected {s} :
       Step s (.tlsZeroRtt false)
@@ -662,7 +664,7 @@ inductive Step : State → Event → Out → Prop
       Step s .tlsComplete (.ok { s with complete := true } [.handshakeComplete])
   /-- Completion is reported once. -/
   | completeAgain {s} (hc : s.complete = true) : Step s .tlsComplete (.ok s [])
-  /-- §20.1, line 8365: "CRYPTO_ERROR … the cryptographic handshake failed"; the
+  /-- §20.1, line 8339: "CRYPTO_ERROR … the cryptographic handshake failed"; the
       1 byte of a TLS alert is added to 0x100. -/
   | alert {s a} : Step s (.tlsAlert a) (.error (.cryptoError a))
   | header {s pt d c o} (h : HdrStep s pt d c o) : Step s (.recvHeader pt d c) o
@@ -675,18 +677,18 @@ inductive Step : State → Event → Out → Prop
       line 8207); the text gives no rule, so it has no effect here. -/
   | doneEarly {s} (hr : s.role = .client) (hc : s.complete = false) :
       Step s .recvHandshakeDone (.ok s [])
-  /-- §19.20, line 8209: "A server MUST treat receipt of a HANDSHAKE_DONE frame
+  /-- §19.20, line 8208: "A server MUST treat receipt of a HANDSHAKE_DONE frame
       as a connection error of type PROTOCOL_VIOLATION" — WP3's `mustReject`
       already rejects it, so this component adds nothing. -/
   | doneServer {s} (hr : s.role = .server) : Step s .recvHandshakeDone (.ok s [])
-  /-- §17.2.2.1, line 6396: "A client stops both sending and processing Initial
+  /-- §17.2.2.1, line 6398: "A client stops both sending and processing Initial
       packets when it sends its first Handshake packet." -/
   | sentHandshake {s} (hr : s.role = .client) (hd : s.write.get .initial ≠ .discarded) :
       Step s (.sentPacket .handshake) (.ok (s.discardKeys .initial) [.keysDiscarded .initial])
   /-- Any other packet we send, and any Handshake packet after the first. -/
   | sentOther {s pt} (h : s.role ≠ .client ∨ pt ≠ .handshake ∨ s.write.get .initial = .discarded) :
       Step s (.sentPacket pt) (.ok s [])
-  /-- §7.3, line 2433: "If it sends a Retry packet, a server also includes the
+  /-- §7.3, line 2414: "If it sends a Retry packet, a server also includes the
       Source Connection ID field from the Retry packet in the
       retry_source_connection_id transport parameter." -/
   | sentRetry {s c} (hr : s.role = .server) :
