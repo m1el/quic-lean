@@ -13,20 +13,20 @@ namespace Quic.Spec.Stream.Send
 
 /-! ## 1. State, events, effects -/
 
-/-- §3.1, line 900 (Figure 2): the six states of a sending part. -/
+/-- §3.1, line 932 (Figure 2): the six states of a sending part. -/
 inductive Phase where
   | ready | send | dataSent | dataRecvd | resetSent | resetRecvd
   deriving DecidableEq, Repr
 
 namespace Phase
 
-/-- §3.1, lines 949, 973: "Data Recvd" and "Reset Recvd" are terminal. -/
+/-- §3.1, lines 975, 990: "Data Recvd" and "Reset Recvd" are terminal. -/
 def terminal : Phase → Bool
   | .dataRecvd | .resetRecvd => true
   | _ => false
 
-/-- §3.3, line 1114: "A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED
-    frame for a stream in the 'Reset Sent' state or any terminal state, that is,
+/-- §3.3, line 1147: "A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED
+    frame for a stream in the "Reset Sent" state or any terminal state, that is,
     after sending a RESET_STREAM frame."  RESET_STREAM itself may still be
     retransmitted from "Reset Sent" (that state is not terminal), so this
     predicate is only about the two data-carrying frame types. -/
@@ -36,8 +36,10 @@ def mayCarryData : Phase → Bool
 
 /-- The states before a FIN has been transmitted: "Ready" and "Send".  These are
     the states in which the application may still write (§2.4) and in which
-    stream flow-control credit is still useful (§3.1, line 944: in "Data Sent"
-    the endpoint "can safely ignore any MAX_STREAM_DATA frames"). -/
+    stream flow-control credit is still useful (§3.1, line 971: from "Data Sent"
+    on, "The endpoint can safely ignore any MAX_STREAM_DATA frames it receives
+    from its peer for a stream in this state" — a permission, not a duty; see
+    `Step.maxStreamDataIgnored` and the NOTES). -/
 def beforeFin : Phase → Bool
   | .ready | .send => true
   | _ => false
@@ -50,8 +52,8 @@ def isResetSent : Phase → Bool
   | .resetSent => true
   | _ => false
 
-/-- §3.1, line 927: "Sending the first STREAM or STREAM_DATA_BLOCKED frame
-    causes a sending part of a stream to enter the 'Send' state." -/
+/-- §3.1, line 940: "Sending the first STREAM or STREAM_DATA_BLOCKED frame
+    causes a sending part of a stream to enter the "Send" state." -/
 def afterSend : Phase → Phase
   | .ready => .send
   | p => p
@@ -75,17 +77,23 @@ structure State where
   written : Nat
   /-- §2.4: the application has ended the stream, so `written` is its size. -/
   finWritten : Bool
-  /-- §4.5, line 1479: "one higher than the offset of the byte with the largest
-      offset sent on the stream, or zero if no bytes were sent." -/
+  /-- §4.5, line 1479: "The final size is the amount of flow control credit that
+      is consumed by a stream. ... this is one higher than the offset of the byte
+      with the largest offset sent on the stream, or zero if no bytes were
+      sent." -/
   sent : Nat
   /-- §4.5: the final size, once a FIN or a RESET_STREAM has been *sent*. -/
   finalSize : Option Nat
   /-- §3.5: the application error code of a reset that the application asked for
-      or that a STOP_SENDING frame solicited, and of the reset once sent. -/
+      or that a STOP_SENDING frame solicited, and of the reset once sent.  Only
+      once `phase = .resetSent` does it record a code that actually went on the
+      wire, which is what §13.3, line 5359 pins; before then it is the code the
+      application or the peer asked for, and §3.5, line 1263 says the endpoint
+      "can use any application error code" instead. -/
   resetCode : Option Nat
   deriving DecidableEq, Repr
 
-/-- A freshly created sending part: §3.1, line 920 "The 'Ready' state represents
+/-- A freshly created sending part: §3.1, line 936 "The "Ready" state represents
     a newly created stream that is able to accept data from the application."
     `initialMax` is the peer's `initial_max_stream_data_*` for this stream. -/
 def init (id : StreamId) (role : Role) (initialMax : Nat) : State :=
@@ -93,11 +101,11 @@ def init (id : StreamId) (role : Role) (initialMax : Nat) : State :=
     finWritten := false, sent := 0, finalSize := none, resetCode := none }
 
 inductive Event where
-  /-- §2.4, line 811: the application writes `len` more bytes. -/
+  /-- §2.4, line 801: the application writes `len` more bytes. -/
   | appWrite (len : Nat)
-  /-- §2.4, line 815: the application ends the stream (clean termination). -/
+  /-- §2.4, line 805: the application ends the stream (clean termination). -/
   | appEnd
-  /-- §2.4, line 818: the application resets the stream (abrupt termination). -/
+  /-- §2.4, line 808: the application resets the stream (abrupt termination). -/
   | appReset (code : Nat)
   /-- §19.10 MAX_STREAM_DATA received from the peer. -/
   | recvMaxStreamData (v : Nat)
@@ -109,10 +117,10 @@ inductive Event where
   | sentStreamDataBlocked (limit : Nat)
   /-- We transmitted a RESET_STREAM frame. -/
   | sentResetStream (code finalSize : Nat)
-  /-- §3.1, line 947: "all stream data has been successfully acknowledged".
+  /-- §3.1, line 975: "Once all stream data has been successfully acknowledged".
       Loss recovery is out of scope, so this is an abstract event. -/
   | ackAllData
-  /-- §3.1, line 971: "a packet containing a RESET_STREAM has been
+  /-- §3.1, line 990: "Once a packet containing a RESET_STREAM has been
       acknowledged".  Abstract, as above. -/
   | ackReset
   deriving DecidableEq, Repr
@@ -151,11 +159,11 @@ predicate cannot drift apart; `step_ok_iff_maySend` below makes that precise. -/
     stream, i.e. in "Ready" or "Send" with no FIN written yet. -/
 def canWrite (s : State) : Bool := s.phase.beforeFin && !s.finWritten
 
-/-- §3.3, line 1112: "A sender MUST NOT send any of these frames from a
-    terminal state"; §3.3, line 1114: no STREAM after a RESET_STREAM.
+/-- §3.3, line 1146: "A sender MUST NOT send any of these frames from a
+    terminal state"; §3.3, line 1147: no STREAM after a RESET_STREAM.
     §4.1, line 1330: "Senders MUST NOT send data in excess of either limit."
     §4.5, line 1499: "An endpoint MUST NOT send data on a stream at or beyond
-    the final size."  §4.5, line 1516: "Once a final size for a stream is known,
+    the final size."  §4.5, line 1517: "Once a final size for a stream is known,
     it cannot change." -/
 def maySendStream (s : State) (offset len : Nat) (fin : Bool) : Bool :=
   s.phase.mayCarryData
@@ -166,20 +174,31 @@ def maySendStream (s : State) (offset len : Nat) (fin : Bool) : Bool :=
         | none => true
         | some f => decide (offset + len ≤ f) && (!fin || decide (offset + len = f)))
 
-/-- §3.3, line 1112/1114 as above; §19.13, line 7858 and §4.1, line 1372: the
-    frame reports the stream-level limit at which the sender is blocked. -/
+/-- §3.3, lines 1146/1147 as above; §19.13, line 7859 and §13.3, line 5409
+    ("These frames always include the limit that is causing blocking at the time
+    that they are transmitted"): the frame reports the stream-level limit at
+    which the sender is blocked. -/
 def maySendBlocked (s : State) (limit : Nat) : Bool :=
   s.phase.mayCarryData && decide (limit = s.maxData)
 
-/-- §3.3, line 1112: not from a terminal state — "Reset Sent" is not terminal,
+/-- §3.3, line 1146: not from a terminal state — "Reset Sent" is not terminal,
     so a RESET_STREAM may be repeated.  §4.5, line 1486: the Final Size field
-    carries the final size, which §4.5, line 1516 says cannot change; before one
-    is known it is the highest offset sent (§4.5, line 1479). -/
-def maySendReset (s : State) (_code finalSize : Nat) : Bool :=
+    carries the final size, which §4.5, line 1517 says cannot change; before one
+    is known it is the highest offset sent (§4.5, line 1479).  §13.3, line 5359:
+    "The content of a RESET_STREAM frame MUST NOT change when it is sent again",
+    so once one has gone out — which is exactly when the phase is "Reset Sent",
+    and `resetCode` then holds the code it carried — a repeat must carry the
+    same Application Protocol Error Code.  Before that, `resetCode` is only what
+    the application or a STOP_SENDING asked for, and §3.5, line 1263 says the
+    endpoint "can use any application error code", so it does not pin. -/
+def maySendReset (s : State) (code finalSize : Nat) : Bool :=
   !s.phase.terminal
     && (match s.finalSize with
         | none => decide (finalSize = s.sent)
         | some f => decide (finalSize = f))
+    && (match s.phase, s.resetCode with
+        | .resetSent, some c => decide (code = c)
+        | _, _ => true)
 
 /-! ## 2. The specification -/
 
@@ -196,41 +215,52 @@ inductive Step : State → Event → Out → Prop
       Step s .appEnd (.ok { s with finWritten := true } [])
   | endRefused {s} (h : canWrite s = false) :
       Step s .appEnd .drop
-  /-- §3.1, line 962: "From any of the 'Ready', 'Send', or 'Data Sent' states,
+  /-- §3.1, line 979: "From any of the "Ready", "Send", or "Data Sent" states,
       an application can signal that it wishes to abandon transmission of stream
       data ... the endpoint sends a RESET_STREAM frame". -/
   | reset {s code} (h : s.phase.mayCarryData = true) :
       Step s (.appReset code) (.ok { s with resetCode := some code } [.resetRequested code])
-  /-- §2.4, line 818: a RESET_STREAM results "if the stream was not already in a
+  /-- §2.4, line 808: a RESET_STREAM results "if the stream was not already in a
       terminal state"; from "Reset Sent" one is already on its way. -/
   | resetRefused {s code} (h : s.phase.mayCarryData = false) :
       Step s (.appReset code) .drop
-  /-- §4.1, line 1361: "A sender MUST ignore any MAX_STREAM_DATA or MAX_DATA
-      frames that do not increase flow control limits"; §3.1, line 944: in
-      "Data Sent" and later "the endpoint can safely ignore any MAX_STREAM_DATA
-      frames it receives from its peer for a stream in this state". -/
-  | maxStreamDataIgnored {s v} (h : (s.phase.beforeFin && decide (s.maxData < v)) = false) :
+  /-- §4.1, line 1372: "A sender MUST ignore any MAX_STREAM_DATA or MAX_DATA
+      frames that do not increase flow control limits."  This one is a MUST, so
+      it is the only outcome. -/
+  | maxStreamDataStale {s v} (h : decide (s.maxData < v) = false) :
       Step s (.recvMaxStreamData v) (.ok s [])
   /-- §4.1, line 1349: "A receiver can advertise a larger limit for a stream by
-      sending a MAX_STREAM_DATA frame". -/
-  | maxStreamDataRaise {s v} (h : (s.phase.beforeFin && decide (s.maxData < v)) = true) :
+      sending a MAX_STREAM_DATA frame"; §3.1, line 957: in "Send" the endpoint
+      "respects the flow control limits set by its peer, and continues to accept
+      and process MAX_STREAM_DATA frames."  Available in *every* phase: nothing
+      in the text requires a larger limit to be discarded. -/
+  | maxStreamDataRaise {s v} (h : decide (s.maxData < v) = true) :
       Step s (.recvMaxStreamData v) (.ok { s with maxData := v } [.creditAvailable v])
-  /-- §3.5, line 1258: "An endpoint that receives a STOP_SENDING frame MUST send
+  /-- §3.1, line 971: "The endpoint can safely ignore any MAX_STREAM_DATA frames
+      it receives from its peer for a stream in this state" — "this state" being
+      "Data Sent", after the FIN has gone out.  A permission, so it is an
+      *additional* outcome next to `maxStreamDataRaise`, never the only one
+      (see NOTES).  It is offered from "Data Sent" on, i.e. wherever the FIN or
+      a RESET_STREAM has been sent. -/
+  | maxStreamDataIgnored {s v}
+      (h1 : decide (s.maxData < v) = true) (h2 : s.phase.beforeFin = false) :
+      Step s (.recvMaxStreamData v) (.ok s [])
+  /-- §3.5, line 1254: "An endpoint that receives a STOP_SENDING frame MUST send
       a RESET_STREAM frame if the stream is in the Ready or Send state.  If the
-      stream is in the 'Data Sent' state, the endpoint MAY defer sending the
+      stream is in the "Data Sent" state, the endpoint MAY defer sending the
       RESET_STREAM frame".  The obligation is recorded in `resetCode`; the
       frame itself leaves by `sentResetStream`. -/
   | stopSending {s code} (h : s.phase.mayCarryData = true) :
       Step s (.recvStopSending code) (.ok { s with resetCode := some code } [.peerStopSending code])
-  /-- §3.3, line 1118: "A sender could receive either of these two frames in any
-      state as a result of delayed delivery of packets."  In "Reset Sent" and
-      the terminal states no reset is owed, so the frame has no effect. -/
+  /-- §3.3, line 1161: "A sender could receive either of these two frames
+      in any state as a result of delayed delivery of packets."  In "Reset Sent"
+      and the terminal states no reset is owed, so the frame has no effect. -/
   | stopSendingLate {s code} (h : s.phase.mayCarryData = false) :
       Step s (.recvStopSending code) (.ok s [])
-  /-- §3.1, line 927: the first STREAM frame moves "Ready" to "Send";
-      §3.1, line 938: "After the application indicates that all stream data has
+  /-- §3.1, line 940: the first STREAM frame moves "Ready" to "Send";
+      §3.1, line 964: "After the application indicates that all stream data has
       been sent and a STREAM frame containing the FIN bit is sent, the sending
-      part of the stream enters the 'Data Sent' state." -/
+      part of the stream enters the "Data Sent" state." -/
   | sendStream {s offset len fin} (h : maySendStream s offset len fin = true) :
       Step s (.sentStream offset len fin)
         (.ok { s with
@@ -241,33 +271,33 @@ inductive Step : State → Event → Out → Prop
       happens. -/
   | sendStreamForbidden {s offset len fin} (h : maySendStream s offset len fin = false) :
       Step s (.sentStream offset len fin) .drop
-  /-- §3.1, line 927: STREAM_DATA_BLOCKED also moves "Ready" to "Send";
-      §3.1, line 934: "An endpoint in the 'Send' state generates
+  /-- §3.1, line 940: STREAM_DATA_BLOCKED also moves "Ready" to "Send";
+      §3.1, line 960: "An endpoint in the "Send" state generates
       STREAM_DATA_BLOCKED frames if it is blocked from sending by stream flow
       control limits." -/
   | sendBlocked {s limit} (h : maySendBlocked s limit = true) :
       Step s (.sentStreamDataBlocked limit) (.ok { s with phase := s.phase.afterSend } [])
   | sendBlockedForbidden {s limit} (h : maySendBlocked s limit = false) :
       Step s (.sentStreamDataBlocked limit) .drop
-  /-- §3.1, line 966: "the endpoint sends a RESET_STREAM frame, which causes the
-      stream to enter the 'Reset Sent' state"; §3.1, line 968: "An endpoint MAY
-      send a RESET_STREAM as the first frame that mentions a stream; this causes
-      the sending part of that stream to open and then immediately transition to
-      the 'Reset Sent' state." -/
+  /-- §3.1, line 982: "In either case, the endpoint sends a RESET_STREAM frame,
+      which causes the stream to enter the "Reset Sent" state"; §3.1, line 986:
+      "An endpoint MAY send a RESET_STREAM as the first frame that mentions a
+      stream; this causes the sending part of that stream to open and then
+      immediately transition to the "Reset Sent" state." -/
   | sendReset {s code fs} (h : maySendReset s code fs = true) :
       Step s (.sentResetStream code fs)
         (.ok { s with phase := .resetSent, finalSize := some fs, resetCode := some code } [])
   | sendResetForbidden {s code fs} (h : maySendReset s code fs = false) :
       Step s (.sentResetStream code fs) .drop
-  /-- §3.1, line 947: "Once all stream data has been successfully acknowledged,
-      the sending part of the stream enters the 'Data Recvd' state". -/
+  /-- §3.1, line 975: "Once all stream data has been successfully acknowledged,
+      the sending part of the stream enters the "Data Recvd" state". -/
   | allAcked {s} (h : s.phase.isDataSent = true) :
       Step s .ackAllData (.ok { s with phase := .dataRecvd } [.allDataAcked])
   /-- Outside "Data Sent" there is no such acknowledgement to receive. -/
   | allAckedNo {s} (h : s.phase.isDataSent = false) :
       Step s .ackAllData .drop
-  /-- §3.1, line 971: "Once a packet containing a RESET_STREAM has been
-      acknowledged, the sending part of the stream enters the 'Reset Recvd'
+  /-- §3.1, line 990: "Once a packet containing a RESET_STREAM has been
+      acknowledged, the sending part of the stream enters the "Reset Recvd"
       state". -/
   | resetAcked {s} (h : s.phase.isResetSent = true) :
       Step s .ackReset (.ok { s with phase := .resetRecvd } [.resetAcked])
@@ -286,8 +316,9 @@ def outcomes (s : State) : Event → List Out
         [.ok { s with resetCode := some code } [.resetRequested code]]
       else [.drop]
   | .recvMaxStreamData v =>
-      if s.phase.beforeFin && decide (s.maxData < v) then
-        [.ok { s with maxData := v } [.creditAvailable v]]
+      if decide (s.maxData < v) then
+        if s.phase.beforeFin then [.ok { s with maxData := v } [.creditAvailable v]]
+        else [.ok s [], .ok { s with maxData := v } [.creditAvailable v]]
       else [.ok s []]
   | .recvStopSending code =>
       if s.phase.mayCarryData then
@@ -341,9 +372,17 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | recvMaxStreamData v =>
       simp only [outcomes] at h
       split at h
-      · simp only [List.mem_singleton] at h; subst h; exact .maxStreamDataRaise ‹_›
-      · simp only [List.mem_singleton] at h; subst h
-        exact .maxStreamDataIgnored (Bool.eq_false_iff.mpr ‹_›)
+      · rename_i c1
+        split at h
+        · simp only [List.mem_singleton] at h; subst h; exact .maxStreamDataRaise c1
+        · rename_i c2
+          simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+          rcases h with h | h <;> subst h
+          · exact .maxStreamDataIgnored c1 (Bool.eq_false_iff.mpr c2)
+          · exact .maxStreamDataRaise c1
+      · rename_i c1
+        simp only [List.mem_singleton] at h; subst h
+        exact .maxStreamDataStale (Bool.eq_false_iff.mpr c1)
     | recvStopSending code =>
       simp only [outcomes] at h
       split at h
@@ -388,8 +427,13 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | endRefused h => simp [outcomes, h]
     | reset h => simp [outcomes, h]
     | resetRefused h => simp [outcomes, h]
-    | maxStreamDataIgnored h => simp [outcomes, h]
-    | maxStreamDataRaise h => simp [outcomes, h]
+    | maxStreamDataStale h => simp [outcomes, h]
+    | @maxStreamDataRaise v h =>
+      by_cases c2 : s.phase.beforeFin = true
+      · simp [outcomes, h, c2]
+      · simp only [Bool.not_eq_true] at c2
+        simp [outcomes, h, c2]
+    | maxStreamDataIgnored h1 h2 => simp [outcomes, h1, h2]
     | stopSending h => simp [outcomes, h]
     | stopSendingLate h => simp [outcomes, h]
     | sendStream h => simp [outcomes, h]
@@ -437,9 +481,10 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
     simp only at hb
     rw [hc.1] at hb; exact absurd hb (by simp)
   | reset => exact ⟨h1, h2, h3, h4⟩
+  | maxStreamDataStale => exact ⟨h1, h2, h3, h4⟩
   | maxStreamDataIgnored => exact ⟨h1, h2, h3, h4⟩
   | maxStreamDataRaise hc =>
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+    simp only [decide_eq_true_eq] at hc
     exact ⟨h1, by simp only; omega, h3, h4⟩
   | stopSending => exact ⟨h1, h2, h3, h4⟩
   | stopSendingLate => exact ⟨h1, h2, h3, h4⟩
@@ -484,7 +529,7 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
     intro f hf
     simp only [Option.some.injEq] at hf
     subst hf
-    obtain ⟨-, hfs⟩ := hc
+    obtain ⟨⟨-, hfs⟩, -⟩ := hc
     revert hfs
     cases hfin : s.finalSize with
     | none => simp
@@ -556,7 +601,7 @@ theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect} {f : N
       simp [hfs.2]
   | @sendReset code fs hc =>
     simp only [maySendReset, Bool.and_eq_true] at hc
-    obtain ⟨-, hfs⟩ := hc
+    obtain ⟨⟨-, hfs⟩, -⟩ := hc
     rw [hf] at hfs
     simp only [decide_eq_true_eq] at hfs
     simp only
@@ -564,6 +609,7 @@ theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect} {f : N
   | write => exact hf
   | endStream => exact hf
   | reset => exact hf
+  | maxStreamDataStale => exact hf
   | maxStreamDataIgnored => exact hf
   | maxStreamDataRaise => exact hf
   | stopSending => exact hf
@@ -583,10 +629,12 @@ theorem no_data_beyond_finalSize {s : State} {offset len : Nat} {fin : Bool} {f 
   simp only [Bool.and_eq_true, decide_eq_true_eq] at hfs
   exact hfs.1
 
-/-- **(c) The terminal states absorb.**  §3.1, lines 949 and 973: "Data Recvd"
-    and "Reset Recvd" are terminal.  Nothing at all changes there. -/
+/-- **(c) The terminal states absorb** — the *phase* does.  §3.1, lines 975 and
+    990: "Data Recvd" and "Reset Recvd" are terminal.  The state machine cannot
+    leave; `terminal_absorbing_state` says exactly how much of the rest of the
+    state can still move (only the peer's advertised credit). -/
 theorem terminal_absorbing {s s' : State} {e : Event} {fx : List Effect}
-    (ht : s.phase.terminal = true) (h : Step s e (.ok s' fx)) : s' = s := by
+    (ht : s.phase.terminal = true) (h : Step s e (.ok s' fx)) : s'.phase = s.phase := by
   have hb : s.phase.beforeFin = false := by
     cases hp : s.phase <;> simp_all [Phase.terminal, Phase.beforeFin]
   have hc : s.phase.mayCarryData = false := by
@@ -594,11 +642,48 @@ theorem terminal_absorbing {s s' : State} {e : Event} {fx : List Effect}
   cases h with
   | write hw => simp_all [canWrite]
   | endStream hw => simp_all [canWrite]
-  | reset hw => rw [hc] at hw; exact absurd hw (by simp)
+  | reset hw => exact absurd hw (by simp [hc])
+  | maxStreamDataStale => rfl
   | maxStreamDataIgnored => rfl
-  | maxStreamDataRaise hw => rw [hb] at hw; simp at hw
-  | stopSending hw => rw [hc] at hw; exact absurd hw (by simp)
+  | maxStreamDataRaise => rfl
+  | stopSending hw => exact absurd hw (by simp [hc])
   | stopSendingLate => rfl
+  | sendStream hw => rw [maySendStream, hc] at hw; simp at hw
+  | sendBlocked hw => rw [maySendBlocked, hc] at hw; simp at hw
+  | sendReset hw => rw [maySendReset, ht] at hw; simp at hw
+  | allAcked hw =>
+    have : s.phase.isDataSent = false := by
+      cases hp : s.phase <;> simp_all [Phase.terminal, Phase.isDataSent]
+    rw [this] at hw; exact absurd hw (by simp)
+  | resetAcked hw =>
+    have : s.phase.isResetSent = false := by
+      cases hp : s.phase <;> simp_all [Phase.terminal, Phase.isResetSent]
+    rw [this] at hw; exact absurd hw (by simp)
+
+/-- The full form of (c): in a terminal state nothing changes *except* the
+    peer's advertised stream credit, which a late MAX_STREAM_DATA may still
+    raise.  §3.1, line 971 permits ignoring such a frame but does not require it
+    (review finding W2-4), and §4.1, line 1349 says what happens if it is not
+    ignored, so an implementation that keeps processing MAX_STREAM_DATA after
+    the stream is done conforms.  Nothing observable follows from the raised
+    limit: `maySendStream` still refuses every frame in a terminal state
+    (`no_send_from_terminal` in `Spec/Stream.lean`). -/
+theorem terminal_absorbing_state {s s' : State} {e : Event} {fx : List Effect}
+    (ht : s.phase.terminal = true) (h : Step s e (.ok s' fx)) :
+    s' = s ∨ ∃ v, s.maxData < v ∧ s' = { s with maxData := v } := by
+  have hb : s.phase.beforeFin = false := by
+    cases hp : s.phase <;> simp_all [Phase.terminal, Phase.beforeFin]
+  have hc : s.phase.mayCarryData = false := by
+    cases hp : s.phase <;> simp_all [Phase.terminal, Phase.mayCarryData]
+  cases h with
+  | write hw => simp_all [canWrite]
+  | endStream hw => simp_all [canWrite]
+  | reset hw => exact absurd hw (by simp [hc])
+  | maxStreamDataStale => exact Or.inl rfl
+  | maxStreamDataIgnored => exact Or.inl rfl
+  | @maxStreamDataRaise v hw => exact Or.inr ⟨v, by simpa using hw, rfl⟩
+  | stopSending hw => exact absurd hw (by simp [hc])
+  | stopSendingLate => exact Or.inl rfl
   | sendStream hw => rw [maySendStream, hc] at hw; simp at hw
   | sendBlocked hw => rw [maySendBlocked, hc] at hw; simp at hw
   | sendReset hw => rw [maySendReset, ht] at hw; simp at hw
@@ -652,6 +737,7 @@ theorem step_follows_diagram {s s' : State} {e : Event} {fx : List Effect}
   | write => cases hp : s.phase <;> simp [Reaches]
   | endStream => cases hp : s.phase <;> simp [Reaches]
   | reset => cases hp : s.phase <;> simp [Reaches]
+  | maxStreamDataStale => cases hp : s.phase <;> simp [Reaches]
   | maxStreamDataIgnored => cases hp : s.phase <;> simp [Reaches]
   | maxStreamDataRaise => cases hp : s.phase <;> simp [Reaches]
   | stopSending => cases hp : s.phase <;> simp [Reaches]
@@ -667,7 +753,7 @@ theorem step_follows_diagram {s s' : State} {e : Event} {fx : List Effect}
     cases hp : s.phase <;> simp_all [Phase.mayCarryData, Phase.afterSend, Reaches]
   | @sendReset code fs hw =>
     simp only [maySendReset, Bool.and_eq_true] at hw
-    have hc : s.phase.terminal = false := by simpa using hw.1
+    have hc : s.phase.terminal = false := by simpa using hw.1.1
     cases hp : s.phase <;> simp_all [Phase.terminal, Reaches]
   | @allAcked hw =>
     have : s.phase = .dataSent := by cases hp : s.phase <;> simp_all [Phase.isDataSent]
@@ -698,8 +784,8 @@ theorem maxData_mono {s s' : State} {e : Event} {fx : List Effect}
     (h : Step s e (.ok s' fx)) : s.maxData ≤ s'.maxData := by
   cases h with
   | maxStreamDataRaise hc =>
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
-    exact Nat.le_of_lt hc.2
+    simp only [decide_eq_true_eq] at hc
+    exact Nat.le_of_lt hc
   | _ => exact Nat.le_refl _
 
 /-- `sent` never exceeds the peer's advertised credit — the sending half of
@@ -707,6 +793,59 @@ theorem maxData_mono {s s' : State} {e : Event} {fx : List Effect}
 theorem sent_le_maxData {s₀ s : State} (h0 : Inv s₀) (h : component.Reachable s₀ s) :
     s.sent ≤ s.maxData :=
   (component.inv_of_reachable h0 h).2.1
+
+/-! ### The recommendations of §3.5 and §4.1 about *sending*
+
+Three SHOULDs in range constrain a frame this half may send rather than an
+outcome, so they live in `RecommendedSend`, beside `MaySend` and never stricter
+than it:
+
+* §3.5, line 1263: "An endpoint SHOULD copy the error code from the STOP_SENDING
+  frame to the RESET_STREAM frame it sends, but can use any application error
+  code."  The second clause is why this is advice and not a rule of `MaySend`.
+* §4.1, line 1376: "A sender SHOULD send a STREAM_DATA_BLOCKED or DATA_BLOCKED
+  frame to indicate to the receiver that it has data to write but is blocked by
+  flow control limits."  A STREAM_DATA_BLOCKED is recommended exactly when that
+  is true of this stream: there is written data past the peer's limit.
+* §3.5, line 1269 ("STOP_SENDING SHOULD only be sent…") is the receiving half's;
+  see `Spec/Stream/Recv.lean`.
+
+The remaining SHOULDs in range are advice this framework cannot check; the
+coverage table says which and why. -/
+def RecommendedSend (s : State) : Frame → Prop
+  | .resetStream id code _ =>
+      if id = s.id.val then
+        (match s.resetCode with | none => True | some c => code = c)
+      else True
+  | .streamDataBlocked id _ => if id = s.id.val then s.maxData < s.written else True
+  | _ => True
+
+def recommendedSend (s : State) : Frame → Bool
+  | .resetStream id code _ =>
+      if id = s.id.val then
+        (match s.resetCode with | none => true | some c => decide (code = c))
+      else true
+  | .streamDataBlocked id _ => if id = s.id.val then decide (s.maxData < s.written) else true
+  | _ => true
+
+theorem recommendedSend_iff (s : State) (f : Frame) :
+    recommendedSend s f = true ↔ RecommendedSend s f := by
+  cases f <;> simp only [recommendedSend, RecommendedSend] <;> repeat' split
+  all_goals simp_all
+
+/-- §3.5, line 1263 in the form the harness can use: the RESET_STREAM that
+    copies the code recorded by `appReset` or by a STOP_SENDING is the
+    recommended one. -/
+theorem reset_code_recommended {s : State} {code fs : Nat} (h : s.resetCode = some code) :
+    recommendedSend s (.resetStream s.id.val code fs) = true := by
+  simp [recommendedSend, h]
+
+/-- §4.1, line 1376: when there is nothing to be blocked about, sending
+    STREAM_DATA_BLOCKED is still *permitted* (§13.3, line 5409 only fixes the
+    value it must carry) but it is not what the text asks for. -/
+theorem blocked_recommended_iff {s : State} {v : Nat} :
+    recommendedSend s (.streamDataBlocked s.id.val v) = true ↔ s.maxData < s.written := by
+  simp [recommendedSend]
 
 /-! ## 9. Examples: every arrow of Figure 2 (§3.1) -/
 
@@ -726,7 +865,7 @@ example :
       .ok { s0 with maxData := 0, phase := .send } [] := by decide
 
 -- Ready → Reset Sent: "Send RESET_STREAM" as the first frame mentioning the
--- stream (§3.1, line 968).
+-- stream (§3.1, line 986).
 example :
     component.step s0 (.sentResetStream 7 0) =
       .ok { s0 with phase := .resetSent, finalSize := some 0, resetCode := some 7 } [] := by
@@ -767,14 +906,14 @@ example :
     component.step { s0 with phase := .resetSent, finalSize := some 0 } .ackReset =
       .ok { s0 with phase := .resetRecvd, finalSize := some 0 } [.resetAcked] := by decide
 
--- §3, line 892: one event, two transitions — Ready → Send → Data Sent.
+-- §3, line 859: one event, two transitions — Ready → Send → Data Sent.
 example :
     component.step { s0 with written := 5, finWritten := true } (.sentStream 0 5 true) =
       .ok { s0 with phase := .dataSent, written := 5, finWritten := true, sent := 5,
                     finalSize := some 5 } [] := by
   decide
 
--- §3.5, line 1258: STOP_SENDING in "Send" obliges a RESET_STREAM …
+-- §3.5, line 1254: STOP_SENDING in "Send" obliges a RESET_STREAM …
 example :
     component.step { s0 with phase := .send } (.recvStopSending 9) =
       .ok { s0 with phase := .send, resetCode := some 9 } [.peerStopSending 9] := by decide
@@ -786,15 +925,35 @@ example :
 -- §4.1, line 1330: no data beyond the peer's credit.
 example : component.maySend { s0 with maxData := 4, written := 10 } (.stream 0 0 false ⟨#[1,2,3,4,5]⟩) = false := by
   decide
--- §4.1, line 1361: a MAX_STREAM_DATA that does not raise the limit is ignored.
+-- §4.1, line 1372: a MAX_STREAM_DATA that does not raise the limit is ignored,
+-- and that is the only permitted outcome (a MUST).
 example : component.step s0 (.recvMaxStreamData 100) = .ok s0 [] := by decide
+example : component.accepts s0 (.recvMaxStreamData 100)
+    (.ok { s0 with maxData := 100 } [.creditAvailable 100]) = false := by decide
 example : component.step s0 (.recvMaxStreamData 200) =
     .ok { s0 with maxData := 200 } [.creditAvailable 200] := by decide
--- §3.1, line 944: in "Data Sent" MAX_STREAM_DATA is ignored outright.
-example : component.step { s0 with phase := .dataSent, finalSize := some 0 } (.recvMaxStreamData 200) =
-    .ok { s0 with phase := .dataSent, finalSize := some 0 } [] := by decide
+-- §3.1, line 971: from "Data Sent" on the endpoint "can safely ignore" a larger
+-- MAX_STREAM_DATA — a permission, so *both* outcomes are permitted, ignoring
+-- first.  Regression for review finding W2-4: the second `accepts` was `false`.
+private def sSent : State :=
+  { s0 with phase := .dataSent, written := 5, finWritten := true, sent := 5,
+            finalSize := some 5 }
+example : component.step sSent (.recvMaxStreamData 200) = .ok sSent [] := by decide
+example : component.accepts sSent (.recvMaxStreamData 200)
+    (.ok { sSent with maxData := 200 } [.creditAvailable 200]) = true := by decide
+-- … in the terminal states too (§3.1, lines 975 and 990).
+example : component.accepts { s0 with phase := .dataRecvd, finalSize := some 0 }
+    (.recvMaxStreamData 200)
+    (.ok { s0 with phase := .dataRecvd, finalSize := some 0, maxData := 200 }
+         [.creditAvailable 200]) = true := by decide
+example : component.accepts { s0 with phase := .resetRecvd, finalSize := some 0 }
+    (.recvMaxStreamData 200)
+    (.ok { s0 with phase := .resetRecvd, finalSize := some 0 } []) = true := by decide
+-- Before the FIN, ignoring a larger limit is *not* permitted: §3.1, line 957
+-- says the endpoint "continues to accept and process MAX_STREAM_DATA frames".
+example : component.accepts s0 (.recvMaxStreamData 200) (.ok s0 []) = false := by decide
 
--- §3.3, line 1112: nothing may be sent from a terminal state …
+-- §3.3, line 1146: nothing may be sent from a terminal state …
 example : component.maySend { s0 with phase := .dataRecvd } (.resetStream 0 1 0) = false := by decide
 example : component.maySend { s0 with phase := .resetRecvd } (.stream 0 0 false ⟨#[]⟩) = false := by decide
 -- … and no STREAM or STREAM_DATA_BLOCKED after a RESET_STREAM …
@@ -807,8 +966,30 @@ example : component.maySend { s0 with phase := .resetSent } (.streamDataBlocked 
 private def sReset : State := (component.step s0 (.sentResetStream 7 0)).next s0
 example : sReset.phase = .resetSent := by decide
 example : component.maySend sReset (.resetStream 0 7 0) = true := by decide
+-- §13.3, line 5359: "The content of a RESET_STREAM frame MUST NOT change when
+-- it is sent again" — the Final Size *and* the error code are pinned once the
+-- frame has gone out.  Regression for review finding W2-6: the second of these
+-- was `true`.
+example : component.maySend sReset (.resetStream 0 7 1) = false := by decide
+example : component.maySend sReset (.resetStream 0 99 0) = false := by decide
+-- Before a RESET_STREAM has been sent the code recorded by `appReset` or a
+-- STOP_SENDING does not pin anything: §3.5, line 1263 says the endpoint "can
+-- use any application error code".  It is merely the recommended one.
+example : component.maySend { s0 with resetCode := some 9 } (.resetStream 0 3 0) = true := by
+  decide
+example : recommendedSend { s0 with resetCode := some 9 } (.resetStream 0 3 0) = false := by
+  decide
+example : recommendedSend { s0 with resetCode := some 9 } (.resetStream 0 9 0) = true := by
+  decide
+-- §4.1, line 1376: STREAM_DATA_BLOCKED is recommended exactly when there is
+-- written data the peer's limit will not let through …
+example : recommendedSend { s0 with maxData := 4, written := 10 } (.streamDataBlocked 0 4) = true := by
+  decide
+-- … and is permitted either way (§13.3, line 5409 fixes only the value).
+example : recommendedSend s0 (.streamDataBlocked 0 100) = false := by decide
+example : component.maySend s0 (.streamDataBlocked 0 100) = true := by decide
 -- A STREAM frame, by contrast, may never be retransmitted after the reset
--- (§3.3, line 1114).
+-- (§3.3, line 1147).
 example : component.maySend { sReset with written := 9 } (.stream 0 0 false ⟨#[1]⟩) = false := by
   decide
 -- An exact repeat of a STREAM frame already sent is permitted while the sending
@@ -831,39 +1012,51 @@ example : component.track s0 (.recvMaxStreamData 200) (.ok [.creditAvailable 200
 Assigned text for this file: §2.4 (sending operations), §3.1, the sending half
 of §3.3 and §3.5, and the stream-level parts of §4.1/§4.4/§4.5.
 
+Citations name the line on which the quoted text begins.  Where a sentence's
+first word dangles at the end of the previous line, the citation is the line the
+quotation itself starts on.
+
 | Text (line) | Sentence | Encoded as |
 |---|---|---|
-| §2.4 (811) | application can write data | `Step.write` / `Step.writeRefused` |
-| §2.4 (815) | end the stream → STREAM with FIN | `Step.endStream`, `maySendStream` |
-| §2.4 (818) | reset the stream "if the stream was not already in a terminal state" | `Step.reset` / `Step.resetRefused` |
-| §3.1 (920) | "Ready" accepts data from the application | `init`, `canWrite` |
-| §3.1 (927) | first STREAM / STREAM_DATA_BLOCKED → "Send" | `Phase.afterSend`, `Step.sendStream`, `Step.sendBlocked` |
-| §3.1 (934) | STREAM_DATA_BLOCKED when blocked by stream flow control | `maySendBlocked` (limit = `maxData`) |
-| §3.1 (938) | STREAM with FIN → "Data Sent" | `Step.sendStream` (`fin = true`) |
-| §3.1 (944) | MAX_STREAM_DATA can safely be ignored in "Data Sent" | `Step.maxStreamDataIgnored` (`Phase.beforeFin`) |
-| §3.1 (947) | all data acknowledged → "Data Recvd", terminal | `Step.allAcked`, `terminal_absorbing` |
-| §3.1 (962) | app abandons transmission, or STOP_SENDING → RESET_STREAM → "Reset Sent" | `Step.reset`, `Step.stopSending`, `Step.sendReset` |
-| §3.1 (968) | MAY send RESET_STREAM as the first frame mentioning a stream | `maySendReset` permits it in "Ready" (example) |
-| §3.1 (971) | RESET_STREAM acknowledged → "Reset Recvd", terminal | `Step.resetAcked`, `terminal_absorbing` |
-| §3.3 (1112) | MUST NOT send any of the three frames from a terminal state | `Phase.mayCarryData`, `maySendReset` |
-| §3.3 (1114) | MUST NOT send STREAM / STREAM_DATA_BLOCKED after RESET_STREAM | `Phase.mayCarryData` |
-| §3.3 (1118) | a sender could receive MAX_STREAM_DATA / STOP_SENDING in any state | `Step.maxStreamDataIgnored`, `Step.stopSendingLate` |
-| §3.5 (1258) | STOP_SENDING MUST be answered with RESET_STREAM in Ready/Send; MAY be deferred in Data Sent | `Step.stopSending` sets `resetCode`; `stopSending_obliges_reset` |
-| §3.5 (1266) | SHOULD copy the error code, but any application code may be used | `maySendReset` ignores the code (example) |
+| §2.4 (801) | application can write data | `Step.write` / `Step.writeRefused` |
+| §2.4 (805) | end the stream → STREAM with FIN | `Step.endStream`, `maySendStream` |
+| §2.4 (808) | reset the stream "if the stream was not already in a terminal state" | `Step.reset` / `Step.resetRefused` |
+| §3.1 (936) | "Ready" accepts data from the application | `init`, `canWrite` |
+| §3.1 (940) | first STREAM / STREAM_DATA_BLOCKED → "Send" | `Phase.afterSend`, `Step.sendStream`, `Step.sendBlocked` |
+| §3.1 (957) | in "Send" the endpoint continues to accept and process MAX_STREAM_DATA | `Step.maxStreamDataRaise` is the only outcome before the FIN |
+| §3.1 (960) | STREAM_DATA_BLOCKED when blocked by stream flow control | `maySendBlocked` (limit = `maxData`), `RecommendedSend` |
+| §3.1 (964) | STREAM with FIN → "Data Sent" | `Step.sendStream` (`fin = true`) |
+| §3.1 (971) | MAX_STREAM_DATA "can safely be ignored" from "Data Sent" on | `Step.maxStreamDataIgnored`, *alongside* `Step.maxStreamDataRaise` (NOTES) |
+| §3.1 (975) | all data acknowledged → "Data Recvd", terminal | `Step.allAcked`, `terminal_absorbing` |
+| §3.1 (979) | app abandons transmission, or STOP_SENDING → RESET_STREAM → "Reset Sent" | `Step.reset`, `Step.stopSending`, `Step.sendReset` |
+| §3.1 (986) | MAY send RESET_STREAM as the first frame mentioning a stream | `maySendReset` permits it in "Ready" (example) |
+| §3.1 (990) | RESET_STREAM acknowledged → "Reset Recvd", terminal | `Step.resetAcked`, `terminal_absorbing` |
+| §3.3 (1146) | MUST NOT send any of the three frames from a terminal state | `Phase.mayCarryData`, `maySendReset` |
+| §3.3 (1147) | MUST NOT send STREAM / STREAM_DATA_BLOCKED after RESET_STREAM | `Phase.mayCarryData` |
+| §3.3 (1161) | a sender could receive MAX_STREAM_DATA / STOP_SENDING in any state | `Step.maxStreamDataStale`/`Raise`/`Ignored`, `Step.stopSendingLate` |
+| §3.5 (1254) | STOP_SENDING MUST be answered with RESET_STREAM in Ready/Send; MAY be deferred in Data Sent | `Step.stopSending` sets `resetCode`; `stopSending_obliges_reset` |
+| §3.5 (1259) | if outstanding data is declared lost, SHOULD send RESET_STREAM instead of retransmitting | advice, not checkable here: "declared lost" is loss detection (RFC 9002), which this model does not observe; every behaviour it prefers is already permitted (`maySendReset` from "Data Sent") and every behaviour it discourages stays permitted, as §3.3, line 1147 only forbids STREAM after the RESET_STREAM has gone out |
+| §3.5 (1263) | SHOULD copy the error code, but can use any application error code | `RecommendedSend`, `reset_code_recommended`; `maySendReset` does not require it |
 | §4.1 (1330) | "Senders MUST NOT send data in excess of either limit" | `maySendStream` (stream limit); connection limit is WP9 |
-| §4.1 (1357) | a smaller advertised limit is not an error and has no effect | `Step.maxStreamDataIgnored`, `maxData_mono` |
-| §4.1 (1361) | MUST ignore MAX_STREAM_DATA that does not increase the limit | `Step.maxStreamDataIgnored` |
-| §4.1 (1370) | SHOULD send STREAM_DATA_BLOCKED when blocked | permitted by `maySendBlocked`; the recommendation to send is advice, not encoded |
-| §4.4 (1466) | RESET_STREAM has no effect on the opposite direction | the two halves are independent components; `Spec/Stream.lean` |
+| §4.1 (1349) | a receiver can advertise a larger limit with MAX_STREAM_DATA | `Step.maxStreamDataRaise`, in every phase |
+| §4.1 (1364) | a smaller advertised limit is not an error and has no effect | `Step.maxStreamDataStale`, `maxData_mono` |
+| §4.1 (1368) | violating the advertised limits MUST be FLOW_CONTROL_ERROR | receiving side, `Spec/Stream/Recv.lean`; here `maySendStream`/`sent_le_maxData` keep us inside them |
+| §4.1 (1372) | MUST ignore MAX_STREAM_DATA that does not increase the limit | `Step.maxStreamDataStale` (the only outcome) |
+| §4.1 (1376) | SHOULD send STREAM_DATA_BLOCKED when blocked | `RecommendedSend`, `blocked_recommended_iff`; `maySendBlocked` permits it either way |
+| §4.1 (1382) | SHOULD periodically send STREAM_DATA_BLOCKED while blocked with no ack-eliciting packets in flight | advice, not checkable here: it constrains a transmission schedule over time and mentions packets in flight, which is WP3's/RFC 9002's business, not one step of one stream |
+| §4.4 (1471) | RESET_STREAM has no effect on the opposite direction | the two halves are independent components; `Spec/Stream.lean` |
 | §4.5 (1479) | final size = one higher than the largest offset sent | `maySendReset` (`finalSize = sent` when not yet known), `Inv` |
+| §4.5 (1485) | a sender always communicates the final size reliably | `Inv`: outside Ready/Send a final size is fixed |
 | §4.5 (1486) | the final size is Offset+Length of the FIN frame, or RESET_STREAM's Final Size | `Step.sendStream`, `Step.sendReset` |
-| §4.5 (1493) | a sender always communicates the final size reliably | `Inv`: outside Ready/Send a final size is fixed |
 | §4.5 (1499) | MUST NOT send data at or beyond the final size | `maySendStream`, `no_data_beyond_finalSize` |
-| §4.5 (1516) | once known, the final size cannot change | `maySendStream`/`maySendReset`, `finalSize_immutable` |
-| §2.1 (680) | MUST NOT reuse a stream ID | out of scope: WP9 (stream table) |
-| §2.2 (752) | data at a given offset MUST NOT change | out of scope: byte contents are not modelled |
-| §3.5 (1246) | STREAM frames after STOP_SENDING still count for flow control | receiving side, `Spec/Stream/Recv.lean` |
-| §13.3 | retransmission | out of scope by assignment |
+| §4.5 (1517) | once known, the final size cannot change | `maySendStream`/`maySendReset`, `finalSize_immutable` |
+| §13.3 (5359) | the content of a RESET_STREAM MUST NOT change when it is sent again | `maySendReset` pins both the Final Size and the error code once the phase is "Reset Sent" |
+| §13.3 (5409) | blocked frames always include the limit in force at transmission | `maySendBlocked` (`limit = maxData`) |
+| §19.13 (7859) | a sender SHOULD send STREAM_DATA_BLOCKED when it wishes to send but cannot | same sentence as §4.1, line 1376: `RecommendedSend` |
+| §2.1 (688) | MUST NOT reuse a stream ID | out of scope: WP9 (stream table) |
+| §2.2 (750) | data at a given offset MUST NOT change | out of scope: byte contents are not modelled |
+| §3.5 (1250) | STREAM frames after STOP_SENDING still count for flow control | receiving side, `Spec/Stream/Recv.lean` |
+| §13.3 (other) | retransmission scheduling | out of scope by assignment; only lines 5359 and 5409 constrain a frame this half may send |
 
 NOTES
 
@@ -890,37 +1083,64 @@ NOTES
   is buffered.  Byte contents are not modelled, so a STREAM frame is just
   (offset, length, fin) and retransmission is an ordinary `sentStream` of a
   range already sent.
-* **MAX_STREAM_DATA in "Data Sent" and later.**  §3.1 says the endpoint "can
-  safely ignore" such frames; that is a permission, not a requirement, so an
-  implementation that raised its limit there would also conform.  The two
-  readings are indistinguishable (no more STREAM data may be sent past the final
-  size anyway), so only the ignoring one is encoded, keeping `outcomes`
-  deterministic and `track` unambiguous.
+* **MAX_STREAM_DATA after the FIN: ignoring is permitted, not required.**
+  §3.1, line 971 says the endpoint "can safely ignore any MAX_STREAM_DATA frames
+  it receives from its peer for a stream in this state".  That is a permission,
+  so both outcomes are in `outcomes` from "Data Sent" on — ignoring first, so
+  `component.step` is unchanged — and an implementation that raises its limit
+  and tells the application is accepted too.  An earlier version of this file
+  encoded ignoring as the *only* outcome and claimed in these notes that the two
+  readings were indistinguishable.  They are not: `Effect.creditAvailable` is
+  part of the observation, so `Component.track` and `accepts` can tell them
+  apart, and a conforming implementation was being rejected (review finding
+  W2-4).  Before the FIN the raise is the only outcome, because §4.1, line 1372
+  makes ignoring mandatory only for values that do not increase the limit and
+  §3.1, line 957 says the endpoint "continues to accept and process
+  MAX_STREAM_DATA frames" in "Send".
+  Consequence for theorem (c): a terminal sending part is no longer frozen
+  *entirely*, only its phase.  `terminal_absorbing` states the phase form and
+  `terminal_absorbing_state` the exact remainder ("nothing changes but
+  `maxData`, and only upwards").  Nothing observable follows from the raised
+  limit, since `maySendStream` still refuses every frame in a terminal state.
 * **STOP_SENDING's "MUST send a RESET_STREAM" is an obligation, not a step.**
   This framework specifies what each event does, so a *future* obligation is
   recorded in the state (`resetCode`) rather than enforced.
-  `stopSending_obliges_reset` below states the consequence that is checkable:
+  `stopSending_obliges_reset` states the consequence that is checkable:
   after a STOP_SENDING in "Ready"/"Send" the endpoint is always permitted to
   send the RESET_STREAM.
+* **The content of a repeated RESET_STREAM is pinned** (§13.3, line 5359: "The
+  content of a RESET_STREAM frame MUST NOT change when it is sent again").  A
+  RESET_STREAM has two content fields this model sees, the Final Size and the
+  Application Protocol Error Code, and `maySendReset` pins both — but only once
+  a RESET_STREAM has actually been sent, which in this state machine is exactly
+  `phase = .resetSent`.  `resetCode` does double duty: before the frame goes out
+  it is the code the application asked for (`appReset`) or the peer's code from
+  a STOP_SENDING, and §3.5, line 1263 explicitly allows a different code to be
+  sent ("can use any application error code"), so it must not pin there; from
+  "Reset Sent" on it is the code that went on the wire.  The terminal state
+  "Reset Recvd" is excluded by `!phase.terminal` anyway.  An exact repeat of the
+  frame just sent is therefore still accepted, which is what retransmitting a
+  lost packet needs.
 * **Retransmission (§13.3) is out of scope, but repeats are not forbidden.**
   `maySendStream` constrains only (offset, length, fin) against `written`, the
   peer's credit and the final size, so re-sending a range already sent is
   permitted in "Ready", "Send" and "Data Sent" — which is what retransmitting a
   lost packet amounts to in this model.  After a RESET_STREAM has been sent it is
-  not: §3.3, line 1114 says "A sender MUST NOT send a STREAM or
-  STREAM_DATA_BLOCKED frame for a stream in the 'Reset Sent' state", and §3.5,
-  line 1263 says that if outstanding data is declared lost the endpoint "SHOULD
-  send a RESET_STREAM frame instead of retransmitting the data".  RESET_STREAM
-  itself may be repeated from "Reset Sent" (that state is not terminal), with the
-  same final size, since `maySendReset` pins it to the one already fixed.
-* **STREAM_DATA_BLOCKED reports the current credit.**  §19.13's Maximum Stream
-  Data field is "the offset of the stream at which the blocking occurred", which
-  is read here as exactly the limit the peer last advertised, so `maySendBlocked`
-  requires `limit = maxData`.  A sender that reported a stale limit would be
-  rejected; the template's `streamsBlocked` rule reads §19.14 the same way.
+  not: §3.3, line 1147 says "A sender MUST NOT send a STREAM or
+  STREAM_DATA_BLOCKED frame for a stream in the "Reset Sent" state", and §3.5,
+  line 1259 says that if outstanding data is declared lost the endpoint "SHOULD
+  send a RESET_STREAM frame instead of retransmitting the data".
+* **STREAM_DATA_BLOCKED reports the current credit.**  §19.13, line 7881's
+  Maximum Stream Data field is "the offset of the stream at which the blocking
+  occurred", which is read here as exactly the limit the peer last advertised,
+  so `maySendBlocked` requires `limit = maxData`; §13.3, line 5409 ("These
+  frames always include the limit that is causing blocking at the time that they
+  are transmitted") is what makes this compatible with exact-repeat
+  retransmission.  Whether the endpoint *is* blocked is advice (§4.1, line 1376)
+  and lives in `RecommendedSend`, not in `MaySend`.
 * **Final size on RESET_STREAM.**  When no final size is fixed yet, `maySendReset`
-  requires exactly `finalSize = sent`, reading §4.5's "one higher than the
-  offset of the byte with the largest offset sent on the stream" as a
+  requires exactly `finalSize = sent`, reading §4.5, line 1479's "one higher than
+  the offset of the byte with the largest offset sent on the stream" as a
   requirement on the sender.  An implementation that has buffered but not sent
   data and declares the buffered size instead would be rejected; that reading
   was chosen because the text defines the final size in terms of bytes *sent*.
@@ -938,10 +1158,17 @@ theorem stopSending_obliges_reset {s s' : State} {code : Nat} {fx : List Effect}
     refine ⟨rfl, ?_⟩
     have ht : s.phase.terminal = false := by
       cases hp : s.phase <;> simp_all [Phase.beforeFin, Phase.terminal]
-    simp only [maySendReset, ht, Bool.not_false, Bool.true_and]
-    cases hf : s.finalSize with
-    | none => simp
-    | some f => simp only [decide_eq_true_eq]; exact (hi.2.2.1 f hf).symm
+    have hnr : s.phase ≠ .resetSent := by
+      cases hp : s.phase <;> simp_all [Phase.beforeFin]
+    simp only [maySendReset, ht, Bool.not_false, Bool.true_and, Bool.and_eq_true]
+    refine ⟨?_, ?_⟩
+    · cases hf : s.finalSize with
+      | none => simp
+      | some f => simp only [decide_eq_true_eq]; exact (hi.2.2.1 f hf).symm
+    · show (match s.phase, (some code : Option Nat) with
+             | Phase.resetSent, some c => decide (code = c)
+             | _, _ => true) = true
+      cases hp : s.phase <;> simp_all [Phase.beforeFin]
   | stopSendingLate hc =>
     have : s.phase.mayCarryData = true := by
       cases hp : s.phase <;> simp_all [Phase.beforeFin, Phase.mayCarryData]
