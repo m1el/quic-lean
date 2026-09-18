@@ -392,6 +392,51 @@ theorem cids_ok_iff (s : State) (tp : Params) :
     cases hq : tp.retrySourceConnectionId <;>
     simp [missingCid, cidMismatch, optCid, hr, hi, ho, hq]
 
+/-! **(e)** the same, spelled out over the four Retry × role cases the text
+distinguishes.  §7.3, line 2436: "absence of the retry_source_connection_id
+transport parameter from the server after receiving a Retry packet"; line 2439:
+"presence of the retry_source_connection_id transport parameter when no Retry
+packet was received". -/
+
+/-- Client, no Retry (Figure 7, line 2449): the server must report its own
+    Source Connection ID and the client's original Destination Connection ID,
+    and MUST NOT report a `retry_source_connection_id`. -/
+theorem cids_ok_client_noRetry {s : State} (hr : s.role = .client) (hq : s.retryScid = none)
+    (tp : Params) :
+    (missingCid s tp = false ∧ cidMismatch s tp = false) ↔
+      (tp.initialSourceConnectionId = optCid s.peerScid ∧ s.peerScid.isSome = true ∧
+       tp.originalDestinationConnectionId = optCid s.originalDcid ∧
+       s.originalDcid.isSome = true ∧ tp.retrySourceConnectionId = none) := by
+  rw [cids_ok_iff]
+  cases hp : s.peerScid <;> cases hd : s.originalDcid <;>
+    cases hi : tp.initialSourceConnectionId <;> cases ho : tp.originalDestinationConnectionId <;>
+    simp [hr, hq, optCid, and_comm, and_left_comm]
+
+/-- Client, after a Retry (Figure 8, line 2479): additionally the server must
+    report the Retry packet's Source Connection ID. -/
+theorem cids_ok_client_retry {s : State} {r : Cid} (hr : s.role = .client)
+    (hq : s.retryScid = some r) (tp : Params) :
+    (missingCid s tp = false ∧ cidMismatch s tp = false) ↔
+      (tp.initialSourceConnectionId = optCid s.peerScid ∧ s.peerScid.isSome = true ∧
+       tp.originalDestinationConnectionId = optCid s.originalDcid ∧
+       s.originalDcid.isSome = true ∧ tp.retrySourceConnectionId = some (bytes r)) := by
+  rw [cids_ok_iff]
+  cases hp : s.peerScid <;> cases hd : s.originalDcid <;>
+    cases hi : tp.initialSourceConnectionId <;> cases ho : tp.originalDestinationConnectionId <;>
+    simp [hr, hq, optCid, and_comm, and_left_comm]
+
+/-- Server, with or without a Retry: the client reports only
+    `initial_source_connection_id` (line 2493: "In both cases (Figure 7 and
+    Figure 8), the client sets the value of the initial_source_connection_id
+    transport parameter to "C1""), and §18.2, line 7149 already forbids it the
+    other two. -/
+theorem cids_ok_server {s : State} (hr : s.role = .server) (tp : Params) :
+    (missingCid s tp = false ∧ cidMismatch s tp = false) ↔
+      (tp.initialSourceConnectionId = optCid s.peerScid ∧ s.peerScid.isSome = true) := by
+  rw [cids_ok_iff]
+  cases hp : s.peerScid <;> cases hi : tp.initialSourceConnectionId <;>
+    simp [hr, optCid, and_comm]
+
 /-- §7.3, line 2428: absence of a required parameter is TRANSPORT_PARAMETER_ERROR
     and nothing else. -/
 theorem authOutcomes_missing (s : State) (tps : TransportParams.State) {tp : Params}
