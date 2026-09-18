@@ -122,7 +122,7 @@ merged.
 | WP | Content |
 |---|---|
 | 12 Endpoint (merged: layers 0–5 c785e51, examples + report 63a2d2d) | `Endpoint.State` as the product of component states; `recv`: datagram → `decodePacket` → frame legality → dispatch to components → merge outcomes; `MaySend` for a whole packet as the conjunction of component predicates; top-level theorems lifted from components |
-| 13 DiffHarness | export `Endpoint.accepts` / `maySend`; join with WP8's trace: every ngtcp2 outcome must be accepted, every ngtcp2 packet must satisfy `maySend`; seed corpus; triage doc for mismatches |
+| 13 DiffHarness (merged 1211000; results in TRIAGE.md) | export `Endpoint.accepts` / `maySend`; join with WP8's trace: every ngtcp2 outcome must be accepted, every ngtcp2 packet must satisfy `maySend`; seed corpus; triage doc for mismatches |
 
 ### Wave 2b (added after the transport audit)
 
@@ -288,6 +288,36 @@ by the reviewer (reachable, conformant counterexamples).
   gets stuck; a structurally recursive `ByteArray.all` in `Basic.lean` would
   unlock `decide` there (open, low priority).
 - `TRIAGE.md` started (WP13-1..5).
+
+## 4g. WP13 outcome and the state of the differential comparison
+
+- `harness/endpoint_diff` drives ngtcp2 and the Lean endpoint side by side with
+  set tracking (`harness/endpoint_diff.md`). All eight scripted scenarios run
+  with zero mismatches. First 10-minute fuzz (before the fixes below): 16 675
+  inputs, 110 628 steps compared, 97.6 % exact matches, 75 distinct mismatch
+  signatures, no crash or ASan report.
+- Findings where the **model** must change (open): WP13-9 (§7.5's
+  CRYPTO_BUFFER_EXCEEDED / discard alternatives missing in Handshake — the model
+  is too *narrow*), WP13-10 (DATA_BLOCKED / STREAMS_BLOCKED past the advertised
+  limit encoded inconsistently across Stream and StreamTable), WP13-7
+  (`StreamTable.openedEffects` unevaluable for a huge stream index), WP13-6
+  (received ACKs are not routed to StreamTable, so "all data acked" is
+  unreachable), WP13-4 (§19.16 self-retirement unchecked on the send side),
+  WP13-3 (blanket MAY-discard of any datagram, safe but masks defects).
+- Resolved by the lead: WP13-13 (harness mapping error masked by WP13-3;
+  `cidRetiredByPeer` no longer compared), WP13-17 (per-conjunct diagnostic
+  export, proved to agree with `maySendDatagram`).
+- ngtcp2 / text: WP13-5 (ngtcp2 stops at an undecryptable coalesced packet;
+  §12.2 says attempt the rest), WP13-11 (FINAL_SIZE_ERROR for
+  STREAM_DATA_BLOCKED), WP13-12 (idle-timeout comparison undecidable with the
+  forced post-handshake state), WP13-8 (implicitly opened streams not
+  announced; API, not normative).
+- Harness bugs fixed by WP13: µs/ns, DRAINING/CLOSING mapped to
+  PROTOCOL_VIOLATION, WP8's hard-coded 8-byte DCID in OUT records (WP13-15).
+- Open change requests for the endpoint: WP13-16 (no event to declare a peer
+  address validated), WP13-18 (observation pattern cannot express "ignore this
+  callback" / subsequence). Design decision to revisit: the harness's level-3
+  "subsequence" matching is a real weakening (30 residual signatures).
 
 ## 5. Risks
 
