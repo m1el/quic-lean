@@ -65,7 +65,7 @@ inductive Event where
   deriving DecidableEq, Repr
 
 inductive Effect where
-  /-- §19.15, line 8011: "the peer MUST stop using the corresponding connection
+  /-- §5.1.2, line 1811: "the peer MUST stop using the corresponding connection
       IDs" — this one must no longer be used as a Destination Connection ID. -/
   | stopUsing (seq : Nat) (cid : Cid)
   /-- Queue a RETIRE_CONNECTION_ID frame for this sequence number (§19.16). -/
@@ -165,7 +165,7 @@ inductive Step : State → Event → Out → Prop
       Step s (.recvNewCid seq rpt cid token) (.error .connectionIdLimitError)
   /-- The ordinary case: §19.15, line 7998 ("A receiver MUST ignore any Retire
       Prior To fields that do not increase the largest received Retire Prior To
-      value" — hence `Nat.max`), line 8011 ("the peer MUST stop using the
+      value" — hence `Nat.max`), §5.1.2 line 1811 ("the peer MUST stop using the
       corresponding connection IDs and retire them with RETIRE_CONNECTION_ID
       frames before adding the newly provided connection ID"), line 8013 (a
       sequence number below a previously received Retire Prior To "MUST send a

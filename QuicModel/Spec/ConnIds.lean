@@ -174,4 +174,30 @@ end Counterexample
     loss recovery state (RFC 9002), which is out of scope.
 -/
 
+/-!
+NOTES added after the Wave 1 review (findings W4-1..W4-6)
+
+11. `Local.State.peerActiveAfter` now credits the largest Retire Prior To ever
+    sent, not only the one on the frame being sent (§5.1.2 lines 1811–1814):
+    the peer is obliged to retire everything below it before adding the new ID,
+    so those IDs do not count against its limit even before its
+    RETIRE_CONNECTION_ID frames reach us.
+12. Not issuing is always permitted (`Local.Step.issueDeclined`, §5.1.1 line
+    1753); the previous `issueRefused` made issuing mandatory whenever it was
+    possible.
+13. `Remote.Event.retirementBacklog` carries the §5.1.2 line 1826 MAY.  The
+    backlog itself (retirements not yet acknowledged) is RFC 9002 state, so the
+    count is an event parameter; "this limit" is read as the floor of the
+    SHOULD on line 1824, twice `active_connection_id_limit`.
+14. W4-6: `Local.isReNewCid` accepts a repeat with a *different* Retire Prior
+    To as a retransmission of the same issued ID.  Kept: §19.15 lines 7985–7989
+    make only a changed connection ID or token (for the same sequence number)
+    a possible PROTOCOL_VIOLATION, and lines 7998–8001 say a different Retire
+    Prior To merely has or has not an effect.
+15. W4-5: the stateless reset token length is not re-checked on receipt because
+    the wire decoder (`Quic.Frame.newConnectionId`) only produces 16-byte
+    tokens; `Remote.tokenLenOk` guards the send side, where the value is
+    constructed locally.
+-/
+
 end Quic.Spec.ConnIds
