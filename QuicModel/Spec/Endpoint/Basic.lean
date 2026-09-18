@@ -151,6 +151,10 @@ def pathId? (s : State) (p : Migration.Path) : Option Nat := s.pathIds.get? p
 def pathOf (s : State) (p : Migration.Path) : PathValidation.Path :=
   ⟨(s.pathIds.get? p).getD s.nextPathId⟩
 
+/-- The reverse lookup: which `Migration.Path` a handle belongs to. -/
+def pathOfId (s : State) (i : Nat) : Option Migration.Path :=
+  (s.pathIds.find? (fun e => decide (e.2 = i))).map (·.1)
+
 /-- Give `p` a handle if it does not have one.  Fresh handles come from a
     counter, so two paths never share one. -/
 def register (s : State) (p : Migration.Path) : State :=
@@ -273,9 +277,13 @@ inductive LocalAction where
   | sentPacket (ptype : PacketType) (pn : Nat) (ackEliciting : Bool)
   /-- §19.3: we sent an ACK frame for this space. -/
   | sentAck (sp : PnSpace) (largest first : Nat) (ranges : List AckRange)
-  /-- A frame we put on the wire, on path `p`; the bookkeeping the components
-      need (`Stream.Send.sentStream`, `PathValidation.responseSent`, …). -/
-  | sentFrameOn (p : Migration.Path) (f : Frame)
+  /-- A frame we put on the wire, in a packet of type `ptype` on path `p`; the
+      bookkeeping the components need (`Stream.Send.sentStream`,
+      `PathValidation.responseSent`, `Ack.sentAck`, `Handshake.sentCrypto`).
+      The packet type is carried because the level a CRYPTO frame belongs to and
+      the space an ACK frame acknowledges are properties of the packet, not of
+      the frame (`Ack` NOTES 15, `FrameRules` NOTES 8). -/
+  | sentFrameIn (ptype : PacketType) (p : Migration.Path) (f : Frame)
   /-- §8.1, line 2776: a datagram of `n` payload bytes left for `a`. -/
   | sentDatagram (a : Addr) (n : Nat)
   /-- §10.3.1, line 4323: the trailing 16 bytes matched a stateless reset token. -/
