@@ -656,6 +656,22 @@ example : component.accepts cliSmall (.recvCrypto .initial 1 9)
   decide
 -- Nothing else is permitted there.
 example : component.accepts cliSmall (.recvCrypto .initial 1 9) .drop = false := by decide
+-- §7.5, line 2716: once the handshake is complete the same overflow may be
+-- discarded from here on, or closed with CRYPTO_BUFFER_EXCEEDED — and, by line
+-- 2707, still simply buffered (NOTE 15).  All three, and nothing else.
+private def cliSmallDone : State := { cliSmall with complete := true }
+example : component.outcomes cliSmallDone (.recvCrypto .initial 1 9) =
+    [.ok (cliSmallDone.setStream .initial
+            { cliSmallDone.stream .initial with discarding := true }) [],
+     .ok (cliSmallDone.setStream .initial ((cliSmallDone.stream .initial).recv 1 9)) [],
+     .error .cryptoBufferExceeded] := by decide
+-- and once it is discarding, a later frame is acknowledged and ignored, never
+-- dropped (line 2719: "Packets containing discarded CRYPTO frames MUST be
+-- acknowledged").
+private def cliDiscarding : State :=
+  cliSmallDone.setStream .initial { cliSmallDone.stream .initial with discarding := true }
+example : component.outcomes cliDiscarding (.recvCrypto .initial 1 9) =
+    [.ok cliDiscarding []] := by decide
 
 -- §19.6, line 7545: offset + length above 2^62-1 is FRAME_ENCODING_ERROR or
 -- CRYPTO_BUFFER_EXCEEDED, and nothing else.
@@ -760,11 +776,12 @@ end Examples
 | §17.2.2.1 (6407) | "Any data in CRYPTO frames is discarded - and no longer retransmitted - when Initial keys are discarded" | `CryptoStep.levelGone` (receive), `maySendCryptoAt` (send) |
 | §17.2.3 (6415) | a 0-RTT packet carries early data "from the client to the server … prior to handshake completion" | `MaySendPacket` (client only), `HdrStep.cliZeroRtt` |
 | §17.2.3 (6417) | "the server can accept or reject this early data" | `Event.tlsZeroRtt`, `Step.zeroRttAccepted`/`zeroRttRejected` |
-| §17.2.3 (6467) | "A client SHOULD attempt to resend data in 0-RTT packets after it sends a new Initial packet.  New packet numbers MUST be used" | out of scope: packet numbers are WP3 Ack's; the SHOULD only recommends |
+| §17.2.3 (6467) | "A client SHOULD attempt to resend data in 0-RTT packets after it sends a new Initial packet." | advice, not checkable here: the data in a 0-RTT packet is application data, which this component neither carries nor remembers, so nothing in its state can say whether a re-sent 0-RTT packet repeats what a Retry discarded.  `State.retrySeen` records the Retry; the retransmission itself is WP14 Reliability's and the application's |
+| §17.2.3 (6469) | "New packet numbers MUST be used for any new packets that are sent" | out of scope: packet numbers are WP3 Ack's (`PnSpace`); this component's events carry no packet number |
 | §17.2.3 (6473) | "A client only receives acknowledgments for its 0-RTT packets once the handshake is complete" | out of scope: WP3 Ack |
 | §17.2.3 (6476) | "A client MUST NOT send 0-RTT packets once it starts processing 1-RTT packets from the server" | `State.processed1Rtt`, `HdrStep.cliOneRtt`, `MaySendPacket`, `zeroRtt_client_only` |
 | §17.2.3 (6480) | "An acknowledgment for a 1-RTT packet MUST be carried in a 1-RTT packet" | out of scope: WP3 Ack (`appData_ack_in_oneRtt`) |
-| §17.2.3 (6483) | "A server SHOULD treat a violation of remembered limits as a connection error" | out of scope: WP1's `zeroRttCompatible` and WP2/WP9's limits |
+| §17.2.3 (6483) | "A server SHOULD treat a violation of remembered limits (Section 7.4.1) as a connection error of an appropriate type" | advice, not checkable here: the remembered limits are WP1's (`TransportParams.zeroRttCompatible`) and a violation of them is a stream or connection flow-control event in WP2/WP9.  This component models no limit and no stream data, so it has no outcome the clause could constrain |
 | §17.2.4 (6527) | "Once a client has received a Handshake packet from a server, it uses Handshake packets to send subsequent cryptographic handshake messages" | `MaySendPacket` (Handshake write keys), `HdrStep.cliHandshakeOk` |
 | §17.2.4 (6531) | the Handshake header's connection IDs are as §7.2 | `SendHeader`, `HdrStep.cliHandshakeOther` |
 | §17.2.4 (6536) | "Handshake packets have their own packet number space" | out of scope: WP3 Ack (`PnSpace`) |
@@ -809,8 +826,8 @@ NOTES — ambiguities in the text and the readings encoded
    which is what "buffering … data received in out-of-order CRYPTO frames"
    (line 2703) says the limit is about.
 
-3. **Which of the two §7.5 alternatives is preferred.**  Both are permitted
-   (`outcomes` lists both), so `accepts` takes either; only the reference
+3. **Which §7.5 alternative is preferred.**  All of them are permitted
+   (`outcomes` lists all of them), so `accepts` takes any; only the reference
    implementation `step` has to choose.  It prefers expanding during the
    handshake (line 2711 recommends it — "it can expand its buffer temporarily to
    complete the handshake") and discarding afterwards (line 2716 lists
@@ -887,6 +904,29 @@ NOTES — ambiguities in the text and the readings encoded
     Connection ID; the `scid` argument is ignored for `.oneRtt`, and §7.2's
     "different Source Connection ID" discard is applied only to the long-header
     types the sentence is about.
+
+15. **Buffering past the limit after the handshake completes** (a change to an
+    earlier reading of this file).  §7.5, line 2716 offers an endpoint that "is
+    unable to buffer all data in a CRYPTO frame" two ways out, and this file
+    used to offer only those two — discard forever, or CRYPTO_BUFFER_EXCEEDED.
+    That made a MAY the *only* outcome.  Line 2707 says "An endpoint's buffer
+    size does not need to remain constant during the life of the connection", so
+    an endpoint that enlarges its buffer is not the endpoint line 2716 is about,
+    and simply accepting the frame is permitted at every point in the
+    connection.  `CryptoStep.expand` therefore lost its `s.complete = false`
+    hypothesis and `outcomes` lists three alternatives past the limit once the
+    handshake is complete.  `bufLimit` is the size the endpoint has *committed*
+    to (the invariant keeps it at line 2703's 4096 or more); growing it is not
+    an event of this component, so expanding shows up as the frame being
+    accepted rather than as a change to `bufLimit`.
+
+16. **No SHOULD in the assigned range becomes a `Recommended` clause.**  §7,
+    §7.1–§7.3, §7.5, §17.2.2, §17.2.3, §17.2.4, §19.6 and §19.20 contain exactly
+    two SHOULDs, both in §17.2.3 (lines 6467 and 6483).  Neither constrains an
+    outcome or a frame this component models — one is about re-sending
+    application data, the other about limits this component does not hold — so
+    the coverage table carries them as `advice, not checkable here` with the
+    reason, and there is no `Recommended` predicate here.
 -/
 
 end Quic.Spec.Handshake

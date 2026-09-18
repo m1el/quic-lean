@@ -423,17 +423,25 @@ def cryptoOutcomes (s : State) (lvl : CryptoLevel) (off len : Nat) : List Out :=
   -- §7.5, line 2716: "all CRYPTO frames received in the future".
   else if (s.stream lvl).discarding then [.ok s []]
   else if s.bufLimit < bufferedBytes ((s.stream lvl).recv off len).buf then
+    -- Three outcomes are permitted past the limit, and buffering anyway is one
+    -- of them at every point in the connection: §7.5, line 2707, "An endpoint's
+    -- buffer size does not need to remain constant during the life of the
+    -- connection", so an endpoint that enlarges its buffer is simply not the
+    -- endpoint the next two sentences are about.  Line 2711 names that outcome
+    -- explicitly during the handshake: "it can expand its buffer temporarily to
+    -- complete the handshake."
     if s.complete then
       -- §7.5, line 2716: "it MAY discard that CRYPTO frame and all CRYPTO
       -- frames received in the future, or it MAY close the connection with a
       -- CRYPTO_BUFFER_EXCEEDED error code.  Packets containing discarded CRYPTO
       -- frames MUST be acknowledged" — hence `.ok`, not `.drop`.
       [.ok (s.setStream lvl { s.stream lvl with discarding := true }) [],
+       .ok (s.setStream lvl ((s.stream lvl).recv off len))
+           (deliverFx lvl (s.stream lvl) ((s.stream lvl).recv off len)),
        .error .cryptoBufferExceeded]
     else
-      -- §7.5, line 2711: "it can expand its buffer temporarily to complete the
-      -- handshake.  If an endpoint does not expand its buffer, it MUST close
-      -- the connection with a CRYPTO_BUFFER_EXCEEDED error code."
+      -- §7.5, line 2713: "If an endpoint does not expand its buffer, it MUST
+      -- close the connection with a CRYPTO_BUFFER_EXCEEDED error code."
       [.ok (s.setStream lvl ((s.stream lvl).recv off len))
            (deliverFx lvl (s.stream lvl) ((s.stream lvl).recv off len)),
        .error .cryptoBufferExceeded]
@@ -569,11 +577,14 @@ inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
                              (deliverFx l (s.stream l) ((s.stream l).recv o n)))
   /-- §7.5, line 2711: "If an endpoint's buffer is exceeded during the
       handshake, it can expand its buffer temporarily to complete the
-      handshake." -/
+      handshake."  Not restricted to the handshake: line 2707, "An endpoint's
+      buffer size does not need to remain constant during the life of the
+      connection", so an endpoint that enlarges its buffer after completion is
+      not "unable to buffer all data in a CRYPTO frame" (line 2716) either.
+      See NOTE 15. -/
   | expand {s l o n} (hk : s.read.get l.level ≠ .discarded) (h : o + n ≤ maxCryptoOffset)
       (hd : (s.stream l).discarding = false)
-      (hb : s.bufLimit < bufferedBytes ((s.stream l).recv o n).buf)
-      (hc : s.complete = false) :
+      (hb : s.bufLimit < bufferedBytes ((s.stream l).recv o n).buf) :
       CryptoStep s l o n (.ok (s.setStream l ((s.stream l).recv o n))
                              (deliverFx l (s.stream l) ((s.stream l).recv o n)))
   /-- §7.5, line 2713: "If an endpoint does not expand its buffer, it MUST close

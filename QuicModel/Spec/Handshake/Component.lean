@@ -145,13 +145,13 @@ theorem mem_cryptoOutcomes_iff (s : State) (l : CryptoLevel) (off len : Nat) (o 
             split at h
             · rename_i hc
               simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-              rcases h with h | h <;> subst h
+              rcases h with h | h | h <;> subst h
               · exact .overflowDiscard hk (by omega) (by simpa using hd) hb hc
+              · exact .expand hk (by omega) (by simpa using hd) hb
               · exact .overflowClose hk (by omega) (by simpa using hd) hb
-            · rename_i hc
-              simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+            · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
               rcases h with h | h <;> subst h
-              · exact .expand hk (by omega) (by simpa using hd) hb (by simpa using hc)
+              · exact .expand hk (by omega) (by simpa using hd) hb
               · exact .overflowClose hk (by omega) (by simpa using hd) hb
           · rename_i hb; simp only [List.mem_singleton] at h; subst h
             exact .accept hk (by omega) (by simpa using hd) (by omega)
@@ -164,8 +164,9 @@ theorem mem_cryptoOutcomes_iff (s : State) (l : CryptoLevel) (off len : Nat) (o 
       simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho]
     | accept hk ho hd hb =>
       simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho, Nat.not_lt.mpr hb]
-    | expand hk ho hd hb hc =>
-      simp [cryptoOutcomes, hk, hd, hc, Nat.not_lt.mpr ho, hb]
+    | expand hk ho hd hb =>
+      simp only [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho, hb, ↓reduceIte, Bool.false_eq_true]
+      split <;> simp
     | overflowClose hk ho hd hb =>
       simp only [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho, hb, ↓reduceIte, Bool.false_eq_true]
       split <;> simp
