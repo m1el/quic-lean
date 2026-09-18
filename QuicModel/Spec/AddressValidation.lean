@@ -611,8 +611,16 @@ component's `MaySendDatagram` field. -/
     unvalidated address to three times the amount of data received from that
     address."  §8.1, line 2773: "Prior to validating the client address, servers
     MUST NOT send more than three times as many bytes as the number of bytes
-    they have received."  §9.3.1, line 3431: "Until a peer's address is deemed
-    valid, an endpoint limits the amount of data it sends to that address."
+    they have received."
+
+    After migration the limit reaches *either* role, via §9.3, line 3392: "An
+    endpoint MAY send data to an unvalidated peer address, but it MUST protect
+    against potential attacks as described in Section 9.3.1 and Section 9.3.2",
+    and §9.3.1, line 3431: "Until a peer's address is deemed valid, an endpoint
+    limits the amount of data it sends to that address; see Section 8."  A "new
+    peer address" is §9.3, line 3379: "Receiving a packet from a new peer address
+    containing a non-probing frame indicates that the peer has migrated to that
+    address."
 
     And whom it does *not* bind — §8.1, line 2818: "Clients are only constrained
     by the congestion controller."  §21.1.1.1, line 8451: "The anti-amplification
@@ -623,7 +631,8 @@ component's `MaySendDatagram` field. -/
 
     So: a server is bound towards every client address it has not validated; a
     client only towards an address the peer migrated to (`newPeerAddr`) and that
-    it has not validated.  See NOTES 1. -/
+    it has not validated.  A client's handshake traffic to the server's original
+    address is unconstrained, which is what line 2818 says.  See NOTES 1. -/
 def State.limited (s : State) (a : Addr) : Prop :=
   (s.info a).validated = false ∧ (s.role = .server ∨ (s.info a).newPeerAddr = true)
 
@@ -1138,13 +1147,15 @@ line the quoted sentence starts on.
 
 Sentences from outside the assigned range that this file relies on, listed so a
 reviewer can check the import: §9.3 line 3379 (a packet from a new peer address
-means the peer migrated) and §9.3.1 line 3431 (an endpoint limits what it sends
-to an unvalidated peer address) justify `AddrState.newPeerAddr`; §21.1.1.1 line
-8451 (the limit "only applies when an endpoint responds to packets received from
-an unvalidated address") and line 8461 (it "does not apply to clients when
-establishing a new connection or when initiating connection migration") are the
-authority for the client exemption.  §9 as a whole
-is WP10 Migration's.
+means the peer migrated), §9.3 line 3392 (an endpoint MAY send to an unvalidated
+peer address but MUST protect against §9.3.1's attack) and §9.3.1 line 3431 (an
+endpoint limits what it sends to that address) justify `AddrState.newPeerAddr`
+and the second disjunct of `State.limited`; §21.1.1.1 line 8451 (the limit "only
+applies when an endpoint responds to packets received from an unvalidated
+address") and line 8461 (it "does not apply to clients when establishing a new
+connection or when initiating connection migration") are the authority for the
+client exemption.  §9 as a whole is WP10 Migration's, which drives the `newPath`
+flag of `Event.datagramRecv`.
 
 NOTES
 
@@ -1245,6 +1256,19 @@ NOTES
     are outside this file's range and belong to WP6 Termination.  They can be
     expressed with the machinery here — `State.limited` and `MaySendTo` are
     already per-address — if the lead wants one owner for the 3× rule.
+
+13. **INVALID_TOKEN for an invalid NEW_TOKEN token is deliberately not in
+    `Step`.**  §20.1 line 8318 defines the code without restricting its
+    provenance ("A server received a client Initial that contained an invalid
+    Token field"), so an implementation that closes with INVALID_TOKEN on an
+    invalid NEW_TOKEN token is arguably conforming.  But no sentence in this
+    file's range permits it: §8.1.2 line 2871 is explicitly about "an invalid
+    Retry token", and §8.1.3 line 2989 says to proceed as unvalidated, with the
+    Note at line 2997 giving the reason precisely for NEW_TOKEN tokens.  The
+    widening, if it is wanted, is §11 line 4434's "an endpoint MAY use any
+    applicable error code", which `PLAN.md` §4c assigns to WP12 (review B,
+    finding T-4) — this component must not own a rule from §11.  A differential
+    run that sees INVALID_TOKEN here is hitting T-4, not a defect in `Step`.
 -/
 
 end Quic.Spec.AddressValidation

@@ -209,7 +209,7 @@ import QuicModel.Spec.Migration.Theorems
     §9.3.1, line 3431 defer to §8, which is WP5's.  The `Component`'s
     `MaySendDatagram` field can only see this component's state, so the budget
     check is the free function `MaySendDatagramOn av s d`, taking WP5's state
-    exactly as `PathValidation.MaySendDatagram` does (its NOTES 10).  WP12
+    exactly as `PathValidation.MaySendDatagramOn` does (its NOTES 10).  WP12
     conjoins the two.  The `MaySendDatagram` field itself carries the rule that
     every packet coalesced in a datagram is bound by the path rules of the
     datagram it leaves in.
