@@ -1106,8 +1106,11 @@ static void md_write(harness *h, int64_t sid, size_t n, int fin) {
 
 static void md_shutdown(harness *h, int which, int64_t sid, uint64_t err, int rv) {
   if (rv != 0 || sid < 0) return;
-  if (which != 0) app_step(h, quic_h_app_reset((uint64_t)sid, err), "reset", 1);
-  if (which != 1) app_step(h, quic_h_app_stop_sending((uint64_t)sid, err), "stopSending", 1);
+  /* `ok = 0`: ngtcp2_conn_shutdown_stream_{read,write} return 0 as a *no-op*
+     when the stream does not exist, so a return code of 0 does not mean the
+     endpoint did anything, and the model's `.drop` agrees with it. */
+  if (which != 0) app_step(h, quic_h_app_reset((uint64_t)sid, err), "reset", 0);
+  if (which != 1) app_step(h, quic_h_app_stop_sending((uint64_t)sid, err), "stopSending", 0);
 }
 
 /* ---------------------------------------------------------- the send side */
