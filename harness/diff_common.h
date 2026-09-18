@@ -42,6 +42,15 @@ static void sb_printf(sbuf *sb, const char *fmt, ...) {
   sb->len += (size_t)n;
 }
 
+/* Appends a string of any length: sb_printf's stack buffer is 256 bytes, and
+   WP13's mismatch reports splice in whole traces and rendered Lean values. */
+static void sb_puts(sbuf *sb, const char *s) {
+  size_t n = strlen(s);
+  sb_reserve(sb, n);
+  memcpy(sb->p + sb->len, s, n + 1);
+  sb->len += n;
+}
+
 static void sb_hex(sbuf *sb, const uint8_t *d, size_t n) {
   static const char H[] = "0123456789abcdef";
   size_t i;

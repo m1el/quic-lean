@@ -49,7 +49,7 @@
 
 /* ------------------------------------------------------------------ state */
 
-typedef struct {
+typedef struct harness_s {
   sbuf tr;
   ngtcp2_conn *conn;
   ngtcp2_tstamp ts;

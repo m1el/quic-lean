@@ -170,6 +170,51 @@ where
     | 0x10 => .noViablePath
     | n => if 0x100 ≤ n ∧ n ≤ 0x1ff then .cryptoError (n - 0x100).toUInt8 else .internalError
 
+@[export quic_h_local_issue_cid]
+def localIssueCid (cid token : ByteArray) (rpt : UInt64) : LocalAction :=
+  .issueCid cid.toList token.toList rpt.toNat
+
+@[export quic_h_local_retire_cid]
+def localRetireCid (seq : UInt64) : LocalAction := .retireCid seq.toNat
+
+/-! ### What a frame on the wire says the endpoint already decided
+
+ngtcp2 issues and retires connection IDs inside the writer; the only trace of
+the decision is the frame that announces it (§19.15, §19.16).  `ConnIds.Local`
+and `ConnIds.Remote` want the decision as an event before they will let the
+frame be sent, so the harness reads it back off the wire.  The NEW_CONNECTION_ID
+frames of one datagram are replayed in increasing sequence number, because
+`ConnIds.Local.Event.issueCid` numbers them itself and ngtcp2 writes them in
+decreasing order. -/
+
+private def insertBySeq (x : Nat × LocalAction) :
+    List (Nat × LocalAction) → List (Nat × LocalAction)
+  | [] => [x]
+  | y :: t => if x.1 ≤ y.1 then x :: y :: t else y :: insertBySeq x t
+
+private def sortBySeq : List (Nat × LocalAction) → List (Nat × LocalAction)
+  | [] => []
+  | x :: t => insertBySeq x (sortBySeq t)
+
+@[export quic_h_presend_actions]
+def presendActions (fs : List Frame) : List LocalAction :=
+  (sortBySeq (fs.filterMap fun f =>
+      match f with
+      | .newConnectionId seq rpt cid token =>
+        some (seq, LocalAction.issueCid cid.toList token.toList rpt)
+      | _ => none)).map (·.2) ++
+    fs.filterMap fun f =>
+      match f with
+      | .retireConnectionId seq => some (LocalAction.retireCid seq)
+      | _ => none
+
+@[export quic_h_actions_length]
+def actionsLength (as : List LocalAction) : UInt64 := as.length.toUInt64
+
+@[export quic_h_actions_get]
+def actionsGet (as : List LocalAction) (i : UInt64) : LocalAction :=
+  as.getD i.toNat (.retirementBacklog 0)
+
 /-! ## Frames and packets
 
 The harness never builds a `Frame` field by field: it hands over the bytes of a
