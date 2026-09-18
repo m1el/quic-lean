@@ -34,7 +34,7 @@ private def run (s : State) : List Event → State
   | [] => s
   | e :: es => run ((component.step s e).next s) es
 
--- §19.11, line 7812: "a server that receives a unidirectional stream limit of 3
+-- §19.11, line 7813: "a server that receives a unidirectional stream limit of 3
 -- is permitted to open stream 3, 7, and 11, but not stream 15."
 example : component.step srv (.appOpenStream .uni) =
     .ok ((component.step srv (.appOpenStream .uni)).next srv) [.streamOpened ⟨3⟩] := by decide
@@ -43,7 +43,7 @@ example : (run srv [.appOpenStream .uni, .appOpenStream .uni]).nextLocal .uni = 
 example : component.step (run srv [.appOpenStream .uni, .appOpenStream .uni, .appOpenStream .uni])
     (.appOpenStream .uni) = .drop := by decide
 
--- §2.1, line 712: a STREAM frame for client-initiated bidirectional stream 8
+-- §2.1, line 718: a STREAM frame for client-initiated bidirectional stream 8
 -- (index 2) opens streams 0 and 4 as well, in increasing order …
 example : component.step srv (.stream ⟨8⟩ (.recv (.recvStream 0 5 false))) =
     .ok ((component.step srv (.stream ⟨8⟩ (.recv (.recvStream 0 5 false)))).next srv)
@@ -54,25 +54,31 @@ example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨0�
 example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨4⟩ = true := by decide
 example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨12⟩ = false := by decide
 
--- §4.6, line 1554: stream 12 is index 3, beyond the limit of 3 we advertised.
+-- §4.6, line 1546: stream 12 is index 3, beyond the limit of 3 we advertised.
 example : component.step srv (.stream ⟨12⟩ (.recv (.recvStream 0 5 false))) =
     .error .streamLimitError := by decide
 
--- §19.8, line 7638: stream 1 is server-initiated, so at a server a STREAM frame
--- for it before we created it is a STREAM_STATE_ERROR …
-example : component.step srv (.stream ⟨1⟩ (.recv (.recvStream 0 5 false))) =
-    .error .streamStateError := by decide
--- … and so are the other four frames of §19.4/§19.5/§19.10/§19.13.
-example : component.step srv (.stream ⟨1⟩ (.recv (.recvResetStream 0 5))) =
-    .error .streamStateError := by decide
-example : component.step srv (.stream ⟨1⟩ (.send (.recvStopSending 0))) =
-    .error .streamStateError := by decide
-example : component.step srv (.stream ⟨1⟩ (.send (.recvMaxStreamData 5))) =
-    .error .streamStateError := by decide
-example : component.step srv (.stream ⟨1⟩ (.recv (.recvStreamDataBlocked 5))) =
-    .error .streamStateError := by decide
+-- §19.8, line 7637: stream 1 is server-initiated, so at a server a STREAM frame
+-- for it before we created it is a STREAM_STATE_ERROR, and nothing else is
+-- permitted …
+example : component.outcomes srv (.stream ⟨1⟩ (.recv (.recvStream 0 5 false))) =
+    [.error .streamStateError] := by decide
+-- … and the same for STOP_SENDING (§19.5, line 7473) and MAX_STREAM_DATA
+-- (§19.10, line 7734), the other two frames the text names for a
+-- locally-initiated stream that has not yet been created.
+example : component.outcomes srv (.stream ⟨1⟩ (.send (.recvStopSending 0))) =
+    [.error .streamStateError] := by decide
+example : component.outcomes srv (.stream ⟨1⟩ (.send (.recvMaxStreamData 5))) =
+    [.error .streamStateError] := by decide
+-- Stream 3 is server-initiated *unidirectional*, hence send-only at a server,
+-- so §19.4, line 7431 and §19.13, line 7863 mandate the error for it too.
+-- (The bidirectional case is P9-2 below: there the text mandates nothing.)
+example : component.outcomes srv (.stream ⟨3⟩ (.recv (.recvResetStream 0 5))) =
+    [.error .streamStateError] := by decide
+example : component.outcomes srv (.stream ⟨3⟩ (.recv (.recvStreamDataBlocked 5))) =
+    [.error .streamStateError] := by decide
 
--- §19.10, line 7736 through the routing: MAX_STREAM_DATA for a peer-initiated
+-- §19.10, line 7734 through the routing: MAX_STREAM_DATA for a peer-initiated
 -- *unidirectional* stream opens it and then fails, because it is receive-only.
 example : component.step srv (.stream ⟨2⟩ (.send (.recvMaxStreamData 5))) =
     .error .streamStateError := by decide
@@ -111,7 +117,7 @@ example : component.track srv (.recvMaxData 500) (.ok [.dataCreditAvailable 500]
 example : component.trackSet [srv] (.stream ⟨12⟩ (.recv (.recvStream 0 5 false)))
     (Obs.ok []).matchesLoosely = [] := by decide
 
--- Send side.  §4.1, line 1357: advertising a smaller limit is not an error …
+-- Send side.  §4.1, line 1364: advertising a smaller limit is not an error …
 example : component.maySend srv (.maxData 1) = true := by decide
 example : component.maySend srv (.maxStreams .bidi 1) = true := by decide
 -- … but 2^60 is the ceiling for MAX_STREAMS (§19.11, line 7802).
@@ -120,7 +126,9 @@ example : component.maySend srv (.maxStreams .bidi (2 ^ 60 + 1)) = false := by d
 example : component.maySend srv (.dataBlocked 100) = true := by decide
 example : component.maySend srv (.dataBlocked 99) = false := by decide
 example : component.maySend srv (.streamsBlocked .uni 3) = true := by decide
--- Nothing may be sent for a stream that does not exist yet.
+-- Nothing may be sent for a stream that does not exist yet.  Review finding
+-- S-5: this conjunct is the *model's*, not the text's — see NOTES 4 and the
+-- obligation it places on WP13.
 example : component.maySend srv (.stream 3 0 false ByteArray.empty) = false := by decide
 -- After opening stream 3, a STREAM frame the application has written is allowed …
 private def srvOpen : State :=
@@ -134,6 +142,85 @@ private def srvBig : State :=
   run (init .server lim limBig) [.appOpenStream .uni, .stream ⟨3⟩ (.send (.appWrite 200))]
 example : maySend srvBig (.stream 3 0 false (ByteArray.mk #[1, 2, 3, 4, 5])) = true := by decide
 example : maySend srvBig (.stream 3 98 false (ByteArray.mk #[1, 2, 3, 4, 5])) = false := by decide
+
+/-! ### Regression examples for the Wave 2 review (`reviews/wave2.md`) -/
+
+/-! **P9-1 (finding S-1).**  A client with `initial_max_data = 20` and a
+generous per-stream limit.  Stream 3 (server-initiated unidirectional, so
+receive-only at a client) receives 10 bytes with FIN: its final size is 10 and
+`recvTotal` is 10.  A later frame claiming 200 bytes on that stream contradicts
+the final size, so §4.5, line 1517 asks for a FINAL_SIZE_ERROR — but §4.5,
+line 1522 says "Generating these errors is not mandatory", so ignoring the frame
+is permitted as well, and §4.5, line 1495 says the stream goes on consuming
+exactly its final size.  The table must therefore keep the ignore outcome and
+must *not* charge 200 − 10 bytes of connection credit (which would raise a
+spurious FLOW_CONTROL_ERROR: the defect S-1 reported). -/
+
+private def cliLim : Limits :=
+  { maxData := 20, maxStreamDataBidiLocal := 1000, maxStreamDataBidiRemote := 1000,
+    maxStreamDataUni := 1000, maxStreamsBidi := 3, maxStreamsUni := 3 }
+private def cli : State := init .client cliLim cliLim
+/-- Stream 3's final size is known to be 10; `recvTotal = 10` of the 20 allowed. -/
+private def cliFin : State := run cli [.stream ⟨3⟩ (.recv (.recvStream 0 10 true))]
+
+example : cliFin.recvTotal = 10 := by decide
+example : cliFin.maxDataLocal = 20 := by decide
+
+-- WP2 offers both the FINAL_SIZE_ERROR and ignoring the frame …
+example : Stream.outcomes (cliFin.get ⟨3⟩) (.recv (.recvStream 0 200 false))
+    = [.error .finalSizeError, .ok (cliFin.get ⟨3⟩) []] := by decide
+-- … and the table now keeps both, with the state (and `recvTotal`) unchanged.
+example : component.outcomes cliFin (.stream ⟨3⟩ (.recv (.recvStream 0 200 false)))
+    = [.error .finalSizeError, .ok cliFin []] := by decide
+example : component.accepts cliFin (.stream ⟨3⟩ (.recv (.recvStream 0 200 false)))
+    (.error .flowControlError) = false := by decide
+
+-- The same through RESET_STREAM with a changed final size (§4.5, line 1517).
+example : Stream.outcomes (cliFin.get ⟨3⟩) (.recv (.recvResetStream 0 200))
+    = [.error .finalSizeError, .ok (cliFin.get ⟨3⟩) []] := by decide
+example : component.outcomes cliFin (.stream ⟨3⟩ (.recv (.recvResetStream 0 200)))
+    = [.error .finalSizeError, .ok cliFin []] := by decide
+example : component.accepts cliFin (.stream ⟨3⟩ (.recv (.recvResetStream 0 200)))
+    (.error .flowControlError) = false := by decide
+
+-- §19.9, line 7712 still bites where the stream really does accept the bytes:
+-- 10 more on stream 7 fits in the 20 we advertised, 11 does not.
+example : (run cliFin [.stream ⟨7⟩ (.recv (.recvStream 0 10 false))]).recvTotal = 20 := by decide
+example : component.outcomes cliFin (.stream ⟨7⟩ (.recv (.recvStream 0 11 false)))
+    = [.error .flowControlError] := by decide
+
+/-! **P9-2 (finding S-2).**  Stream 0 at a client is client-initiated
+*bidirectional*; before `appOpenStream` it has not been created.  §19.4,
+line 7431 and §19.13, line 7863 speak only of a *send-only* stream, so for
+RESET_STREAM and STREAM_DATA_BLOCKED the text states no rule here and ignoring
+the frame must stay permitted alongside the STREAM_STATE_ERROR. -/
+
+example : (⟨0⟩ : StreamId).initiator = Role.client := by decide
+example : (⟨0⟩ : StreamId).dir = StreamDir.bidi := by decide
+example : cli.has ⟨0⟩ = false := by decide
+
+example : component.outcomes cli (.stream ⟨0⟩ (.recv (.recvResetStream 0 5)))
+    = [.error .streamStateError, .ok cli []] := by decide
+example : component.outcomes cli (.stream ⟨0⟩ (.recv (.recvStreamDataBlocked 5)))
+    = [.error .streamStateError, .ok cli []] := by decide
+-- `.ok s []`, not `.drop`: the frame is processed to no effect and the packet
+-- carrying it is still acknowledged (the convention of `Spec/Template.lean`).
+example : component.accepts cli (.stream ⟨0⟩ (.recv (.recvResetStream 0 5))) .drop = false := by
+  decide
+
+-- The three frames the text does name stay mandatory, on the same stream …
+example : component.outcomes cli (.stream ⟨0⟩ (.recv (.recvStream 0 5 false)))
+    = [.error .streamStateError] := by decide
+example : component.outcomes cli (.stream ⟨0⟩ (.send (.recvStopSending 3)))
+    = [.error .streamStateError] := by decide
+example : component.outcomes cli (.stream ⟨0⟩ (.send (.recvMaxStreamData 5)))
+    = [.error .streamStateError] := by decide
+-- … and stream 2 (client-initiated unidirectional, so send-only at a client) is
+-- covered by §19.4, line 7431 and §19.13, line 7863 after all.
+example : component.outcomes cli (.stream ⟨2⟩ (.recv (.recvResetStream 0 5)))
+    = [.error .streamStateError] := by decide
+example : component.outcomes cli (.stream ⟨2⟩ (.recv (.recvStreamDataBlocked 5)))
+    = [.error .streamStateError] := by decide
 
 /-! ## 10. Coverage and notes
 
