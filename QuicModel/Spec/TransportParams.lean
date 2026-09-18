@@ -633,7 +633,7 @@ example : recommendedParams true 5 1 defaults = false := by decide
 example : recommendedParams true 5 1
     { defaults with initialMaxData := 10000, initialMaxStreamsBidi := 3,
                     initialMaxStreamDataBidiRemote := 4000 } = true := by decide
--- §18.2, line 7040's own example: "if a receiver sets a timer for 5ms and alarms
+-- §18.2, line 7042's own example: "if a receiver sets a timer for 5ms and alarms
 -- commonly fire up to 1ms late, then it should send a max_ack_delay of 6ms".
 example : recommendedParams false 5 1 { defaults with maxAckDelay := 6 } = true := by decide
 example : recommendedParams false 5 1 { defaults with maxAckDelay := 5 } = false := by decide
