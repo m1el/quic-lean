@@ -32,12 +32,12 @@ import QuicModel.Spec.Migration.Theorems
 | §9 (3289) | "the endpoint MUST either drop the incoming packets on that path without generating a stateless reset or proceed with path validation and allow the peer to migrate" | `RecvCase.banned`, `Step.recvBannedDrop`, `Step.recvBannedMigrate`; NOTES 2 |
 | §9 (3312) | "An endpoint MUST perform path validation … if it detects any change to a peer's address, unless it has previously validated that address" | `State.mustValidate`, `Effect.startValidation` from `observe`/`permit`; NOTES 9 |
 | §9 (3316) | "When an endpoint has no validated path on which to send packets, it MAY discard connection state" | `Step.failOtherGiveUp` |
-| §9 (3318) | "An endpoint capable of connection migration MAY wait for a new path to become available" | `Step.failOtherWait` |
+| §9 (3317) | "An endpoint capable of connection migration MAY wait for a new path to become available" | `Step.failOtherWait` |
 | §9 (3321) | migration limited to new client addresses except §9.6; clients initiate all migrations | the shape of the model: only `recvPacket` changes `active.peer`, only `requestMigrate` changes `active.loc`; NOTES 3 |
 | §9 (3323) | "Servers do not send non-probing packets … toward a client address until they see a non-probing packet from that address" | `MaySendPacket` clause 4 via `State.sawNonProbingFrom`; NOTES 8 |
 | §9 (3325) | "If a client receives packets from an unknown server address, the client MUST discard these packets" | `RecvCase.unknownServer`, `Step.recvUnknownServer`; NOTES 6 |
 | §9.1 (3331) | "An endpoint MAY probe for peer reachability from a new local address using path validation … prior to migrating" | `Step.probeStart` |
-| §9.1 (3333) | failure of path validation does not end the connection "unless there are no valid alternative paths available" | `Step.failOther`, `Step.failOtherWait`, `Step.failOtherGiveUp` |
+| §9.1 (3335) | failure of path validation does not end the connection "unless there are no valid alternative paths available" | `Step.failOther`, `Step.failOtherWait`, `Step.failOtherGiveUp` |
 | §9.1 (3338) | definition of probing frames and probing packets | `FrameRules.probing` / `FrameRules.packetProbing` (WP3); the `probingOnly` field of `Event.recvPacket` |
 | §9.2 (3345) | "An endpoint can migrate a connection to a new local address by sending packets containing non-probing frames from that address" | `Step.migFresh`, `MaySendPacket` clause 2 |
 | §9.2 (3348) | a migrating endpoint can send without first validating the peer's address | `migCase` places no validation precondition on the *peer* address |
@@ -55,7 +55,7 @@ import QuicModel.Spec.Migration.Theorems
 | §9.3.1 (3429) | an endpoint is required to validate a peer's new address | `State.mustValidate` |
 | §9.3.1 (3431) | "Until a peer's address is deemed valid, an endpoint limits the amount of data it sends to that address; see Section 8" | `AddressValidation.MaySendTo`, referenced by `MaySendDatagramOn`; not duplicated |
 | §9.3.1 (3436) | "If an endpoint skips validation of a peer address …, it does not need to limit its sending rate" | already in WP5's predicate: a validated address has no budget |
-| §9.3.2 (3451) | "an endpoint MUST revert to using the last validated peer address when validation of a new peer address fails" | `Step.failRevert`, `revert_or_close`, `InvLastValidated` |
+| §9.3.2 (3452) | "an endpoint MUST revert to using the last validated peer address when validation of a new peer address fails" | `Step.failRevert`, `revert_or_close`, `InvLastValidated` |
 | §9.3.2 (3454) | higher-numbered packets from the legitimate address trigger another migration | `RecvCase.migrate` on `State.isHighest` |
 | §9.3.2 (3460) | "If an endpoint has no state about the last validated peer address, it MUST close the connection silently by discarding all connection state" | `Step.failNoPath`, `Effect.discardState`, `State.discarded`, `discarded_sends_nothing`, `RecvCase.gone` |
 | §9.3.2 (3463) | "an endpoint MAY send a stateless reset in response to any further incoming packets" | out of scope: WP6 Termination |
@@ -73,16 +73,16 @@ import QuicModel.Spec.Migration.Theorems
 | §9.5 (3611) | "… it MAY continue to use the current connection ID with the new remote address while still sending from the same local address" | `State.rebindKeepsCid`, `Step.cidRebindKeep` / `Step.cidRebindRefuse`; NOTES 7 |
 | §9.5 (3615) | "These requirements regarding connection ID reuse apply only to the sending of packets" | `State.scidOn` is recorded and never constrained; NOTES 7 |
 | §9.5 (3630) | "An endpoint SHOULD NOT initiate migration with a peer that has requested a zero-length connection ID" | `RecommendedMigration`; NOTES 8 |
-| §9.5 (3649) | a client may switch connection ID, port or address after inactivity; "addresses SHOULD only be changed infrequently" | out of scope: the model has no notion of elapsed time between events |
-| §9.5 (3659) | "endpoints SHOULD provide new connection IDs before peers migrate" | out of scope: WP4 `ConnIds.Local` |
+| §9.5 (3657) | a client may switch connection ID, port or address after inactivity; "addresses SHOULD only be changed infrequently" | out of scope: the model has no notion of elapsed time between events |
+| §9.5 (3662) | "endpoints SHOULD provide new connection IDs before peers migrate" | out of scope: WP4 `ConnIds.Local` |
 | §9.6 (3678) | migrating to a new server address mid-connection is not supported | the state holds a single `preferredPeer`, and `knownServerAddr` admits no other server address |
-| §9.6 (3680) | "If a client receives packets from a new server address when the client has not initiated a migration to that address, the client SHOULD discard these packets" | `RecvCase.unsolicited`, `Step.recvUnsolicitedDrop` / `Step.recvUnsolicitedKeep`, `Recommended`; NOTES 6 |
+| §9.6 (3679) | "If a client receives packets from a new server address when the client has not initiated a migration to that address, the client SHOULD discard these packets" | `RecvCase.unsolicited`, `Step.recvUnsolicitedDrop` / `Step.recvUnsolicitedKeep`, `Recommended`; NOTES 6 |
 | §9.6.1 (3686) | "A server conveys a preferred address by including the preferred_address transport parameter in the TLS handshake" | `Event.learnPreferredAddress`, `Step.preferredLearn`, `Step.preferredWrongRole` |
 | §9.6.1 (3689) | "Servers MAY communicate a preferred address of each address family" | out of scope: one preferred address per connection in the model; NOTES 11 |
 | §9.6.1 (3701) | "Once the handshake is confirmed, the client SHOULD select one of the two addresses … and initiate path validation" | `Step.migValidateFirst`, gated by `migCase_confirmed` |
 | §9.6.1 (3703) | "A client constructs packets using any previously unused active connection ID, taken from either the preferred_address transport parameter or a NEW_CONNECTION_ID frame" | `Event.beginSendOn` with §9.5's guards; `preferredAddressCidSeq = 1` (§5.1.1, line 1698) |
 | §9.6.1 (3707) | "As soon as path validation succeeds, the client SHOULD begin sending all future packets to the new server address … and discontinue use of the old server address" | `Step.succSwitch` / `Step.succKeep`, `Recommended` |
-| §9.6.1 (3710) | "If path validation fails, the client MUST continue sending all future packets to the server's original IP address" | `MaySendPacket` clause 5, `Step.failRevert` |
+| §9.6.1 (3709) | "If path validation fails, the client MUST continue sending all future packets to the server's original IP address" | `MaySendPacket` clause 5, `Step.failRevert` |
 | §9.6.2 (3715) | "A client that migrates to a preferred address MUST validate the address it chooses before migrating" | `MigCase.validateFirst`, `Step.migValidateFirst` |
 | §9.6.2 (3718) | the server answers a PATH_CHALLENGE at its preferred address | out of scope: WP5b `PathValidation.Step.challenge` |
 | §9.6.2 (3721) | "The server MUST send non-probing packets from its original address until it receives a non-probing packet from the client at its preferred address and until the server has validated the new path" | `MaySendPacket` clause 4 |
@@ -91,13 +91,13 @@ import QuicModel.Spec.Migration.Theorems
 | §9.6.2 (3733) | "The server SHOULD drop newer packets for this connection that are received on the old IP address" | not encoded; NOTES 12 |
 | §9.6.2 (3735) | "The server MAY continue to process delayed packets that are received on the old IP address" | `RecvCase.quiet` — a packet on the old path is processed and, being reordered, does not move the sending path |
 | §9.6.2 (3740) | "A client MUST NOT use these for other connections" | out of scope: the model has one connection |
-| §9.6.3 (3747) | "the client SHOULD perform path validation to both the original and preferred server address … concurrently" | not encoded: two `requestProbe` events are permitted and `State.otherValidating` records the situation |
+| §9.6.3 (3746) | "the client SHOULD perform path validation to both the original and preferred server address … concurrently" | not encoded: two `requestProbe` events are permitted and `State.otherValidating` records the situation |
 | §9.6.3 (3757) | "If path validation of the server's preferred address succeeds, the client MUST abandon validation of the original address and migrate to using the server's preferred address" | `SuccCase.mustSwitch`, `Step.succMustSwitch`, `Effect.abandonValidation` |
-| §9.6.3 (3760) | "If path validation of the server's preferred address fails but validation of the server's original address succeeds, the client MAY migrate to its new address and continue sending to the server's original address" | `Step.succSwitch` / `Step.succKeep` on the original address |
-| §9.6.3 (3764) | "the server MUST protect against potential attacks as described in Section 9.3.1 and Section 9.3.2" | the same code path as §9.3: `State.mustValidate`, `Step.failRevert`, `MaySendDatagramOn` |
+| §9.6.3 (3759) | "If path validation of the server's preferred address fails but validation of the server's original address succeeds, the client MAY migrate to its new address and continue sending to the server's original address" | `Step.succSwitch` / `Step.succKeep` on the original address |
+| §9.6.3 (3766) | "the server MUST protect against potential attacks as described in Section 9.3.1 and Section 9.3.2" | the same code path as §9.3: `State.mustValidate`, `Step.failRevert`, `MaySendDatagramOn` |
 | §9.6.3 (3772) | "Servers SHOULD initiate path validation to the client's new address upon receiving a probe packet from a different address" | `State.mustValidate` makes it unconditional, which is what §9 line 3312 already requires |
 | §9.6.3 (3776) | "A client that migrates to a new address SHOULD use a preferred address from the same address family for the server" | out of scope: addresses are opaque handles with no family |
-| §9.6.3 (3779) | "the client MAY use this connection ID on any path" | `Event.beginSendOn` ties no sequence number to any path beyond §9.5's rules |
+| §9.6.3 (3782) | "the client MAY use this connection ID on any path" | `Event.beginSendOn` ties no sequence number to any path beyond §9.5's rules |
 | §9.7 (3787) | "Endpoints that send data using IPv6 SHOULD apply an IPv6 flow label" | out of scope: below the transport; the model has no IP header |
 | §9.7 (3791) | "The flow label generation MUST be designed to minimize the chances of linkability" | out of scope: below the transport |
 
