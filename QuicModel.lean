@@ -21,3 +21,5 @@ import QuicModel.Spec.Stream
 import QuicModel.Spec.StreamTable
 import QuicModel.Spec.Migration
 import QuicModel.Spec.Handshake
+import QuicModel.Spec.Retransmission
+import QuicModel.Spec.Ecn
