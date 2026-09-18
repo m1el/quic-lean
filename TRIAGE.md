@@ -429,11 +429,18 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
   a timer — then a `.ok` alternative belongs beside it, and the divergence above
   would not empty the set.  That is a WP6 question, recorded not made.
 
-## WP13-13 — a NEW_CONNECTION_ID past the peer's `active_connection_id_limit`
+## WP13-13 — a connection ID the peer retires does not free a slot in the model
 
-* **Reproducer:** not minimised; it appears after the peer retires a connection
-  ID and ngtcp2 issues a replacement, e.g. the `OUT … NEW_CONNECTION_ID seq=4`
-  in `out/artifacts/` alongside a model whose `activeCidsLocal` is already 4.
+* **Reproducer**
+
+  ```
+  role server
+  open bidi
+  write last 4 0
+  drain                        # ngtcp2 issues NEW_CONNECTION_ID seq=1,2,3
+  recv app 0 1902              # RETIRE_CONNECTION_ID seq=2
+  drain                        # ngtcp2 issues seq=4 to replace it
+  ```
 * **ngtcp2:** writes NEW_CONNECTION_ID with sequence number 4, a fifth
   connection ID, while `active_connection_id_limit` is 4.
 * **Model:** `ConnIds.Local.MaySend` refuses it, so
@@ -441,17 +448,23 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
 * **Sentence:** §5.1.1, line 1721: "An endpoint MUST NOT provide more connection
   IDs than the peer's limit."  The limit counts *active* (unretired) connection
   IDs, and the two sides disagree about how many are active.
-* **Verdict: harness first, then re-open.**  The harness synthesises
-  `LocalAction.issueCid` from the NEW_CONNECTION_ID frames on the wire and
-  `LocalAction.retireCid` from the RETIRE_CONNECTION_ID frames, but a connection
-  ID the *peer* retires reaches the model only through
-  `ConnIds.Local.Event.recvRetireCid` in the receive pipeline — which fires,
-  but in the branch of the candidate set where that packet was processed rather
-  than dropped, and `issueCid` itself has a `.drop` alternative, so the
-  candidate that has issued *and* retired everything can fall outside
-  `DIFF_MAX_CANDS`.  Raising `DIFF_MAX_CANDS` to 48 makes the signature
-  disappear on the inputs tried.  It is recorded rather than closed because the
-  accounting is worth checking by hand against §5.1.2's `retire_prior_to`.
+* **The sharp observation:** after the `recv` step, *every* candidate still
+  reports `activeCidsLocal=4` — the connection ID the peer retired did not free
+  a slot.  `Endpoint.dispatchFrame` does route the frame
+  (`stepCidLocal s (.recvRetireCid seq (some dcidSeq))`), the step itself does
+  not mismatch, and §19.16's self-retirement guard does not apply here (the
+  packet is addressed to sequence number 0 and the frame retires 2).  So either
+  `ConnIds.Local.State.activeCount` does not count what §5.1.1 line 1721 counts,
+  or `recvRetireCid`'s `.ok` is not the branch the candidate set kept.
+* **Verdict: model, to be confirmed by hand.**  The next step is a two-line
+  `#eval`/`example` in `ConnIds`: issue three connection IDs, apply
+  `recvRetireCid 2`, and check `activeCount`.  Not done here because WP13 may
+  not edit `QuicModel/Spec`, and because the answer decides whether this is a
+  defect in `ConnIds.Local` or in the endpoint's dispatch.  Two related facts
+  from the same run: ngtcp2 does *not* fire `remove_connection_id` for this
+  retirement while the model produces `cidLocal (.cidRetiredByPeer _)` (a
+  `WP13-8`-style soft finding, 42 occurrences under the `dcid_status` signature),
+  and raising `DIFF_MAX_CANDS` to 48 does not make the signature go away.
 
 ## WP13-14 — harness: `NGTCP2_ERR_DRAINING` is not a PROTOCOL_VIOLATION (fixed)
 
@@ -557,3 +570,89 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
   `Effect.cbName` return `none` for `stream_close` and `.allDataAcked` as
   `WP13-1` recommends and add a subsequence flag.  Then the harness would call
   the model for every level of the comparison instead of only the first.
+
+---
+
+# WP13 results
+
+Harness: `harness/endpoint_diff.c` at this commit, built with
+`./build_harness.sh endpoint_diff` (clang, ASan, libFuzzer, `-O1 -g`), against
+`QuicModel/Spec/Endpoint` as merged on `master` (WP11 review fixes, WP12
+examples layer, the §12.2 coalescing fix).
+
+## The eight scripted scenarios
+
+| scenario | mismatches |
+|---|---|
+| 01-stream-in-order | 0 |
+| 02-stream-flow-control | 0 |
+| 03-final-size-error | 0 |
+| 04-max-streams-too-large | 0 |
+| 05-cid-limit | 0 |
+| 06-handshake-done-at-server | 0 |
+| 07-local-stream-write | 0 |
+| 08-stream-limit | 0 |
+
+**8 of 8 clean.**  Two of them (01 and 03) mismatch on `stream_close` alone if
+`WP13-1`'s exclusion is removed; nothing else in the eight disagrees about an
+error code, a callback list or a frame on the wire.  `harness/scripts/run.sh`
+still matches all eight recorded traces byte for byte, so the driver refactoring
+is transparent.
+
+## Ten minutes of fuzzing
+
+`./out/endpoint_diff -max_total_time=600 -max_len=4096 -rss_limit_mb=4096
+-timeout=30 out/corpus-ep corpus/conn_trace`, ASan on, seeded from WP8's 2041-input
+`corpus/conn_trace`.
+
+| | |
+|---|---|
+| inputs executed | 16 675 (peak RSS 651 MB) |
+| connections driven | 16 669 |
+| receive/timer steps compared | 110 628 |
+| … of which needed the `stream_close`/`acked_stream_data_offset` exclusion | 1 338 (1.2 %) |
+| … of which needed the subsequence rule (`WP13-8`) | 667 (0.6 %) |
+| steps not compared (`WP13-7`'s guard, non-transport error codes) | 2 008 (1.8 %) |
+| written datagrams checked against `maySendDatagram` | 51 812 |
+| … unparsable (`WP13-15`, after the fix) | 0 |
+| runs abandoned after every candidate had closed (`WP13-12`) | 98 (0.6 %) |
+| **distinct mismatch signatures** | **75** |
+| total mismatch occurrences | 3 718 |
+| distinct soft findings (`WP13-8`) | 42 |
+
+So **about 97.6 % of compared steps matched exactly**, a further 2.0 % matched
+under the two documented relaxations, and the residue is the 75 signatures
+below.
+
+## The 75 signatures by class
+
+| class | signatures | root cause | entry |
+|---|---|---|---|
+| `outcome`, `ERR code=13` | 1 | CRYPTO past the buffer: the model omits a permitted outcome | `WP13-9` |
+| `outcome`, `ERR code=3` / `code=4` | 2 | DATA_BLOCKED / STREAMS_BLOCKED past the advertised limit | `WP13-10` |
+| `outcome`, `ERR code=6` | 1 | FINAL_SIZE_ERROR for a STREAM_DATA_BLOCKED | `WP13-11` |
+| `outcome`, `OK cbs=[… recv_crypto_data …]` | 8 | consequences of `WP13-9`: after the model accepted a CRYPTO frame ngtcp2 rejected, the two disagree about every later CRYPTO frame | `WP13-9` |
+| `outcome`, `OK cbs=[… stream_open …]`, `[… stream_reset …]`, `[… recv_stop_sending …]` | 30 | ngtcp2 reporting *more* than the model, or a different order — the residue `WP13-8`'s subsequence rule does not cover, e.g. a `stream_open` ngtcp2 fires where the model produced none because the stream limit had already been exceeded | not yet split |
+| `outcome`, `OK cbs=[dcid_status]`, `[remove_connection_id]` | 4 | connection-ID accounting | `WP13-13` |
+| `outcome`, other | 2 | — | — |
+| `maysend`, every combination containing NEW_CONNECTION_ID | 20 | the model has no free connection-ID slot | `WP13-13` |
+| `maysend`, `ACK`, `ACK,STREAM`, `ACK,MAX_DATA`, `STREAM`, `MAX_STREAMS,STREAM` | 6 | one conjunct of the eight in `MaySendDatagram`; the export returns one bit, so which one is a guess | `WP13-17` |
+| `obligation` | 1 | one run in 16 669 where §13.2.1's deadline passed in every candidate, at the default tolerance of 25 ms | see below |
+
+The single `obligation` signature is worth stating precisely because it is the
+only *liveness* finding: in one run, after several `time` steps, the
+acknowledgment deadline of a packet number space passed in every candidate with
+no ACK having been written.  It is **not** a conformance claim against ngtcp2:
+the driver only writes when a `write` or `drain` step calls the writer, and that
+run had none after the last `time`, so an endpoint that behaves perfectly still
+looks late.  It shows the check works, not that ngtcp2 is late.  A driver that
+drained after every clock step would turn this into a real test.
+
+## What this run did *not* test
+
+Unchanged from PLAN §4a: the handshake proper, transport parameters, Retry,
+stateless reset, migration and second paths, receive-side coalescing (the driver
+puts one packet per datagram), application close, and anything needing the stub
+AEAD to fail (`WP13-5`).  Added by this run: `Stream.Send`'s "Data Sent" and
+"Data Recvd" phases, which need `WP13-6`'s missing wiring to be reachable, and
+everything downstream of a stream ID above `DIFF_MAX_STREAM_INDEX` (`WP13-7`).

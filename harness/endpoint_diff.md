@@ -282,8 +282,23 @@ Before every received packet the harness therefore reads the plaintext frames
 stream index they name.  Above `DIFF_MAX_STREAM_INDEX` the step is skipped and
 tracking for that run stops: the model could not be advanced past the packet, so
 comparing the rest of the run would produce false mismatches.  Skipped steps are
-counted and reported.  In a 2041-input replay this costs about 0.7 % of steps.
+counted and reported; in the ten-minute run they are 1.8 % of steps.
 `TRIAGE.md` `WP13-7` has the finding.
+
+Two further guards, both for comparisons the harness cannot make honestly rather
+than for comparisons it does not like:
+
+* a written packet whose payload `Quic.decodeFrames` cannot parse to its last
+  byte is not offered to the send-side predicates.  It used to happen whenever
+  the peer had made ngtcp2 switch to a connection ID that is not 8 bytes long
+  (`TRIAGE.md` `WP13-15`); since both `conn_driver.h` and `parse_out` now take
+  the length from `conn->dcid.current.cid.datalen` it no longer happens at all,
+  and the guard stays as a check on that;
+* once **every** candidate is in the closing, draining or closed phase while
+  ngtcp2 is still running, the two have diverged irrecoverably (a closed
+  endpoint processes nothing and sends nothing), so the run is abandoned and
+  counted instead of producing a hundred consequences of one divergence.
+  `TRIAGE.md` `WP13-12`.
 
 The candidate set is capped at `DIFF_MAX_CANDS` (12).  `quic_h_advance_all` is
 `trackSet`, so duplicates collapse first, and the cap keeps the *head* of
