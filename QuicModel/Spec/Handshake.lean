@@ -723,6 +723,50 @@ example : component.track cli1 (.recvHeader .initial C1 S2) .drop = some cli1 :=
 example : component.trackSet [cli0] (.recvHeader .handshake C1 S3) (Obs.ok []).matchesLoosely
     = [cli0] := by decide
 
+/-! ### §7.1, Figure 5 (line 2257): the 1-RTT handshake at the client
+
+`Initial[0]: CRYPTO[CH] ->`, `<- Initial[0]: CRYPTO[SH]`,
+`<- Handshake[0]: CRYPTO[EE, CERT, CV, FIN]`, `Handshake[0]: CRYPTO[FIN] ->`,
+`<- 1-RTT[1]: HANDSHAKE_DONE`.  Only the events this component sees are
+replayed; the packet numbers and the ACKs are WP3's.  The byte counts are tiny
+so that `decide` stays small — nothing in the rules depends on them. -/
+
+/-- Run a list of events through the reference implementation. -/
+private def run (s : State) : List Event → State
+  | [] => s
+  | e :: es => run ((component.step s e).next s) es
+
+private def fig5 : List Event :=
+  [ .tlsSend .initial 3,                -- TLS hands over the ClientHello
+    .sentPacket .initial,                -- Initial[0]: CRYPTO[CH] ->
+    .recvHeader .initial C1 S3,          -- <- Initial[0]: CRYPTO[SH]
+    .recvCrypto .initial 0 3,
+    .tlsKeys .read .handshake, .tlsKeys .write .handshake,
+    .recvHeader .handshake C1 S3,        -- <- Handshake[0]: CRYPTO[EE, CERT, CV, FIN]
+    .recvCrypto .handshake 0 5,
+    .tlsSend .handshake 4,
+    .sentPacket .handshake,              -- Handshake[0]: CRYPTO[FIN] ->
+    .tlsComplete,
+    .tlsKeys .read .oneRtt, .tlsKeys .write .oneRtt,
+    .recvHeader .oneRtt C1 [],           -- <- 1-RTT[1]: HANDSHAKE_DONE
+    .recvHandshakeDone ]
+
+private def fig5End : State := run cli0 fig5
+
+-- The client adopted the server's connection ID once and once only (§7.2),
+-- gave TLS every CRYPTO byte in order (§7), discarded its Initial keys when
+-- it sent its first Handshake packet (§17.2.2.1) and is now confirmed (§19.20).
+example : fig5End.dcidSent = some S3 ∧ fig5End.dcidChanges = 1 := by decide
+example : (fig5End.stream .initial).delivered = 3 := by decide
+example : (fig5End.stream .handshake).delivered = 5 := by decide
+example : fig5End.write.get .initial = .discarded ∧ fig5End.read.get .initial = .discarded := by
+  decide
+example : fig5End.complete = true ∧ fig5End.confirmed = true := by decide
+-- An Initial packet arriving after that is dropped, and stays dropped.
+example : component.step fig5End (.recvHeader .initial C1 S3) = .drop := by decide
+-- The client still may not send HANDSHAKE_DONE itself (§19.20, line 8207).
+example : component.maySend fig5End .handshakeDone = false := by decide
+
 end Examples
 
 /-! ## 10. Coverage and notes
