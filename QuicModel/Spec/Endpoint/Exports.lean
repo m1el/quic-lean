@@ -25,13 +25,24 @@ def harnessProtection : Protection := Protection.stub 16
 
 `harness/conn_trace.c` prints one `CB <name> <k=v>…` line per application
 callback ngtcp2 fired; those are the model's effects.  `cbName` is the mapping,
-and `none` means "ngtcp2 does not surface this": the model's `keysDiscarded`,
-`peerParams`, `cryptoDiscarding`, `dcidChanged`, `addressValidated`,
-`handshakeProceeds`, `queueRetire`, `switchPath`, `deliver`, `sendPending`,
-`skippedRest` and the `Termination` send effects are all model-level signals or
-things that appear in the trace as `OUT`/`ERR` records rather than as `CB`
-lines.  WP13 must *ignore* those when comparing, not treat them as mismatches
-(the full table is in the NOTES of `QuicModel/Spec/Endpoint.lean`). -/
+and `none` means "do not compare this".  For most of them that is because
+ngtcp2 does not surface them at all: `keysDiscarded`, `peerParams`,
+`cryptoDiscarding`, `dcidChanged`, `addressValidated`, `handshakeProceeds`,
+`queueRetire`, `switchPath`, `deliver`, `sendPending`, `skippedRest` and the
+`Termination` send effects are model-level signals, or things that appear in the
+trace as `OUT`/`ERR` records rather than as `CB` lines.
+
+Three are `none` for a second reason, and it is not the same one: the `Stream`
+*request* effects `stopSendingRequested`, `resetRequested` and `resetAcked` do
+have ngtcp2 counterparts (`stream_stop_sending` is printed by
+`harness/conn_trace.c`), but ngtcp2 fires them when the frame is **written**,
+whereas the model produces them when the *application* asks — one event earlier,
+and the model has no effect-producing step at the later moment.  Equating them
+would compare two different points of the trace, so they stay `none` and WP13
+must ignore ngtcp2's `stream_stop_sending` line.  See `TRIAGE.md` `WP13-2`.
+
+WP13 must *ignore* everything `cbName` maps to `none`, not treat it as a
+mismatch; the full table is in §4b of `QuicModel/Spec/Endpoint.lean`. -/
 
 def streamEffectName : Stream.Effect → Option String
   | .recv (.dataAvailable _) => some "recv_stream_data"

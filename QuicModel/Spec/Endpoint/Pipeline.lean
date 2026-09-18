@@ -31,9 +31,11 @@ import QuicModel.Spec.Endpoint.Dispatch
   6. after the datagram: §10.1 line 3841's idle-timer restart, which the text
      conditions on the packet having been "received and processed successfully".
 
-  §12.2, line 4622: "if the packet cannot be processed, an endpoint MUST discard
-  the remainder of the datagram" — an undecryptable packet ends the loop and
-  leaves `Effect.skippedRest` behind.
+  §12.2, line 4619: "The receiver of coalesced QUIC packets MUST individually
+  process each QUIC packet and separately acknowledge them … if decryption fails
+  …, the receiver MAY either discard or buffer the packet for later processing
+  and MUST attempt to process the remaining packets" — an undecryptable packet
+  leaves `Effect.skippedRest` behind and the loop goes on to the next one.
 -/
 namespace Quic.Spec.Endpoint
 
@@ -140,17 +142,24 @@ def dcidSeqOf (s : State) (d : ByteArray) : Nat :=
 /-! ## 2c. What a packet that cannot be parsed means
 
 §5.2, line 1878: "Invalid packets that lack strong integrity protection, such as
-Initial, Retry, or Version Negotiation, MAY be discarded."  §12.2, line 4622:
-"if the packet cannot be processed, an endpoint MUST discard the remainder of
-the datagram."  §17.2, line 6183 / §17.3.1: a clear fixed bit MUST be discarded.
-§17.2 reserved bits and §12.4 line 4740's empty payload are PROTOCOL_VIOLATION;
-a frame that will not parse is FRAME_ENCODING_ERROR (§12.4, line 4933). -/
+Initial, Retry, or Version Negotiation, MAY be discarded."  §17.2, line 6095 and
+§17.3.1, line 6744: "Packets containing a zero value for this bit are not valid
+packets in this version and MUST be discarded."  §17.2 line 6193 / §17.3.1
+line 6755's reserved bits and §12.4 line 4740's empty payload are
+PROTOCOL_VIOLATION; a frame that will not parse is FRAME_ENCODING_ERROR (§12.4,
+line 4933).
+
+Where the failing packet's extent is *not* known — the header did not parse, or
+its Length field runs past the datagram — there is nothing left to look at, so
+the datagram ends here.  Where it is known, `recvPackets` does not call this
+function for `.decryptFailed`: §12.2, line 4619 requires the remaining packets
+to be attempted. -/
 
 def packetErrOutcomes (s : State) (isInitial : Bool) : PacketErr → List Out
-  -- these leave the rest of the datagram unread (§12.2, line 4622)
+  -- nothing more of the datagram can be located, so it ends here
   | .header _ | .lengthExceedsDatagram | .tooShortForSample | .decryptFailed
   | .fixedBitClear | .badVersionList | .badRetry => [.ok s [.skippedRest]]
-  -- §17.2, line 6191 / §17.3.1, line 6297: reserved bits set.  §11.1, line 4485
+  -- §17.2, line 6193 / §17.3.1, line 6755: reserved bits set.  §11.1, line 4485
   -- adds the MAY-discard for an Initial packet.
   | .reservedBits =>
     if isInitial then [.error .protocolViolation, .drop] else [.error .protocolViolation]
@@ -550,9 +559,22 @@ theorem processPacket_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration.
 
 /-! ## 2g. The coalesced packets of one datagram
 
-§12.2, line 4614: "A sender can coalesce multiple QUIC packets … into one UDP
-datagram."  Line 4622: "if the packet cannot be processed, an endpoint MUST
-discard the remainder of the datagram." -/
+§12.2, line 4597: "Using the Length field, a sender can coalesce multiple QUIC
+packets into one UDP datagram."  Line 4606: "Coalescing packets in order of
+increasing encryption
+levels … makes it more likely the receiver will be able to process all the
+packets in a single pass."  Line 4619: "The receiver of coalesced QUIC packets
+MUST individually process each QUIC packet and separately acknowledge them, as
+if they were received as the payload of different UDP datagrams.  For example,
+if decryption fails (because the keys are not available or any other reason),
+the receiver MAY either discard or buffer the packet for later processing and
+MUST attempt to process the remaining packets."
+
+That last sentence is why a packet whose protection cannot be removed does *not*
+end the loop: the failing packet is skipped (`Effect.skippedRest`) and the
+packets after it are still processed.  The loop can only stop where the text's
+"attempt" is impossible, i.e. where the packet's extent is unknown because its
+header did not parse. -/
 
 /-- Does the packet at `pos` look like an Initial?  §11.1, line 4485's
     MAY-discard is only for those. -/
@@ -561,6 +583,21 @@ def initialAt (s : State) (buf : ByteArray) (pos : Nat) : Bool :=
   | .ok (hd, _) => hdrPtype hd == .initial
   | .error _ => false
 
+/-- Where the packet at `pos` ends, when its header parsed but the packet could
+    not be processed.  A long header carries its own Length field (§17.2); a
+    short header has none, so it "can only be the last packet included in a UDP
+    datagram" (§12.2, line 4606) and runs to the end.  `none` when the header
+    did not parse or the Length runs past the datagram — there is nothing left
+    to attempt in either case. -/
+def packetEndOf (s : State) (buf : ByteArray) (pos : Nat) : Option Nat :=
+  match Quic.decodeHeader buf s.shortDcidLen pos with
+  | .error _ => none
+  | .ok (hd, pnOff) =>
+    match hd with
+    | .long _ _ _ _ _ _ length =>
+      if pnOff + length ≤ buf.size then some (pnOff + length) else none
+    | _ => some buf.size
+
 def recvPackets (prot : Protection) (now : Time) (mp : Migration.Path) (av : Bool)
     (ver : Option Nat) (buf : ByteArray) : Nat → Nat → State → List Out
   | 0, _, s => keep s
@@ -568,6 +605,15 @@ def recvPackets (prot : Protection) (now : Time) (mp : Migration.Path) (av : Boo
     if buf.size ≤ pos then keep s
     else
       match parseOne prot s buf pos with
+      -- §12.2, line 4619: decryption failing on one coalesced packet MUST NOT
+      -- stop the remaining ones being processed.
+      | .error .decryptFailed =>
+        match packetEndOf s buf pos with
+        | some next =>
+          if next ≤ pos then packetErrOutcomes s (initialAt s buf pos) .decryptFailed
+          else bindAll [.ok s [Effect.skippedRest]]
+                 (recvPackets prot now mp av ver buf fuel next)
+        | none => packetErrOutcomes s (initialAt s buf pos) .decryptFailed
       | .error e => packetErrOutcomes s (initialAt s buf pos) e
       | .ok (pkt, next) =>
         if next ≤ pos then keep s
@@ -584,6 +630,11 @@ theorem recvPackets_ne (prot : Protection) (now : Time) (mp : Migration.Path) (a
     split
     · exact keep_ne _
     · split
+      · split
+        · split
+          · exact packetErrOutcomes_ne _ _ _
+          · exact bindAll_ne (by simp) (fun _ => ih _ _)
+        · exact packetErrOutcomes_ne _ _ _
       · exact packetErrOutcomes_ne _ _ _
       · split
         · exact keep_ne _
@@ -599,6 +650,11 @@ theorem recvPackets_inv (prot : Protection) (now : Time) (mp : Migration.Path) (
     split
     · exact keep_inv hs
     · split
+      · split
+        · split
+          · exact packetErrOutcomes_inv hs _ _
+          · exact invOk_bindAll (InvOk.ok hs) (fun _ h => ih _ h)
+        · exact packetErrOutcomes_inv hs _ _
       · exact packetErrOutcomes_inv hs _ _
       · split
         · exact keep_inv hs

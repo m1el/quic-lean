@@ -121,7 +121,7 @@ merged.
 
 | WP | Content |
 |---|---|
-| 12 Endpoint (layers 0–5 merged, c785e51; examples layer and final report missing — agent cut off by the rate limit) | `Endpoint.State` as the product of component states; `recv`: datagram → `decodePacket` → frame legality → dispatch to components → merge outcomes; `MaySend` for a whole packet as the conjunction of component predicates; top-level theorems lifted from components |
+| 12 Endpoint (merged: layers 0–5 c785e51, examples + report 63a2d2d) | `Endpoint.State` as the product of component states; `recv`: datagram → `decodePacket` → frame legality → dispatch to components → merge outcomes; `MaySend` for a whole packet as the conjunction of component predicates; top-level theorems lifted from components |
 | 13 DiffHarness | export `Endpoint.accepts` / `maySend`; join with WP8's trace: every ngtcp2 outcome must be accepted, every ngtcp2 packet must satisfy `maySend`; seed corpus; triage doc for mismatches |
 
 ### Wave 2b (added after the transport audit)
@@ -267,6 +267,27 @@ Ruling on citations: the line where the sentence's first word appears, even when
 
 Both WP10 theorems reported false as written were confirmed against the text
 by the reviewer (reachable, conformant counterexamples).
+
+## 4f. WP12 outcome
+
+- Composition layer merged and documented (`QuicModel/Spec/Endpoint.lean` module
+  doc is the report: merge rule, `.drop`/`ok []` conflict table, 30-row table of
+  MUSTs other packages deferred to WP12, the 13 event families the harness must
+  synthesise, the effect→callback table).
+- All eight `harness/scripts` scenarios and §7.1 Figure 5 replay through
+  `Endpoint.step`/`accepts` and agree with the recorded ngtcp2 traces.
+- Defect found and fixed in the composition (TRIAGE WP13-5): `recvPackets`
+  stopped at the first undecryptable coalesced packet, citing a sentence that is
+  not in the draft; §12.2 line 4619 requires attempting the remaining packets.
+  ngtcp2 also stops → triage entry.
+- Known gap: §5.2.2 line 1936's CONNECTION_REFUSED is not modelled — refusal is
+  a connection-*acceptance* decision and `Endpoint` models an established
+  connection; needs an `Event.accept` above `Endpoint` (open decision).
+- Wire-layer assertions in `Examples.lean` use `#guard` (build-time evaluation,
+  no axiom) because `decodeFrames`/`Array.all` are well-founded and `decide`
+  gets stuck; a structurally recursive `ByteArray.all` in `Basic.lean` would
+  unlock `decide` there (open, low priority).
+- `TRIAGE.md` started (WP13-1..5).
 
 ## 5. Risks
 
