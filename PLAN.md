@@ -259,8 +259,8 @@ forbidden behaviour. All accepted.
 | S-2 STREAM_STATE_ERROR mandated for all five frames on an uncreated local *bidirectional* stream; S-3, S-4 coverage; S-5 `MaySend` false on non-existent streams (WP13 must synthesise `appOpenStream`); S-6 ~20 wrong citations incl. four error-code rules | WP9 fix run | merged |
 | M-1 HIGH a retired connection ID may be reused from a second local address (`dcidOn` overwritten; §9.5 line 3603) | WP10 fix run | merged (5c3d76e) |
 | M-2 send rules read the state's send context instead of `OutDatagram.src/dest/dcid/scid`; M-3 `recvCase` narrows §9.3 line 3379; M-4 citations; witness for the theorem-(c) counterexample should be the reachable route | WP10 fix run | merged; M-4 finished by the lead (e5008f1, 23 corrections, 0 mismatches); the theorem-(c) witness is now a proved reachable route (`cliTwoPeers_reachable`) |
-| K-1 fold Handshake's `SendHeader` into `MaySendDatagram` (now expressible); K-3, K-4, K-5 | WP11 fix run | running |
-| K-2 `recvHeader` only after successful unprotection is a hard requirement | WP12 | in the WP12 brief |
+| K-1 fold Handshake's `SendHeader` into `MaySendDatagram` (now expressible); K-3, K-4, K-5 | WP11 fix run | merged; `Endpoint.MaySendDatagram` gained the `HandshakeHeaderOk` conjunct (peer-issued CIDs from ConnIds.Remote, all entries) |
+| K-2 `recvHeader` only after successful unprotection is a hard requirement | WP12 | documented and exampled in Handshake NOTE 10; the pipeline's callers must honour it (to verify in WP12's examples/report) |
 | Three copies of "handshake confirmed"; `.drop` precedence for Migration's MUST-discards; events WP13 must synthesise | WP12 / WP13 | recorded |
 
 Ruling on citations: the line where the sentence's first word appears, even when it dangles at the end of a line (BRIEF). `Spec/Stream*` (WP2) used "the line with the operative words" in a few places; to be normalised in a later sweep (LOW).
