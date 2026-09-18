@@ -83,7 +83,7 @@
  *   ./out/endpoint_diff corpus/conn_trace -max_total_time=600
  *   DIFF_SHOW=1 ./out/endpoint_diff some_input     # print the trace as well
  *   DIFF_ACK_TOLERANCE=<us>                        # obligation slack, default 25000
- *   DIFF_MAX_CANDS=<n>                             # candidate cap, default 48
+ *   DIFF_MAX_CANDS=<n>                             # candidate cap, default 12
  */
 #include "diff_common.h"
 
@@ -180,6 +180,10 @@ extern lean_object *quic_h_out_packet(uint8_t ptype, lean_object *fs);
 extern uint8_t quic_h_ack_eliciting(lean_object *fs);
 extern lean_object *quic_h_frames_dump(lean_object *fs);
 extern lean_object *quic_h_presend_actions(lean_object *fs);
+extern lean_object *quic_h_advance_all(lean_object *ss, lean_object *e, uint8_t only_ok,
+                                       uint64_t cap);
+extern uint64_t quic_h_states_length(lean_object *ss);
+extern uint64_t quic_h_frames_max_stream_index(lean_object *fs);
 extern uint64_t quic_h_actions_length(lean_object *as);
 extern lean_object *quic_h_actions_get(lean_object *as, uint64_t i);
 
@@ -328,6 +332,7 @@ typedef struct {
   int alive;
   uint64_t tolerance;
   int max_cands;
+  uint64_t max_stream_index;
   int64_t out_max_pn[3];
 } mstate;
 
@@ -510,13 +515,13 @@ static void report_candidates(sbuf *sb, mstate *m, const evspec *e) {
 }
 
 /* One mismatch: dedup, print once, save the input. */
-static void report(harness *h, mstate *m, const char *kind, const char *detail,
-                   const evspec *e) {
+static void report(harness *h, mstate *m, const char *kind, const char *sigkey,
+                   const char *detail, const evspec *e) {
   char key[1024];
   sbuf sb = {0};
   uint64_t sig;
 
-  snprintf(key, sizeof(key), "%s|%s", kind, detail);
+  snprintf(key, sizeof(key), "%s|%s", kind, sigkey);
   sig = fnv(key);
   if (!mm_seen(sig)) return;
 
@@ -544,35 +549,14 @@ static void report(harness *h, mstate *m, const char *kind, const char *detail,
 
 /* Every permitted successor of every candidate, as the resynchronisation after
    a mismatch and as the way a synthesised event (one ngtcp2 never reports) is
-   applied.  |only_ok| drops the outcomes that are connection errors. */
+   applied.  `quic_h_advance_all` is `trackSet` with a pattern that accepts
+   everything, so duplicate states collapse -- which matters: without it the
+   candidate set doubles at every branch and the run exhausts memory.
+   |only_ok| drops the outcomes that are connection errors. */
 static lean_object *advance_all(mstate *m, const evspec *e, int only_ok) {
-  lean_object *out = l_nil(), **tailp = &out;
-  lean_object *p = m->cands;
-
-  while (!lean_is_scalar(p)) {
-    lean_object *s = l_head(p);
-    lean_object *os = ev_outcomes(e, s), *q = os;
-    while (!lean_is_scalar(q)) {
-      lean_object *o = l_head(q);
-      lean_object *c;
-      uint64_t err;
-      lean_inc(o);
-      err = quic_endpoint_outcome_error(o);
-      if (!only_ok || err == 0xffffffffULL) {
-        lean_inc(s);
-        lean_inc(o);
-        c = lean_alloc_ctor(1, 2, 0);
-        lean_ctor_set(c, 0, quic_endpoint_outcome_state(s, o));
-        lean_ctor_set(c, 1, l_nil());
-        *tailp = c;
-        tailp = (lean_object **)lean_ctor_obj_cptr(c) + 1;
-      }
-      q = l_tail(q);
-    }
-    lean_dec(os);
-    p = l_tail(p);
-  }
-  return l_take(out, m->max_cands);
+  lean_inc(m->cands);
+  return quic_h_advance_all(m->cands, ev_build(e), (uint8_t)(only_ok != 0),
+                            (uint64_t)m->max_cands);
 }
 
 static void set_cands(mstate *m, lean_object *next) {
@@ -588,7 +572,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
                        lean_object *cbs, const char *cbtext, const char *what) {
   mstate *m = M(h);
   lean_object *next;
-  char detail[768];
+  char detail[768], sigkey[512];
 
   if (!m || !m->alive) {
     if (cbs) lean_dec(cbs);
@@ -613,13 +597,16 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
   lean_dec(next);
 
   /* The candidate set is empty: nothing the spec permits looks like this. */
-  if (is_error)
+  if (is_error) {
     snprintf(detail, sizeof(detail), "%s -> ERR code=%" PRIu64 " [%s]", what, code,
              cbtext);
-  else
+    snprintf(sigkey, sizeof(sigkey), "%s|ERR=%" PRIu64, e->name, code);
+  } else {
     snprintf(detail, sizeof(detail), "%s -> OK cbs=[%s]", what, cbtext);
+    snprintf(sigkey, sizeof(sigkey), "%s|OK|%.300s", e->name, cbtext);
+  }
 
-  report(h, m, "outcome", detail, e);
+  report(h, m, "outcome", sigkey, detail, e);
   /* resynchronise so the rest of the run still tests something */
   set_cands(m, advance_all(m, e, 0));
 }
@@ -638,7 +625,7 @@ static void synth_step(harness *h, const evspec *e) {
     lean_dec(next);
     snprintf(detail, sizeof(detail), "synthesised %s is a connection error in the model",
              e->name ? e->name : "?");
-    report(h, m, "synth", detail, e);
+    report(h, m, "synth", e->name ? e->name : "?", detail, e);
     set_cands(m, advance_all(m, e, 0)); /* keep going with the error states */
     return;
   }
@@ -675,10 +662,13 @@ static void md_start(harness *h, int server) {
   m->server = server;
   m->alive = 1;
   m->tolerance = CFG_MAX_ACK_DELAY;
-  m->max_cands = 48;
+  m->max_cands = 12;
+  m->max_stream_index = 1u << 14;
   m->out_max_pn[0] = m->out_max_pn[1] = m->out_max_pn[2] = -1;
   env = getenv("DIFF_ACK_TOLERANCE");
   if (env) m->tolerance = strtoull(env, NULL, 10);
+  env = getenv("DIFF_MAX_STREAM_INDEX");
+  if (env) m->max_stream_index = strtoull(env, NULL, 10);
   env = getenv("DIFF_MAX_CANDS");
   if (env) {
     m->max_cands = atoi(env);
@@ -708,6 +698,31 @@ static void md_start(harness *h, int server) {
   e.name = "tlsComplete";
   synth_step(h, &e);
   lean_dec(e.arg);
+
+  /* §8.1, line 2757: "the successful use of Handshake packets indicates that
+     ... the peer's address is validated".  conn_driver.h forces ngtcp2 into
+     NGTCP2_CS_POST_HANDSHAKE and marks the path validated, which can only have
+     happened by Handshake packets having been exchanged; the model has no
+     event by which the harness could simply assert the fact, so the harness
+     replays the packet instead: one Handshake packet carrying PADDING only.
+     PADDING is not ack-eliciting (§13.2, line 5018), so this leaves no
+     acknowledgment obligation behind, and the datagram's bytes count towards
+     the anti-amplification budget exactly as the real one would have. */
+  {
+    static const uint8_t padding_frame[1] = {0x00};
+    uint8_t pkt[PKTBUF];
+    ngtcp2_ssize n = build_peer_pkt(1, 0, padding_frame, sizeof(padding_frame), pkt,
+                                    sizeof(pkt));
+    if (n > 0) {
+      evspec d;
+      d.kind = EV_DATAGRAM;
+      d.arg = model_bytes(pkt, (size_t)n);
+      d.now = 0;
+      d.name = "handshake packet (synthesised)";
+      synth_step(h, &d);
+      lean_dec(d.arg);
+    }
+  }
 }
 
 static void md_finish(harness *h) {
@@ -741,6 +756,25 @@ static void md_recv(harness *h, const uint8_t *pkt, size_t len, int rv) {
   sbuf cbtext = {0};
 
   if (!m || !m->alive) return;
+
+  /* `StreamTable.openedEffects` is linear in the stream index, so a frame that
+     names stream 2^60 makes the executable `outcomes` unevaluable.  ngtcp2
+     answers STREAM_LIMIT in constant time; the harness skips the comparison
+     rather than the whole run.  g_build_plain is the plaintext conn_driver's
+     builder encrypted, so this is the packet's own frame list. */
+  {
+    lean_object *fs = quic_h_frames_of_bytes(
+        model_bytes(g_build_plain, g_build_plainlen));
+    uint64_t idx;
+    lean_inc(fs);
+    idx = quic_h_frames_max_stream_index(fs);
+    lean_dec(fs);
+    if (idx > m->max_stream_index) {
+      ++g_steps_skipped;
+      return;
+    }
+  }
+
   is_err = obs_error(rv, &code);
   e.kind = EV_DATAGRAM;
   e.arg = model_bytes(pkt, len);
@@ -821,7 +855,7 @@ static void app_step(harness *h, lean_object *action, const char *name, int ok) 
     if (!permits) {
       snprintf(detail, sizeof(detail), "ngtcp2 performed %s; the model permits only drop/error",
                name);
-      report(h, m, "app", detail, &e);
+      report(h, m, "app", name, detail, &e);
     }
   }
   synth_step(h, &e);
@@ -993,14 +1027,30 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   lean_dec(packets);
 
   if (!allowed) {
-    char detail[1024];
+    char detail[1024], sigkey[512];
     lean_object *d;
+    const char *dump;
+    size_t k = 0;
     lean_inc(ps[0].frames);
     d = quic_h_frames_dump(ps[0].frames);
+    dump = lean_string_cstr(d);
+    /* the signature is the frame *kinds*, so that a thousand STREAM frames
+       differing only in offset are one entry in the triage list */
+    {
+      const char *q = dump;
+      sigkey[0] = 0;
+      while (*q && k + 32 < sizeof(sigkey)) {
+        const char *w = q;
+        while (*q && *q != ' ' && *q != ';') ++q;
+        k += (size_t)snprintf(sigkey + k, sizeof(sigkey) - k, "%.*s,", (int)(q - w), w);
+        while (*q && *q != ';') ++q;
+        if (*q == ';') q += 2;
+      }
+    }
     snprintf(detail, sizeof(detail), "OUT len=%zu packets=%d first=[%.700s]", len, np,
-             lean_string_cstr(d));
+             dump);
     lean_dec(d);
-    report(h, m, "maysend", detail, NULL);
+    report(h, m, "maysend", sigkey, detail, NULL);
   }
 
   /* The bookkeeping the components need once a frame really travelled. */
@@ -1066,7 +1116,7 @@ static void md_tick(harness *h) {
              "acknowledgment overdue in every candidate at now=%" PRIu64
              " (tolerance %" PRIu64 ")",
              (uint64_t)h->ts, m->tolerance);
-    report(h, m, "obligation", detail, NULL);
+    report(h, m, "obligation", "ack overdue", detail, NULL);
     /* report once per run: otherwise every later TIME repeats it */
     m->tolerance = UINT64_MAX;
   }

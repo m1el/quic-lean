@@ -241,6 +241,53 @@ def outPacket (ptype : UInt8) (fs : List Frame) : OutPacket := ⟨ptypeOf ptype,
 @[export quic_h_ack_eliciting]
 def ackEliciting (fs : List Frame) : UInt8 := if FrameRules.packetAckEliciting fs then 1 else 0
 
+/-! ## Following the endpoint through an event ngtcp2 does not report on
+
+`quic_endpoint_track_trace` is the narrowing step: it keeps the candidates whose
+observation matches what ngtcp2 showed.  A *synthesised* event — one the harness
+fires because ngtcp2 took the decision internally (a TLS key install, a frame
+going on the wire, a connection ID being issued) — has no observation, so every
+permitted successor survives.  That is `trackSet` with a pattern that accepts
+everything, which is worth having as an export rather than as a C loop for two
+reasons: `trackSet` removes duplicate states (a C loop cannot, `State` has no
+comparison the harness can reach), and one call replaces one call per candidate.
+
+`onlyOk` drops the outcomes that are connection errors; `cap` bounds the set. -/
+
+@[export quic_h_advance_all]
+def advanceAll (ss : List State) (e : Event) (onlyOk : UInt8) (cap : UInt64) :
+    List State :=
+  ((component harnessProtection).trackSet ss e
+    (fun ob => if onlyOk != 0 then
+        (match ob with | .error _ => false | _ => true)
+      else true)).take cap.toNat
+
+@[export quic_h_states_length]
+def statesLength (ss : List State) : UInt64 := ss.length.toUInt64
+
+/-! ## A tractability guard for the harness
+
+`StreamTable.openedEffects` (§2.1, line 718: one `streamOpened` per stream that
+opening this one creates) is `List.range'` over the stream *index*, so the
+executable `outcomes` allocates in proportion to the stream ID a frame names —
+even on the branch that answers STREAM_LIMIT_ERROR, because that branch still
+evaluates the delegated outcomes to filter the errors out of them.  A frame
+naming stream 2^60 therefore makes `outcomes` unevaluable, while ngtcp2 answers
+STREAM_LIMIT in constant time.  The harness looks at the frames first and skips
+the comparison rather than running out of memory; the skip is counted and
+reported, and the case is in TRIAGE.md. -/
+
+@[export quic_h_frames_max_stream_index]
+def framesMaxStreamIndex (fs : List Frame) : UInt64 :=
+  (fs.foldl (fun (m : Nat) (f : Frame) =>
+      match f with
+      | .stream id _ _ _ => max m (StreamId.index ⟨id⟩)
+      | .resetStream id _ _ => max m (StreamId.index ⟨id⟩)
+      | .stopSending id _ => max m (StreamId.index ⟨id⟩)
+      | .maxStreamData id _ => max m (StreamId.index ⟨id⟩)
+      | .streamDataBlocked id _ => max m (StreamId.index ⟨id⟩)
+      | _ => m) 0).toUInt64
+
 /-! ## Rendering, for the mismatch reports -/
 
 @[export quic_h_frame_dump]
