@@ -113,15 +113,15 @@ merged.
 
 | WP | Content | Text | Needs |
 |---|---|---|---|
-| 9 StreamTable | stream creation incl. implicit opening of lower-numbered streams, stream-count limits, connection-level flow control, composition of WP2 instances | 1293–1460, 1527–1576 | 2 |
-| 10 Migration | probing, initiating and responding to migration, preferred address, CID use on new paths | 3272–3812 | 4, 5 |
-| 11 Handshake | TLS as an event source (`keysAvailable`, `handshakeBytes`, `complete`, `confirmed`); CRYPTO stream per space; CID authentication via transport parameters; key discard; 0-RTT accept/reject | 2157–2505, 2696–2723 | 1, 3, 4 |
+| 9 StreamTable (merged) | stream creation incl. implicit opening of lower-numbered streams, stream-count limits, connection-level flow control, composition of WP2 instances | 1293–1460, 1527–1576 | 2 |
+| 10 Migration (merged) | probing, initiating and responding to migration, preferred address, CID use on new paths | 3272–3812 | 4, 5 |
+| 11 Handshake (merged) | TLS as an event source (`keysAvailable`, `handshakeBytes`, `complete`, `confirmed`); CRYPTO stream per space; CID authentication via transport parameters; key discard; 0-RTT accept/reject | 2157–2505, 2696–2723 | 1, 3, 4 |
 
 ### Wave 3 (two agents; need everything)
 
 | WP | Content |
 |---|---|
-| 12 Endpoint | `Endpoint.State` as the product of component states; `recv`: datagram → `decodePacket` → frame legality → dispatch to components → merge outcomes; `MaySend` for a whole packet as the conjunction of component predicates; top-level theorems lifted from components |
+| 12 Endpoint (running) | `Endpoint.State` as the product of component states; `recv`: datagram → `decodePacket` → frame legality → dispatch to components → merge outcomes; `MaySend` for a whole packet as the conjunction of component predicates; top-level theorems lifted from components |
 | 13 DiffHarness | export `Endpoint.accepts` / `maySend`; join with WP8's trace: every ngtcp2 outcome must be accepted, every ngtcp2 packet must satisfy `maySend`; seed corpus; triage doc for mismatches |
 
 ### Wave 2b (added after the transport audit)
