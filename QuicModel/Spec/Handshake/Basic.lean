@@ -156,7 +156,7 @@ structure State where
       first Initial packet we sent; §7.3, line 2399 requires it to be reported
       in `initial_source_connection_id`. -/
   localScid : Cid := []
-  /-- §7.2, line 2333: the value we currently put in the Destination Connection
+  /-- §7.2, line 2332: the value we currently put in the Destination Connection
       ID field of the long-header packets we send.  A server has none until it
       has seen the client's first Initial. -/
   dcidSent : Option Cid := none
@@ -223,9 +223,9 @@ def readKeyFor (s : State) (pt : PacketType) : KeyState :=
   | none => .present
   | some l => s.read.get l
 
-/-- §7.2, line 2333: "each endpoint sets the Destination Connection ID field in
-    subsequent packets it sends to the value of the Source Connection ID field
-    that it received." -/
+/-- §7.2, line 2332: "After processing the first Initial packet, each endpoint
+    sets the Destination Connection ID field in subsequent packets it sends to
+    the value of the Source Connection ID field that it received." -/
 def adoptScid (s : State) (scid : Cid) : State :=
   { s with dcidSent := some scid, peerScid := some scid, sawPeerInitial := true,
            dcidChanges := s.dcidChanges + 1 }

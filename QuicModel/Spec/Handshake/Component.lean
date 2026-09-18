@@ -593,8 +593,9 @@ theorem maySendPacket_iff (s : State) (p : OutPacket) :
 The rules of §7.2 are about the connection ID *fields* of the packets we send.
 `Spec.OutPacket` carries only a packet type and a frame list, but
 `Spec.OutDatagram` carries one `dcid`/`scid` pair — one per datagram, because
-§12.2, line 4610 forbids coalescing packets with different connection IDs — so
-they are the component's `MaySendDatagram`.  `none` on either field means, as
+§12.2, line 4613 says "Senders MUST NOT coalesce QUIC packets with different
+connection IDs into a single UDP datagram" — so they are the component's
+`MaySendDatagram`.  `none` on either field means, as
 `Core` documents, that the rule being checked does not look at them; then this
 rule looks at nothing rather than inventing a value. -/
 
@@ -617,7 +618,7 @@ abbrev PeerCids := Option (List Cid)
 * §7.2, line 2341: "Until a packet is received from the server, the client MUST
   use the same Destination Connection ID value on all packets in this
   connection" — in the first flight, only `dcidSent`;
-* line 2333: after processing the peer's first Initial (and, for a client, after
+* line 2332: after processing the peer's first Initial (and, for a client, after
   a Retry) it is the Source Connection ID received, which is again `dcidSent`:
   `adoptScid`/`adoptRetryScid` are the only things that move it;
 * lines 2380–2382: "Any further changes to the Destination Connection ID are
@@ -637,14 +638,14 @@ theorem dcidAllowed_iff (s : State) (peerCids : PeerCids) (dcid : Cid) :
     dcidAllowed s peerCids dcid = true ↔ DcidAllowed s peerCids dcid := by
   cases peerCids <;> simp [dcidAllowed, DcidAllowed]
 
-/-- §7.2, lines 2333–2382, for one long-header packet we are about to send:
+/-- §7.2, lines 2332–2382, for one long-header packet we are about to send:
 
 * line 2357: "The client populates the Source Connection ID field with a value
   of its choosing" — and keeps it (§17.2.5.2, line 6641: "The client MUST NOT
   change the Source Connection ID");
 * line 2340: "This Destination Connection ID MUST be at least 8 bytes in
   length", of the client's first flight;
-* `DcidAllowed`: lines 2341, 2333 and 2380.
+* `DcidAllowed`: lines 2341, 2332 and 2380.
 
 Line 2361 ("The first flight of 0-RTT packets use the same Destination
 Connection ID and Source Connection ID values as the client's first Initial
