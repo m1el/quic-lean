@@ -938,6 +938,13 @@ static void md_finish(harness *h) {
 static int obs_error(int rv, uint64_t *code) {
   ngtcp2_ccerr ccerr;
   if (rv == 0) return 0;
+  /* Not errors: ngtcp2 uses these to say "the datagram was processed and the
+     connection has entered the closing/draining period" (§10.2).  They fall
+     through ngtcp2_ccerr_set_liberr's switch into
+     ngtcp2_err_infer_quic_transport_error_code, which answers
+     PROTOCOL_VIOLATION for anything it does not recognise, so taking them at
+     face value would compare a phase change with a connection error. */
+  if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) return 0;
   ngtcp2_ccerr_default(&ccerr);
   ngtcp2_ccerr_set_liberr(&ccerr, rv, NULL, 0);
   if (ccerr.type != NGTCP2_CCERR_TYPE_TRANSPORT) return -1;
