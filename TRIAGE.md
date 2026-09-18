@@ -661,3 +661,14 @@ puts one packet per datagram), application close, and anything needing the stub
 AEAD to fail (`WP13-5`).  Added by this run: `Stream.Send`'s "Data Sent" and
 "Data Recvd" phases, which need `WP13-6`'s missing wiring to be reachable, and
 everything downstream of a stream ID above `DIFF_MAX_STREAM_INDEX` (`WP13-7`).
+
+## Re-run after the WP13-13 / WP13-17 fixes (lead, 5 minutes)
+
+`./out/endpoint_diff corpus/conn_trace -max_total_time=300 -max_len=4096`,
+log `out/fuzz/refuzz300.log`: 8 380 runs, 49 318 steps compared, 23 565 send
+checks, no crash or ASan report. **42 distinct mismatch signatures** (was 75 in
+the 10-minute run): 36 `outcome`, **5 `maysend`** (was 26 — the 24 connection-ID
+signatures of WP13-13 are gone), 1 `obligation`. Soft findings: 29 distinct.
+The remaining signatures are the open items WP13-9, WP13-10, WP13-7, WP13-6 and
+the callback-ordering residue; not re-classified here.
+
