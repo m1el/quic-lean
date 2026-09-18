@@ -220,10 +220,10 @@ HIGH and MEDIUM findings, all accepted unless noted:
 
 | Finding | Owner | Status |
 |---|---|---|
-| AV-1 anti-amplification binds a client's first packet | WP5 fix run | running (restarted after the interruption) |
-| PV-1 duplicate/late PATH_RESPONSE accepted as PROTOCOL_VIOLATION | WP5 fix run | running (restarted after the interruption) |
-| AV-2, AV-3 missing MAY-discard / SHOULD-proceed alternatives | WP5 fix run | running (restarted after the interruption) |
-| AV-5 server-side Retry send rules (§17.2.5.1) unmodelled | WP5 fix run | running (restarted after the interruption) |
+| AV-1 anti-amplification binds a client's first packet | WP5 fix run | merged |
+| PV-1 duplicate/late PATH_RESPONSE accepted as PROTOCOL_VIOLATION | WP5 fix run | merged |
+| AV-2, AV-3 missing MAY-discard / SHOULD-proceed alternatives | WP5 fix run | merged |
+| AV-5 server-side Retry send rules (§17.2.5.1) unmodelled | WP5 fix run | merged |
 | T-1 stateless reset size rule drops the "unless" exemption | WP6 fix run | merged (7d0779c) |
 | T-2 idle close mandatory at the exact deadline instant | WP6 fix run | merged (7d0779c) |
 | T-5 `MaySend` in closing stricter than the text (lead's earlier instruction was wrong too) | WP6 fix run | merged (7d0779c) |
@@ -233,6 +233,7 @@ HIGH and MEDIUM findings, all accepted unless noted:
 | VN-1 CID check applied to the §6.2 abandon path | WP7 fix run | merged (5408e38) |
 | T-4 §11 generic error codes | `Core`: `Obs.matchesSpec` | done |
 | `Spec.OutDatagram` lacked destination and probe flag | `Core` | done |
+| `Spec.OutDatagram` has no *local* address, so §8.2.2 line 3183 (PATH_RESPONSE on the path the challenge arrived on) cannot be a field rule; PathValidation and Migration each export a two-state `av → OutDatagram → Prop` rule needing AddressValidation's state | WP12 (decide: add a local address to `OutDatagram`, or conjoin by hand) | recorded |
 | AV-4 CONNECTION_REFUSED (§5.2.2); T-4 second half, §11.1 "MAY discard an invalid Initial even where an error is mandated"; VN-2 "MUST drop under all other circumstances"; T-3 closing-state amplification rules (§10.2.1 lines 3993, 4008); conflicting `.drop` readings between PathValidation and Termination | WP12 | recorded: composition must take the *union* for connection-level refusals and let Termination's phase gate every other component |
 
 ## 4d. Review of Wave 1, batch A (`reviews/wave1-a.md`): disposition
@@ -246,7 +247,7 @@ forbidden behaviour. All accepted.
 | W2-1 RESET_STREAM: FINAL_SIZE_ERROR must also be permitted when both rules fire (ngtcp2 checks final size first); W2-2 MAX_STREAM_DATA after FIN is a SHOULD; W2-3 STREAM_DATA_BLOCKED has no bounds or errors; W2-4 "can safely ignore" made mandatory; W2-5..8 | WP2 fix run | running |
 | W2-6 §13.3 "content of a RESET_STREAM MUST NOT change when sent again" | WP2 fix run (send rule of the stream) and WP14 coverage | queued |
 | W3-1 minimum-packet-number drop (§12.3) not permitted; W3-4 `MaySendPacket` for empty packets and frame/packet-type legality; W3-5/6 coverage | WP3 fix run | merged (4c98db1) |
-| W1-1 duplicate parameters: first-copy-wins also conforms; W1-2 dropped SHOULDs; citation drift | WP1 fix run | queued |
+| W1-1 duplicate parameters: first-copy-wins also conforms; W1-2 dropped SHOULDs; citation drift | WP1 fix run | running |
 | Ruling on `Recommended` vs "advice only" | BRIEF.md | done |
 | Composition notes: `assembling` duplicated in FrameRules and Ack (both needed); `Send.written` means the harness must synthesise `appWrite`; grow-only state vs pruning implementations | WP12 / WP13 | recorded |
 
