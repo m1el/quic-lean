@@ -176,7 +176,7 @@ structure State where
       a client has received a valid Initial packet from the server"). -/
   sawPeerInitial : Bool := false
   /-- How many times `dcidSent` has been set in response to a packet from the
-      peer; §7.2, lines 2379 and 2389 bound it. -/
+      peer; §7.2, lines 2368 and 2376 bound it. -/
   dcidChanges : Nat := 0
   /-- The peer's transport parameters, once WP1 has accepted them and the §7.3
       checks have passed. -/
@@ -282,6 +282,11 @@ inductive Effect where
   | deliverCrypto (lvl : CryptoLevel) (off len : Nat)
   /-- The keys of `lvl` are gone (§17.2.2.1). -/
   | keysDiscarded (lvl : Level)
+  /-- §7.5, line 2716: this level's CRYPTO stream is now being discarded — "that
+      CRYPTO frame and all CRYPTO frames received in the future".  The effect is
+      what tells `Component.track` apart the two outcomes the sentence permits
+      besides closing the connection (see NOTE 16). -/
+  | cryptoDiscarding (lvl : CryptoLevel)
   /-- The peer's transport parameters passed both WP1's checks and §7.3's. -/
   | peerParams (tp : Params)
   | handshakeComplete
@@ -435,7 +440,8 @@ def cryptoOutcomes (s : State) (lvl : CryptoLevel) (off len : Nat) : List Out :=
       -- frames received in the future, or it MAY close the connection with a
       -- CRYPTO_BUFFER_EXCEEDED error code.  Packets containing discarded CRYPTO
       -- frames MUST be acknowledged" — hence `.ok`, not `.drop`.
-      [.ok (s.setStream lvl { s.stream lvl with discarding := true }) [],
+      [.ok (s.setStream lvl { s.stream lvl with discarding := true })
+           [.cryptoDiscarding lvl],
        .ok (s.setStream lvl ((s.stream lvl).recv off len))
            (deliverFx lvl (s.stream lvl) ((s.stream lvl).recv off len)),
        .error .cryptoBufferExceeded]
@@ -599,7 +605,8 @@ inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
   | overflowDiscard {s l o n} (hk : s.read.get l.level ≠ .discarded)
       (h : o + n ≤ maxCryptoOffset) (hd : (s.stream l).discarding = false)
       (hb : s.bufLimit < bufferedBytes ((s.stream l).recv o n).buf) (hc : s.complete = true) :
-      CryptoStep s l o n (.ok (s.setStream l { s.stream l with discarding := true }) [])
+      CryptoStep s l o n (.ok (s.setStream l { s.stream l with discarding := true })
+                             [.cryptoDiscarding l])
 
 /-- WP1's decode and validity checks, then §7.3's connection-ID checks. -/
 inductive ParamStep : State → ByteArray → Out → Prop

@@ -478,7 +478,7 @@ the connection ID *fields* of a packet we send cannot live in `MaySendPacket`.
 They are this predicate instead; see the NOTES for the `Core` change that would
 fold it in. -/
 
-/-- §7.2, lines 2359–2394, for a long-header packet we are about to send:
+/-- §7.2, lines 2333–2383, for a long-header packet we are about to send:
 
 * line 2357: "The client populates the Source Connection ID field with a value
   of its choosing" — and keeps it (§17.2.5.2, line 6641: "The client MUST NOT
@@ -662,7 +662,8 @@ example : component.accepts cliSmall (.recvCrypto .initial 1 9) .drop = false :=
 private def cliSmallDone : State := { cliSmall with complete := true }
 example : component.outcomes cliSmallDone (.recvCrypto .initial 1 9) =
     [.ok (cliSmallDone.setStream .initial
-            { cliSmallDone.stream .initial with discarding := true }) [],
+            { cliSmallDone.stream .initial with discarding := true })
+         [.cryptoDiscarding .initial],
      .ok (cliSmallDone.setStream .initial ((cliSmallDone.stream .initial).recv 1 9)) [],
      .error .cryptoBufferExceeded] := by decide
 -- and once it is discarding, a later frame is acknowledged and ignored, never
@@ -920,7 +921,18 @@ NOTES — ambiguities in the text and the readings encoded
     an event of this component, so expanding shows up as the frame being
     accepted rather than as a change to `bufLimit`.
 
-16. **No SHOULD in the assigned range becomes a `Recommended` clause.**  §7,
+16. **The two `.ok` outcomes past a completed handshake's buffer limit are
+    told apart by an effect.**  §7.5's "discard that CRYPTO frame and all CRYPTO
+    frames received in the future" and NOTE 15's "buffer it anyway" both leave
+    the connection open with nothing delivered, so without an effect they would
+    share the observation `ok []` while leaving the endpoint in different states
+    — the case PLAN §1 says to resolve with a distinguishing effect.
+    `Effect.cryptoDiscarding` is that effect.  Like `keysDiscarded` and
+    `peerParams` it is a model-level signal, not something the ngtcp2 API
+    reports, so a harness that cannot see it uses `trackSet` and carries both
+    candidate states.
+
+17. **No SHOULD in the assigned range becomes a `Recommended` clause.**  §7,
     §7.1–§7.3, §7.5, §17.2.2, §17.2.3, §17.2.4, §19.6 and §19.20 contain exactly
     two SHOULDs, both in §17.2.3 (lines 6467 and 6483).  Neither constrains an
     outcome or a frame this component models — one is about re-sending
