@@ -790,9 +790,13 @@ direction rules of §19.4/§19.5/§19.8/§19.10/§19.13.  §3.1, §3.2, §3.5, �
 §4.4 and §4.5 are covered in `Spec/Stream/Send.lean` and `Spec/Stream/Recv.lean`,
 each of which carries its own coverage table.
 
-Citations name the line on which the quoted text begins.  Where a sentence's
-first word dangles at the end of the previous line, the citation is the line the
-quotation itself starts on (§3.3, lines 1150 and 1157 are the two cases here).
+Citation convention (all §2–§4 numbers were re-derived from the shipped draft
+for this revision, and every quoted citation was checked mechanically): a
+citation names the line carrying the operative words of the cited sentence,
+which is the line the sentence starts on except where its first word or two
+dangle at the end of the previous line — then it is the next line.  §3.3,
+lines 1150 and 1157 are the two cases of that here; the §19 citations, which the
+Wave 1 review verified unchanged, follow the same rule.
 
 | Text (line) | Sentence | Encoded as |
 |---|---|---|

@@ -236,8 +236,8 @@ inductive Step : State → Event → Out → Prop
   | streamTooLarge₂ {s offset len fin} (h : decide (maxOffset < offset + len) = true) :
       Step s (.recvStream offset len fin) (.error .flowControlError)
   /-- §4.1, line 1368: "A receiver MUST close the connection with a
-      FLOW_CONTROL_ERROR error if the sender violates the advertised connection
-      or stream data limits." -/
+      FLOW_CONTROL_ERROR error (Section 11) if the sender violates the
+      advertised connection or stream data limits." -/
   | streamFlowControl {s offset len fin}
       (h1 : decide (maxOffset < offset + len) = false)
       (h2 : decide (s.maxData < offset + len) = true) :
@@ -344,8 +344,8 @@ inductive Step : State → Event → Out → Prop
       doing nothing is permitted; opening the stream is WP9's business. -/
   | blocked {s limit} : Step s (.recvStreamDataBlocked limit) (.ok s [])
   /-- §4.1, line 1368: "A receiver MUST close the connection with a
-      FLOW_CONTROL_ERROR error if the sender violates the advertised connection
-      or stream data limits."  §19.13, line 7881 says the Maximum Stream Data
+      FLOW_CONTROL_ERROR error (Section 11) if the sender violates the
+      advertised connection or stream data limits."  §19.13, line 7881 says the Maximum Stream Data
       field is "the offset of the stream at which the blocking occurred", so a
       value beyond the limit we advertised is the peer claiming credit that was
       never granted.  This is the wider of the two readings of line 1368 (see
@@ -1050,8 +1050,9 @@ theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect} {f : N
   | sendStopSending => exact hf
 
 /-- **(b) No data beyond the advertised stream credit.**  §4.1, line 1368: "A
-    receiver MUST close the connection with a FLOW_CONTROL_ERROR error if the
-    sender violates the advertised connection or stream data limits."  In every
+    receiver MUST close the connection with a FLOW_CONTROL_ERROR error
+    (Section 11) if the sender violates the advertised connection or stream data
+    limits."  In every
     reachable state the credit consumed is within the credit advertised. -/
 theorem highest_le_maxData {s₀ s : State} (h0 : Inv s₀) (h : component.Reachable s₀ s) :
     s.highest ≤ s.maxData :=
@@ -1371,9 +1372,13 @@ example : component.track r0 (.recvStream 5 5 true) (.ok []) = some rSize := by 
 Assigned text for this file: §2.2, §2.4 (receiving operations), §3.2, the
 receiving half of §3.3 and §3.5, and the stream-level parts of §4.1/§4.4/§4.5.
 
-Citations name the line on which the quoted text begins.  Where a sentence's
-first word dangles at the end of the previous line, the citation is the line the
-quotation itself starts on (§3.3, lines 1150 and 1157 are the two cases here).
+Citation convention (all §2–§4 numbers were re-derived from the shipped draft
+for this revision, and every quoted citation was checked mechanically): a
+citation names the line carrying the operative words of the cited sentence,
+which is the line the sentence starts on except where its first word or two
+dangle at the end of the previous line — then it is the next line.  §3.3,
+lines 1150 and 1157 are the two cases of that here; the §19 citations, which the
+Wave 1 review verified unchanged, follow the same rule.
 
 | Text (line) | Sentence | Encoded as |
 |---|---|---|

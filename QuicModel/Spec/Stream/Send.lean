@@ -203,14 +203,16 @@ def maySendReset (s : State) (code finalSize : Nat) : Bool :=
 /-! ## 2. The specification -/
 
 inductive Step : State → Event → Out → Prop
-  /-- §2.4, line 811: "write data". -/
+  /-- §2.4, line 801: "write data, understanding when stream flow control credit
+      ... has successfully been reserved to send the written data". -/
   | write {s len} (h : canWrite s = true) :
       Step s (.appWrite len) (.ok { s with written := s.written + len } [])
   /-- Writing after the stream has been ended or reset is not something the
       transport can do; the request has no effect. -/
   | writeRefused {s len} (h : canWrite s = false) :
       Step s (.appWrite len) .drop
-  /-- §2.4, line 815: "end the stream (clean termination)". -/
+  /-- §2.4, line 805: "end the stream (clean termination), resulting in a STREAM
+      frame ... with the FIN bit set". -/
   | endStream {s} (h : canWrite s = true) :
       Step s .appEnd (.ok { s with finWritten := true } [])
   | endRefused {s} (h : canWrite s = false) :
@@ -458,8 +460,9 @@ theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
       (§4.1, line 1330);
     * a known final size *is* the highest offset sent (§4.5, line 1479);
     * outside "Ready"/"Send" a final size is known — this is the sending-side
-      counterpart of §4.5, line 1493: a sender always communicates the final
-      size, by a FIN or by RESET_STREAM. -/
+      counterpart of §4.5, line 1485: "A sender always communicates the final
+      size of a stream to the receiver reliably, no matter how the stream is
+      terminated" — by a FIN or by RESET_STREAM. -/
 def Inv (s : State) : Prop :=
   s.sent ≤ s.written ∧ s.sent ≤ s.maxData ∧
   (∀ f, s.finalSize = some f → f = s.sent) ∧
@@ -583,7 +586,7 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
 
 /-! ## 8. Named theorems -/
 
-/-- **(a) The final size is immutable.**  §4.5, line 1516: "Once a final size
+/-- **(a) The final size is immutable.**  §4.5, line 1517: "Once a final size
     for a stream is known, it cannot change."  No permitted step changes a final
     size that the sending part has already fixed. -/
 theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect} {f : Nat}
@@ -696,7 +699,7 @@ theorem terminal_absorbing_state {s s' : State} {e : Event} {fx : List Effect}
       cases hp : s.phase <;> simp_all [Phase.terminal, Phase.isResetSent]
     rw [this] at hw; exact absurd hw (by simp)
 
-/-- The arrows of Figure 2 (§3.1, line 900), as a relation on phases. -/
+/-- The arrows of Figure 2 (§3.1, line 932), as a relation on phases. -/
 def Arrow : Phase → Phase → Prop
   | .ready, .send => True        -- Send STREAM / STREAM_DATA_BLOCKED
   | .ready, .resetSent => True   -- Send RESET_STREAM
@@ -708,7 +711,7 @@ def Arrow : Phase → Phase → Prop
   | _, _ => False
 
 /-- Reachability along the arrows of Figure 2, in zero or more steps.  §3, line
-    892: "a single event or action can cause a transition through multiple
+    859: "a single event or action can cause a transition through multiple
     states", so a step may follow several arrows at once (Ready → Data Sent when
     a STREAM frame with FIN is the first frame sent). -/
 def Reaches : Phase → Phase → Bool
@@ -777,7 +780,7 @@ theorem sendReset_ok_iff_maySend {s : State} {code fs : Nat} :
   · rintro ⟨s', fx, h⟩; cases h; assumption
   · intro h; exact ⟨_, _, .sendReset h⟩
 
-/-- The peer's credit, as we track it, never goes down (§4.1, line 1357: "it is
+/-- The peer's credit, as we track it, never goes down (§4.1, line 1364: "it is
     not an error to advertise a smaller limit, but the smaller limit has no
     effect"). -/
 theorem maxData_mono {s s' : State} {e : Event} {fx : List Effect}
@@ -1012,9 +1015,13 @@ example : component.track s0 (.recvMaxStreamData 200) (.ok [.creditAvailable 200
 Assigned text for this file: §2.4 (sending operations), §3.1, the sending half
 of §3.3 and §3.5, and the stream-level parts of §4.1/§4.4/§4.5.
 
-Citations name the line on which the quoted text begins.  Where a sentence's
-first word dangles at the end of the previous line, the citation is the line the
-quotation itself starts on.
+Citation convention (all §2–§4 numbers were re-derived from the shipped draft
+for this revision, and every quoted citation was checked mechanically): a
+citation names the line carrying the operative words of the cited sentence,
+which is the line the sentence starts on except where its first word or two
+dangle at the end of the previous line — then it is the next line.  §3.3,
+lines 1150 and 1157 are the two cases of that here; the §19 citations, which the
+Wave 1 review verified unchanged, follow the same rule.
 
 | Text (line) | Sentence | Encoded as |
 |---|---|---|
@@ -1146,9 +1153,9 @@ NOTES
   was chosen because the text defines the final size in terms of bytes *sent*.
 -/
 
-/-- §3.5, line 1258: after a STOP_SENDING in "Ready" or "Send", sending the
-    solicited RESET_STREAM is always permitted (the code is copied per §3.5,
-    line 1266). -/
+/-- §3.5, line 1254: after a STOP_SENDING in "Ready" or "Send", sending the
+    solicited RESET_STREAM is always permitted (and copying the code is the
+    recommended choice per §3.5, line 1263; see `reset_code_recommended`). -/
 theorem stopSending_obliges_reset {s s' : State} {code : Nat} {fx : List Effect}
     (hi : Inv s) (h : Step s (.recvStopSending code) (.ok s' fx))
     (hb : s.phase.beforeFin = true) :
