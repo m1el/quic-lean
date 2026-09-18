@@ -153,7 +153,10 @@ structure Crypto where
   /-- Bytes TLS has handed us to send at this level (§19.6); the send side may
       not run past it. -/
   handed : Nat := 0
-  /-- The next offset we have not yet sent for the first time. -/
+  /-- The end of the highest CRYPTO frame we have sent at this level, i.e. the
+      next offset we have not yet sent for the first time.  §17.2.2, line 6378:
+      "The first CRYPTO frame sent always begins at an offset of 0", which is the
+      case `sentNext = 0`.  Advanced by `Event.sentCrypto`. -/
   sentNext : Nat := 0
   /-- §7.5, line 2716: after the handshake completes an endpoint that cannot
       buffer a CRYPTO frame "MAY discard that CRYPTO frame and all CRYPTO frames

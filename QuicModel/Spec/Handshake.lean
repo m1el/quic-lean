@@ -91,6 +91,7 @@ theorem delivered_mono {s s' : State} {e : Event} {fx : List Effect}
   cases h
   case keys dir lv => obtain ⟨r, w, he⟩ := provideKey_eq s dir lv; rw [he]; exact Nat.le_refl _
   case send => exact setLe _ _ (Nat.le_refl _)
+  case sentCrypto => exact setLe _ _ (Nat.le_refl _)
   case header hh => cases hh <;> exact Nat.le_refl _
   case params hp => cases hp <;> exact Nat.le_refl _
   case crypto hh =>
@@ -505,16 +506,28 @@ theorem zeroRtt_client_only {s : State} {p : OutPacket} (hp : p.ptype = .zeroRtt
 
 /-- §19.6: a CRYPTO frame never runs past what TLS handed over at that level,
     and never past 2^62-1; an exact repeat of a frame sent earlier is still
-    permitted (§12.4, line 4936: "All frames are idempotent"). -/
+    permitted (§12.4, line 4936: "All frames are idempotent").  §17.2.2, line
+    6378: while nothing has been sent at that level, it begins at offset 0. -/
 theorem crypto_within_handed {s : State} {p : OutPacket} {l : CryptoLevel} {off : Nat}
     {data : ByteArray} (hl : cryptoLevelOf p.ptype = some l) (hf : Frame.crypto off data ∈ p.frames)
     (h : maySendPacket s p = true) :
     off + data.size ≤ (s.stream l).handed ∧ off + data.size ≤ maxCryptoOffset ∧
-      s.write.get l.level ≠ .discarded := by
+      s.write.get l.level ≠ .discarded ∧ ((s.stream l).sentNext = 0 → off = 0) := by
   have hok := ((maySendPacket_iff s p).mp h).2.2 l hl _ hf
   simp only [cryptoFrameOk, maySendCryptoAt, Bool.and_eq_true, decide_eq_true_eq,
-    Bool.not_eq_eq_eq_not, Bool.not_true, beq_eq_false_iff_ne, ne_eq] at hok
-  exact ⟨hok.1.1, hok.1.2, hok.2⟩
+    Bool.not_eq_eq_eq_not, Bool.not_true, beq_eq_false_iff_ne, ne_eq, Bool.or_eq_true,
+    bne_iff_ne, beq_iff_eq] at hok
+  refine ⟨hok.1.1.1, hok.1.1.2, hok.1.2, fun hs => ?_⟩
+  rcases hok.2 with h0 | h0
+  · exact absurd hs h0
+  · exact h0
+
+/-- **(g)** §17.2.2, line 6378: "The first CRYPTO frame sent always begins at an
+    offset of 0."  Stated on its own, for either role and every level. -/
+theorem first_crypto_at_zero {s : State} {p : OutPacket} {l : CryptoLevel} {off : Nat}
+    {data : ByteArray} (hl : cryptoLevelOf p.ptype = some l) (hf : Frame.crypto off data ∈ p.frames)
+    (h : maySendPacket s p = true) (hs : (s.stream l).sentNext = 0) : off = 0 :=
+  (crypto_within_handed hl hf h).2.2.2 hs
 
 /-! ### §7.2 on the send side
 
@@ -713,11 +726,13 @@ example : component.outcomes cliSmallDone (.recvCrypto .initial 1 9) =
      .error .cryptoBufferExceeded] := by decide
 -- and once it is discarding, a later frame is acknowledged and ignored, never
 -- dropped (line 2719: "Packets containing discarded CRYPTO frames MUST be
--- acknowledged").
+-- acknowledged") — but the same sentence's close is still on the table, because
+-- it is granted per frame (NOTE 18).
 private def cliDiscarding : State :=
   cliSmallDone.setStream .initial { cliSmallDone.stream .initial with discarding := true }
 example : component.outcomes cliDiscarding (.recvCrypto .initial 1 9) =
-    [.ok cliDiscarding []] := by decide
+    [.ok cliDiscarding [], .error .cryptoBufferExceeded] := by decide
+example : component.accepts cliDiscarding (.recvCrypto .initial 1 9) .drop = false := by decide
 
 -- §19.6, line 7545: offset + length above 2^62-1 is FRAME_ENCODING_ERROR or
 -- CRYPTO_BUFFER_EXCEEDED, and nothing else.
@@ -755,6 +770,22 @@ example : component.maySendPacket cliTls ⟨.initial, [.crypto 95 (bytes (List.r
 -- (§17.2.2.1, line 6398).
 example : component.maySendPacket (cliTls.discardKeys .initial) ⟨.initial, [.ping]⟩ = false := by
   decide
+-- §17.2.2, line 6378: "The first CRYPTO frame sent always begins at an offset
+-- of 0" — so with nothing sent yet, offset 50 is refused …
+example : component.maySendPacket cliTls ⟨.initial, [.crypto 50 (bytes (List.replicate 10 0))]⟩
+    = false := by decide
+-- … and once the first frame has gone out, a continuation at 10 is fine (a
+-- ClientHello spanning packets, or line 6389's HelloRetryRequest continuation).
+private def cliSent : State :=
+  (component.step cliTls (.sentCrypto .initial 0 10)).next cliTls
+example : (cliSent.stream .initial).sentNext = 10 := by decide
+example : component.maySendPacket cliSent ⟨.initial, [.crypto 10 (bytes (List.replicate 10 0))]⟩
+    = true := by decide
+-- The mark only moves forward, so a retransmission of the first frame after a
+-- later one has been sent is still permitted (§13.3).
+example : component.maySendPacket cliSent ⟨.initial, [.crypto 0 (bytes (List.replicate 10 0))]⟩
+    = true := by decide
+
 -- §12.4, line 4936: the same frame is still sendable once TLS has handed over
 -- more, which is what a retransmission after loss needs (§13.3).
 private def cliTls2 : State :=

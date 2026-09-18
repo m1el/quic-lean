@@ -273,6 +273,13 @@ inductive Event where
   /-- We (a server) sent a Retry packet with this Source Connection ID.  Whether
       to send one at all is WP5's (§8.1.2); only the §7.3 consequence is here. -/
   | sentRetry (scid : Cid)
+  /-- We put a CRYPTO frame carrying `[off, off + len)` of `lvl` on the wire.
+      §17.2.2, line 6376: "The first packet sent by a client always includes a
+      CRYPTO frame that contains the start or all of the first cryptographic
+      handshake message.  The first CRYPTO frame sent always begins at an offset
+      of 0"; this event is what lets `MaySendPacket` know whether a frame is the
+      first one at its level. -/
+  | sentCrypto (lvl : CryptoLevel) (off len : Nat)
   deriving DecidableEq
 
 inductive Effect where
@@ -425,8 +432,12 @@ def cryptoOutcomes (s : State) (lvl : CryptoLevel) (off len : Nat) : List Out :=
   -- §19.6, line 7545: FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
   else if maxCryptoOffset < off + len then
     [.error .frameEncodingError, .error .cryptoBufferExceeded]
-  -- §7.5, line 2716: "all CRYPTO frames received in the future".
-  else if (s.stream lvl).discarding then [.ok s []]
+  -- §7.5, line 2716: "all CRYPTO frames received in the future", acknowledged
+  -- but not delivered (line 2719).  The same sentence's other alternative, "or
+  -- it MAY close the connection with a CRYPTO_BUFFER_EXCEEDED error code", is
+  -- offered per frame, so electing to discard on one frame does not forfeit it
+  -- on the next (NOTE 18).
+  else if (s.stream lvl).discarding then [.ok s [], .error .cryptoBufferExceeded]
   else if s.bufLimit < bufferedBytes ((s.stream lvl).recv off len).buf then
     -- Three outcomes are permitted past the limit, and buffering anyway is one
     -- of them at every point in the connection: §7.5, line 2707, "An endpoint's
@@ -573,6 +584,13 @@ inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
   | alreadyDiscarding {s l o n} (hk : s.read.get l.level ≠ .discarded)
       (h : o + n ≤ maxCryptoOffset) (hd : (s.stream l).discarding = true) :
       CryptoStep s l o n (.ok s [])
+  /-- §7.5, line 2716, the other half of the same sentence: "or it MAY close the
+      connection with a CRYPTO_BUFFER_EXCEEDED error code."  It is offered for
+      each frame the endpoint cannot buffer, so an endpoint that has been
+      discarding may still give up later (NOTE 18). -/
+  | discardingClose {s l o n} (hk : s.read.get l.level ≠ .discarded)
+      (h : o + n ≤ maxCryptoOffset) (hd : (s.stream l).discarding = true) :
+      CryptoStep s l o n (.error .cryptoBufferExceeded)
   /-- §7, line 2167: "QUIC provides reliable, ordered delivery of the
       cryptographic handshake data" — in-order bytes go to TLS, the rest is
       buffered (§7.5, line 2698). -/
@@ -713,6 +731,14 @@ inductive Step : State → Event → Out → Prop
       Step s (.sentRetry c) (.ok { s with retryScid := some c, retrySeen := true } [])
   /-- A client does not send Retry packets (§17.2.5). -/
   | sentRetryClient {s c} (hr : s.role = .client) : Step s (.sentRetry c) (.ok s [])
+  /-- §17.2.2, line 6378: record how far we have sent, so that "the first CRYPTO
+      frame sent always begins at an offset of 0" is checkable.  Frames are
+      retransmitted out of order after loss (§13.3), so the mark only ever moves
+      forward. -/
+  | sentCrypto {s l o n} :
+      Step s (.sentCrypto l o n)
+        (.ok (s.setStream l { s.stream l with
+                sentNext := Nat.max (s.stream l).sentNext (o + n) }) [])
 
 /-! ## 3. Executable form -/
 
@@ -749,5 +775,8 @@ def outcomes (s : State) : Event → List Out
     match s.role with
     | .server => [.ok { s with retryScid := some c, retrySeen := true } []]
     | .client => [.ok s []]
+  | .sentCrypto l o n =>
+    [.ok (s.setStream l { s.stream l with
+            sentNext := Nat.max (s.stream l).sentNext (o + n) }) []]
 
 end Quic.Spec.Handshake

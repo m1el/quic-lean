@@ -137,8 +137,11 @@ theorem mem_cryptoOutcomes_iff (s : State) (l : CryptoLevel) (off len : Nat) (o 
         · exact .tooLargeBuffer hk ho
       · rename_i ho
         split at h
-        · rename_i hd; simp only [List.mem_singleton] at h; subst h
-          exact .alreadyDiscarding hk (by omega) hd
+        · rename_i hd
+          simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+          rcases h with h | h <;> subst h
+          · exact .alreadyDiscarding hk (by omega) hd
+          · exact .discardingClose hk (by omega) hd
         · rename_i hd
           split at h
           · rename_i hb
@@ -161,6 +164,8 @@ theorem mem_cryptoOutcomes_iff (s : State) (l : CryptoLevel) (off len : Nat) (o 
     | tooLargeEncoding hk ho => simp [cryptoOutcomes, hk, ho]
     | tooLargeBuffer hk ho => simp [cryptoOutcomes, hk, ho]
     | alreadyDiscarding hk ho hd =>
+      simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho]
+    | discardingClose hk ho hd =>
       simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho]
     | accept hk ho hd hb =>
       simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho, Nat.not_lt.mpr hb]
@@ -349,6 +354,10 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
       cases h with
       | sentRetry hr => simp [outcomes, hr]
       | sentRetryClient hr => simp [outcomes, hr]
+  | sentCrypto l o n =>
+    constructor
+    · intro h; simp only [outcomes, List.mem_singleton] at h; subst h; exact .sentCrypto
+    · intro h; cases h with | sentCrypto => simp [outcomes]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
   cases e with
@@ -481,6 +490,12 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
   | sentOther => exact ⟨hcc, hbl, hwf⟩
   | sentRetry => exact ⟨hcc, hbl, hwf⟩
   | sentRetryClient => exact ⟨hcc, hbl, hwf⟩
+  | sentCrypto =>
+    refine ⟨hcc, hbl, fun l' => ?_⟩
+    rw [stream_setStream]
+    split
+    · rename_i he; subst he; exact hwf _
+    · exact hwf l'
 
 /-! ## 6. Send side -/
 
@@ -524,9 +539,17 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
   | handshakeDone => simp [maySend, MaySend]
   | _ => simp [maySend, MaySend]
 
-/-- The CRYPTO frames of a packet at level `l`. -/
+/-- The CRYPTO frames of a packet at level `l`.
+
+    §17.2.2, line 6378: "The first CRYPTO frame sent always begins at an offset
+    of 0."  While nothing has been sent at this level (`sentNext = 0`), a CRYPTO
+    frame must therefore start at 0; after that the sentence says nothing, so a
+    ClientHello spanning several packets, a retransmission and a
+    HelloRetryRequest continuation (line 6389) are all unconstrained here. -/
 def cryptoFrameOk (s : State) (l : CryptoLevel) : Frame → Bool
-  | .crypto off data => maySendCryptoAt s l off data.size
+  | .crypto off data =>
+    maySendCryptoAt s l off data.size &&
+      ((s.stream l).sentNext != 0 || off == 0)
   | _ => true
 
 /-- Packet-level send rules:
@@ -538,7 +561,8 @@ def cryptoFrameOk (s : State) (l : CryptoLevel) : Frame → Bool
   server as part of the first flight", and line 6476: "A client MUST NOT send
   0-RTT packets once it starts processing 1-RTT packets from the server";
 * §19.6: a CRYPTO frame must be within what TLS handed over *at this packet's
-  level* — the frame-level rule cannot see the level. -/
+  level* — the frame-level rule cannot see the level — and §17.2.2, line 6378:
+  the first one sent at a level begins at offset 0. -/
 def MaySendPacket (s : State) (p : OutPacket) : Prop :=
   (∀ l, levelOf p.ptype = some l → s.write.get l = .present) ∧
   (p.ptype = .zeroRtt → s.role = .client ∧ s.processed1Rtt = false) ∧
