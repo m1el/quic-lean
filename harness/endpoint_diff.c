@@ -350,6 +350,13 @@ static void model_ready(void) {
 
 static mstate *M(harness *h) { return (mstate *)h->model; }
 
+/* ngtcp2 keeps time in nanoseconds (NGTCP2_SECONDS = 1e9); `Spec.Time` is
+   microseconds ("Time in microseconds.  Always supplied on events", Core.lean),
+   and `harnessConfig` is called with max_idle_timeout = 30000000 and
+   max_ack_delay = 25000, both microseconds.  Feeding h->ts straight through
+   would make every deadline fire a thousand times too early. */
+static uint64_t model_now(harness *h) { return (uint64_t)(h->ts / 1000); }
+
 /* ====================================================================== */
 /* Events, as a description the harness can both build and enumerate       */
 /* ====================================================================== */
@@ -911,7 +918,7 @@ static void md_recv(harness *h, const uint8_t *pkt, size_t len, int rv) {
   is_err = obs_error(rv, &code);
   e.kind = EV_DATAGRAM;
   e.arg = model_bytes(pkt, len);
-  e.now = h->ts;
+  e.now = model_now(h);
   e.name = "recv";
   sb_reserve(&cbtext, 64);
   cbtext.p[0] = 0;
@@ -935,12 +942,12 @@ static void md_time(harness *h, int rv) {
   is_err = obs_error(rv, &code);
   e.kind = EV_TIMER;
   e.arg = NULL;
-  e.now = h->ts;
+  e.now = model_now(h);
   e.name = "timer";
   sb_reserve(&cbtext, 64);
   cbtext.p[0] = 0;
   cbs = collect_cbs(h, &cbtext);
-  snprintf(what, sizeof(what), "handle_expiry now=%" PRIu64, (uint64_t)h->ts);
+  snprintf(what, sizeof(what), "handle_expiry now=%" PRIu64, model_now(h));
   track_step(h, &e, is_err, code, cbs, cbtext.p, what);
   free(cbtext.p);
 }
@@ -959,7 +966,7 @@ static void app_step(harness *h, lean_object *action, const char *name, int ok) 
   }
   e.kind = EV_APP;
   e.arg = action;
-  e.now = h->ts;
+  e.now = model_now(h);
   e.name = name;
 
   if (ok) {
@@ -1135,7 +1142,7 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
       lean_inc(acts);
       e.kind = EV_LOCAL;
       e.arg = quic_h_actions_get(acts, k);
-      e.now = h->ts;
+      e.now = model_now(h);
       e.name = "issueCid/retireCid";
       synth_step(h, &e);
       lean_dec(e.arg);
@@ -1198,7 +1205,7 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
       f = quic_h_frames_get(ps[i].frames, k);
       e.kind = EV_LOCAL;
       e.arg = quic_h_local_sent_frame_in((uint8_t)ps[i].ptype, ADDR_SELF, ADDR_PEER, f);
-      e.now = h->ts;
+      e.now = model_now(h);
       e.name = "sentFrameIn";
       synth_step(h, &e);
       lean_dec(e.arg);
@@ -1207,7 +1214,7 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     e.kind = EV_LOCAL;
     e.arg = quic_h_local_sent_packet((uint8_t)ps[i].ptype, (uint64_t)ps[i].pn,
                                      quic_h_ack_eliciting(ps[i].frames));
-    e.now = h->ts;
+    e.now = model_now(h);
     e.name = "sentPacket";
     synth_step(h, &e);
     lean_dec(e.arg);
@@ -1216,7 +1223,7 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     evspec e;
     e.kind = EV_LOCAL;
     e.arg = quic_h_local_sent_datagram(ADDR_PEER, len);
-    e.now = h->ts;
+    e.now = model_now(h);
     e.name = "sentDatagram";
     synth_step(h, &e);
     lean_dec(e.arg);
@@ -1237,7 +1244,7 @@ static void md_tick(harness *h) {
   while (!lean_is_scalar(p)) {
     lean_object *s = l_head(p);
     lean_inc(s);
-    if (quic_endpoint_obligations(s, h->ts, m->tolerance)) {
+    if (quic_endpoint_obligations(s, model_now(h), m->tolerance)) {
       met = 1;
       break;
     }
@@ -1247,8 +1254,8 @@ static void md_tick(harness *h) {
     char detail[256];
     snprintf(detail, sizeof(detail),
              "acknowledgment overdue in every candidate at now=%" PRIu64
-             " (tolerance %" PRIu64 ")",
-             (uint64_t)h->ts, m->tolerance);
+             "us (tolerance %" PRIu64 "us)",
+             model_now(h), m->tolerance);
     report(h, m, "obligation", "ack overdue", detail, NULL);
     /* report once per run: otherwise every later TIME repeats it */
     m->tolerance = UINT64_MAX;
