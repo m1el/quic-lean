@@ -424,11 +424,14 @@ NOTES
     business).
 11. **How the citations were checked.**  Every `§x.y, line N` in this package
     was re-derived for this revision after review finding S-6, and then verified
-    mechanically by `out/check_citations.py`: the script pulls each citation and
-    its quoted or paraphrased sentence out of the Lean sources and this table,
-    normalises whitespace in `spec/draft-ietf-quic-transport-34.txt`, locates the
-    sentence's first word in the normalised text, and reports the line it falls
-    on.  A citation passes only when that line is the cited one.  The convention
+    mechanically by `out/check_citations.py` in the fix run's worktree (scratch,
+    like the review's own probes): the script pulls every citation out of the
+    six Lean sources including this table, pairs each with the opening words of
+    the sentence it names,
+    normalises `spec/draft-ietf-quic-transport-34.txt` (rejoining words split by
+    a hyphen at a hard line break), locates that first word in the normalised
+    text and reports the line it falls on.  A citation passes only when that
+    line is the cited one and the quotation occurs exactly once.  The convention
     is the line the sentence's first word sits on, which is often in the middle
     of the line (for instance §4.6, line 1546 begins after "…set by their peer."
     on the same line).  68 distinct citations (211 occurrences across the six
