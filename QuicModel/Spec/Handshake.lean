@@ -755,6 +755,27 @@ example : component.maySendPacket cliTls ⟨.initial, [.crypto 95 (bytes (List.r
 -- (§17.2.2.1, line 6398).
 example : component.maySendPacket (cliTls.discardKeys .initial) ⟨.initial, [.ping]⟩ = false := by
   decide
+-- §12.4, line 4936: the same frame is still sendable once TLS has handed over
+-- more, which is what a retransmission after loss needs (§13.3).
+private def cliTls2 : State :=
+  cli0.setStream .initial { cli0.stream .initial with handed := 400 }
+example : component.maySendPacket cliTls2 ⟨.initial, [.crypto 0 (bytes (List.replicate 10 0))]⟩
+    = true := by decide
+-- §19.6, line 7512: CRYPTO "can be sent in all packet types except 0-RTT", and a
+-- 1-RTT CRYPTO frame is measured against the 1-RTT stream, not the Initial one.
+private def cliOneRtt : State :=
+  { (cliTls.setStream .oneRtt { cliTls.stream .oneRtt with handed := 7 }) with
+      write := { cliTls.write with oneRtt := .present } }
+example : component.maySendPacket cliOneRtt ⟨.oneRtt, [.crypto 0 (bytes (List.replicate 7 0))]⟩
+    = true := by decide
+example : component.maySendPacket cliOneRtt ⟨.oneRtt, [.crypto 0 (bytes (List.replicate 8 0))]⟩
+    = false := by decide
+-- §17.2.3, line 6476 is the exact rule, and it is not "before the handshake
+-- completes": a complete client may still send 0-RTT until it processes a 1-RTT
+-- packet from the server (NOTE 9).
+private def cli0rttDone : State := { cli0rtt with complete := true }
+example : component.maySendPacket cli0rttDone ⟨.zeroRtt, [.ping]⟩ = true := by decide
+example : component.maySendPacket cli0rttDone.sawOneRtt ⟨.zeroRtt, [.ping]⟩ = false := by decide
 
 -- §20.1: a TLS alert becomes CRYPTO_ERROR 0x100 + alert, and nothing else.
 example : component.outcomes cli0 (.tlsAlert 0x2f) = [.error (.cryptoError 0x2f)] := by decide
