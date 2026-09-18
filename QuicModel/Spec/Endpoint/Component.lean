@@ -18,9 +18,16 @@ import QuicModel.Spec.Endpoint.Send
   (`Endpoint/Theorems.lean` §(b)), `Inv` is preserved by a real proof that
   applies each component's own `step_inv` to its projection
   (`rawOutcomes_inv`), and the endpoint never permits an outcome that some
-  component forbids except where the text gives the *endpoint* the right
-  (`addAlt`, used only for §5.2.2 line 1936, §5.2.2 line 1946 and §11.1
-  line 4485).
+  component forbids except where the text gives the *endpoint* the right.
+
+  There are three such sentences, and none of them goes through `addAlt`, which
+  is why that combinator has no call sites: §11.1 line 4485's MAY-discard is a
+  literal `[.error …, .drop]` in `Pipeline.packetErrOutcomes`, §5.2.2 line 1946's
+  blanket drop is `[.drop]` in `Pipeline.vnServerGate` / `Pipeline.vnPacket`, and
+  §5.2.2 line 1936's CONNECTION_REFUSED is **not modelled at all** — refusing a
+  connection happens at acceptance, and `Endpoint.State` is an already-established
+  connection with no event for it (see `QuicModel/Spec/Endpoint.lean` §3).
+  `addAlt` / `addAlts` are kept because that gap is the shape they are for.
 
   `Endpoint.component` is indexed by the `Quic.Protection` the decoder uses:
   `Protection` is a record of functions and has no `DecidableEq`, so it cannot
