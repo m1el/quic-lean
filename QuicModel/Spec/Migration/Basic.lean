@@ -62,16 +62,6 @@ structure PathInfo where
   sawNonProbing : Bool := false
   deriving DecidableEq, Repr
 
-/-- What the endpoint is currently composing outgoing packets for: the path they
-    leave on, and the sequence number of the Destination Connection ID they
-    carry.  §9's send-side rules are all about this pair, which is why they are
-    `MaySendPacket` rules rather than `MaySend` rules: `Spec.OutPacket` carries
-    neither the path nor the connection ID. -/
-structure SendCtx where
-  path : Path
-  dcidSeq : Nat
-  deriving DecidableEq, Repr
-
 /-- One endpoint's view of which path the connection uses. -/
 structure State where
   role : Role
@@ -100,8 +90,25 @@ structure State where
   /-- Everything known about the other paths. -/
   paths : Map Path PathInfo
   /-- Outgoing direction: the connection ID (by sequence number) in use as
-      Destination Connection ID on each path (§9.5, lines 3603 and 3608). -/
+      Destination Connection ID on each path *now* (§9.5, lines 3603 and 3608). -/
   dcidOn : Map Path Nat
+  /-- §9.5, line 3603 as *history*: the one local address each connection ID
+      (by sequence number) has ever been sent from.  Grow-only — an entry is
+      written the first time the connection ID is used and never changed —
+      because line 3603 forbids *reuse*, which is a statement about the life of
+      the connection and not about what is in use at this instant.  `dcidOn`
+      answers "what is in use where now" and is overwritten by `State.useCid`;
+      this answers "where has this connection ID ever been". -/
+  dcidFrom : Map Nat LocalAddr
+  /-- §9.5, line 3608 as history: every destination address each connection ID
+      has ever been sent to.  A *list*, because line 3611's MAY lets one
+      connection ID move to a new remote address after a peer's rebinding. -/
+  dcidTo : Map Nat (List PeerAddr)
+  /-- The peer's connection IDs by sequence number.  WP4 `ConnIds` owns them;
+      they are mirrored here because §9.5's rules are stated over sequence
+      numbers while a datagram (`Spec.OutDatagram.dcid`) carries the connection
+      ID *bytes*.  Driven by `Event.learnPeerCid`; see NOTES 16. -/
+  peerCids : Map Nat CidBytes
   /-- Incoming direction: the connection ID of ours (by sequence number) the
       peer addresses packets to on each path.  Observed, never enforced;
       §9.5, line 3615: "These requirements … apply only to the sending of
@@ -119,10 +126,8 @@ structure State where
       sets it when it starts validating the preferred address, the server when a
       packet from the client reaches that address. -/
   preferredActedOn : Bool
-  /-- §9.3.2, line 3461: all connection state has been discarded. -/
+  /-- §9.3.2, line 3460: all connection state has been discarded. -/
   discarded : Bool
-  /-- The path and Destination Connection ID outgoing packets use. -/
-  tx : SendCtx
   deriving DecidableEq, Repr
 
 /-- A connection that has just finished its handshake on `p`, with no other
@@ -139,13 +144,15 @@ def init (role : Role) (p : Path) (dcidSeq : Nat) : State where
   lastValidated := some p
   paths := [(p, { status := .validated, sawNonProbing := true })]
   dcidOn := [(p, dcidSeq)]
+  dcidFrom := [(dcidSeq, p.loc)]
+  dcidTo := [(dcidSeq, [p.peer])]
+  peerCids := []
   scidOn := []
   largestPn := 0
   preferredPeer := none
   preferredLocal := none
   preferredActedOn := false
   discarded := false
-  tx := ⟨p, dcidSeq⟩
 
 /-! ## 1b. Events and effects -/
 
@@ -170,6 +177,12 @@ inductive Event where
       Connection ID they transmit with to a value that has not been used on
       another path" — and start composing packets for `p` with it. -/
   | beginSendOn (p : Path) (dcidSeq : Nat)
+  /-- One of the peer's connection IDs, by sequence number and by bytes, as WP4
+      `ConnIds` learned it (the handshake's Source Connection ID, a
+      NEW_CONNECTION_ID frame, or the `preferred_address` parameter).  §9.5 is
+      written about sequence numbers and a datagram carries bytes; this is the
+      dictionary between them (NOTES 16). -/
+  | learnPeerCid (seq : Nat) (cid : CidBytes)
   deriving DecidableEq, Repr
 
 inductive Effect where
@@ -277,19 +290,35 @@ def peerViolatesDisableMigration (s : State) (p : Path) : Bool :=
   s.ourDisableMigration && decide (p.peer ≠ s.active.peer) &&
     decide (p.loc = s.handshakePath.loc) && !s.preferredActedOn
 
-/-! ### §9.5: which connection ID may be used where -/
+/-! ### §9.5: which connection ID may be used where
+
+The two prohibitions of §9.5 are about *reuse*, so they are judged against the
+history (`dcidFrom`, `dcidTo`), never against `dcidOn`: once a connection ID has
+left from a local address, changing the connection ID used on that path does not
+make the local address available again. -/
+
+/-- Every destination address connection ID `seq` has been sent to. -/
+def cidTo (s : State) (seq : Nat) : List PeerAddr := (s.dcidTo.get? seq).getD []
+
+/-- Has connection ID `seq` ever been sent to `a`? -/
+def cidWasSentTo (s : State) (seq : Nat) (a : PeerAddr) : Bool :=
+  (s.cidTo seq).any (fun b => decide (b = a))
 
 /-- §9.5, line 3603: "An endpoint MUST NOT reuse a connection ID when sending
     from more than one local address, for example when initiating connection
     migration as described in Section 9.2 or when probing a new network path as
-    described in Section 9.1." -/
+    described in Section 9.1."  The record is grow-only: a connection ID that
+    has ever been sent from another local address is spent for good. -/
 def reusedAcrossLocal (s : State) (p : Path) (seq : Nat) : Bool :=
-  s.dcidOn.any (fun e => decide (e.2 = seq) && decide (e.1.loc ≠ p.loc))
+  match s.dcidFrom.get? seq with
+  | some l => decide (l ≠ p.loc)
+  | none => false
 
 /-- §9.5, line 3608: "Similarly, an endpoint MUST NOT reuse a connection ID when
-    sending to more than one destination address." -/
+    sending to more than one destination address."  Also judged against the
+    history, with line 3611's MAY as the exception (`rebindKeepsCid`). -/
 def reusedAcrossPeer (s : State) (p : Path) (seq : Nat) : Bool :=
-  s.dcidOn.any (fun e => decide (e.2 = seq) && decide (e.1.peer ≠ p.peer))
+  (s.cidTo seq).any (fun a => decide (a ≠ p.peer))
 
 /-- §9.5, line 3609: "Due to network changes outside the control of its peer, an
     endpoint might receive packets from a new source address with the same
@@ -297,16 +326,42 @@ def reusedAcrossPeer (s : State) (p : Path) (seq : Nat) : Bool :=
     connection ID with the new remote address while still sending from the same
     local address."
 
-    Operationally: some path `q` already sends with `seq`, leaves from the same
-    local address as `p`, differs only in the peer address, and the packets that
-    arrived on `p` carried the same Destination Connection ID as those on `q` —
-    which is what makes this a rebinding rather than a migration. -/
+    Operationally: `seq` has only ever left from `p.loc`, it has already been
+    sent to some other peer address `a`, and the packets that arrived on `p`
+    carried the same Destination Connection ID of ours as those that arrived on
+    `⟨p.loc, a⟩` — which is what makes this a rebinding rather than a
+    migration. -/
 def rebindKeepsCid (s : State) (p : Path) (seq : Nat) : Bool :=
-  s.dcidOn.any (fun e =>
-    decide (e.2 = seq) && decide (e.1.loc = p.loc) && decide (e.1.peer ≠ p.peer) &&
-      (match s.scidOn.get? e.1, s.scidOn.get? p with
-       | some a, some b => decide (a = b)
-       | _, _ => false))
+  decide (s.dcidFrom.get? seq = some p.loc) &&
+    (match s.scidOn.get? p with
+     | some b =>
+       (s.cidTo seq).any (fun a =>
+         decide (a ≠ p.peer) &&
+           (match s.scidOn.get? ⟨p.loc, a⟩ with | some c => decide (c = b) | none => false))
+     | none => false)
+
+/-- §9.5, lines 3603 and 3608: record, once and for all, that connection ID `n`
+    has been sent from `p.loc` and to `p.peer`.  Neither record is ever
+    rewritten or erased. -/
+def recordCidUse (s : State) (p : Path) (n : Nat) : State :=
+  { s with
+    dcidFrom := match s.dcidFrom.get? n with
+                | some _ => s.dcidFrom
+                | none => s.dcidFrom.set n p.loc
+    dcidTo := if s.cidWasSentTo n p.peer then s.dcidTo
+              else s.dcidTo.set n (s.cidTo n ++ [p.peer]) }
+
+/-- Mirror one of the peer's connection IDs (WP4 `ConnIds` owns the real set);
+    the first bytes seen for a sequence number stand. -/
+def recordPeerCid (s : State) (seq : Nat) (cid : CidBytes) : State :=
+  match s.peerCids.get? seq with
+  | some _ => s
+  | none => { s with peerCids := s.peerCids.set seq cid }
+
+/-- The sequence number of the peer's connection ID with these bytes, as far as
+    this component has been told (`Event.learnPeerCid`). -/
+def seqOfCid (s : State) (cid : CidBytes) : Option Nat :=
+  (s.peerCids.find? (fun e => decide (e.2 = cid))).map (·.1)
 
 /-! ### Packet arrival -/
 
@@ -357,20 +412,34 @@ def observe (s : State) (p : Path) (pn : Nat) (probingOnly : Bool) (dcidSeq : Na
 def observeFx (s : State) (p : Path) : List Effect :=
   if s.mustValidate p then [.startValidation p] else []
 
+/-- §9.3, line 3382: "it MUST send subsequent packets to the *new peer
+    address*" — the peer address, and only it.  Which local address an endpoint
+    sends from is its own choice: §9.2, line 3345 ("An endpoint can migrate a
+    connection to a new local address by sending packets containing non-probing
+    frames from that address") and §9, line 3322 ("Clients are responsible for
+    initiating all migrations").  So following a peer's migration moves the
+    destination of the path in use and leaves its local address alone, whatever
+    local address of ours the packet happened to arrive at (NOTES 3). -/
+def destOf (s : State) (p : Path) : Path := ⟨s.active.loc, p.peer⟩
+
 /-- §9.3, lines 3382–3385: "If the recipient permits the migration, it MUST send
     subsequent packets to the new peer address and MUST initiate path validation
     (Section 8.2) to verify the peer's ownership of the address if validation is
     not already underway", together with §9.3.3, line 3498: "In response to an
     apparent migration, endpoints MUST validate the previously active path using
-    a PATH_CHALLENGE frame." -/
+    a PATH_CHALLENGE frame."
+
+    The packet's own path `p` is recorded; the path that is switched to and
+    validated is `s.destOf p`, which differs from `p` only when the packet
+    arrived at a local address we do not send from. -/
 def permit (s : State) (p : Path) (pn : Nat) (probingOnly : Bool) (dcidSeq : Nat) : State :=
-  (((if s.isValidated p then s.recordRecv p pn probingOnly dcidSeq
-      else (s.recordRecv p pn probingOnly dcidSeq).markValidating p)).markValidating
-    s.active).switchTo p
+  (((if s.isValidated (s.destOf p) then s.recordRecv p pn probingOnly dcidSeq
+      else (s.recordRecv p pn probingOnly dcidSeq).markValidating (s.destOf p))).markValidating
+    s.active).switchTo (s.destOf p)
 
 def permitFx (s : State) (p : Path) : List Effect :=
-  (if s.isValidated p then [] else [Effect.startValidation p]) ++
-    [Effect.switchPath p, Effect.validatePrevious s.active]
+  (if s.isValidated (s.destOf p) then [] else [Effect.startValidation (s.destOf p)]) ++
+    [Effect.switchPath (s.destOf p), Effect.validatePrevious s.active]
 
 end State
 
@@ -404,7 +473,6 @@ def recvCase (s : State) (p : Path) (pn : Nat) (probingOnly : Bool) : RecvCase :
   else if probingOnly then .quiet
   else if !s.isNewPeer p then .quiet
   else if !s.isHighest pn then .quiet
-  else if decide (p.loc ≠ s.active.loc) then .quiet
   else if s.peerViolatesDisableMigration p then .banned
   else .migrate
 

@@ -42,9 +42,11 @@ def succSwitchFx (s : State) (p : Path) : List Effect :=
   Effect.switchPath p :: (if s.otherValidating p then [Effect.abandonValidation s.active] else [])
 
 /-- §9.5, line 3600: start transmitting on `p` with the connection ID whose
-    sequence number is `n`. -/
+    sequence number is `n`.  `dcidOn` says what is in use now and is
+    overwritten; `recordCidUse` adds to the history lines 3603 and 3608 are
+    about, which is never overwritten. -/
 def useCid (s : State) (p : Path) (n : Nat) : State :=
-  { s with dcidOn := s.dcidOn.set p n, tx := ⟨p, n⟩ }
+  { (s.recordCidUse p n) with dcidOn := s.dcidOn.set p n }
 
 end State
 
@@ -247,10 +249,11 @@ inductive Step : State → Event → Out → Prop
       Step s (.learnPreferredAddress a) (.ok { s with preferredPeer := some a } [])
   | cidGone {s p n} (hc : cidCase s p n = .gone) : Step s (.beginSendOn p n) .drop
   /-- §9.5, line 3630: with zero-length connection IDs there is no sequence
-      number to keep apart, so lines 3603 and 3608 have no content; the text's
-      answer is the SHOULD NOT of line 3630, which is `Recommended`. -/
+      number to keep apart, so lines 3603 and 3608 have no content and there is
+      no use to record; the text's answer is the SHOULD NOT of line 3630, which
+      is `RecommendedMigration`. -/
   | cidZeroLen {s p n} (hc : cidCase s p n = .zeroLen) :
-      Step s (.beginSendOn p n) (.ok { s with tx := ⟨p, n⟩ } [])
+      Step s (.beginSendOn p n) (.ok s [])
   /-- §9.5, line 3603: "An endpoint MUST NOT reuse a connection ID when sending
       from more than one local address". -/
   | cidLocalReuse {s p n} (hc : cidCase s p n = .localReuse) : Step s (.beginSendOn p n) .drop
@@ -270,6 +273,12 @@ inductive Step : State → Event → Out → Prop
       another path." -/
   | cidFresh {s p n} (hc : cidCase s p n = .fresh) :
       Step s (.beginSendOn p n) (.ok (s.useCid p n) [])
+  /-- Bookkeeping, not a rule of §9: one of the peer's connection IDs, as WP4
+      `ConnIds` learned it.  §9.5 speaks of sequence numbers and
+      `Spec.OutDatagram` carries bytes, so `MaySendDatagram` needs the
+      dictionary between them (NOTES 16). -/
+  | peerCidLearn {s seq cid} :
+      Step s (.learnPeerCid seq cid) (.ok (s.recordPeerCid seq cid) [])
 
 /-! ## 3. Executable form -/
 
@@ -315,10 +324,11 @@ def outcomes (s : State) : Event → List Out
   | .handshakeConfirmed => [.ok { s with handshakeConfirmed := true } []]
   | .learnPreferredAddress a =>
     if s.role = .server then [.drop] else [.ok { s with preferredPeer := some a } []]
+  | .learnPeerCid seq cid => [.ok (s.recordPeerCid seq cid) []]
   | .beginSendOn p n =>
     match cidCase s p n with
     | .gone => [.drop]
-    | .zeroLen => [.ok { s with tx := ⟨p, n⟩ } []]
+    | .zeroLen => [.ok s []]
     | .localReuse => [.drop]
     | .peerReuse => [.drop]
     | .rebind => [.ok (s.useCid p n) [], .drop]
@@ -406,6 +416,8 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
         · exact .cidRebindKeep hc
         · exact .cidRebindRefuse hc
       · simp only [List.mem_singleton] at h; subst h; exact .cidFresh hc
+    | learnPeerCid seq cid =>
+      simp only [outcomes, List.mem_singleton] at h; subst h; exact .peerCidLearn
   · intro h
     cases h with
     | recvGone hc => simp [outcomes, hc]
@@ -448,6 +460,7 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | cidRebindKeep hc => simp [outcomes, hc]
     | cidRebindRefuse hc => simp [outcomes, hc]
     | cidFresh hc => simp [outcomes, hc]
+    | peerCidLearn => simp [outcomes]
 
 theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
   cases e <;> simp only [outcomes] <;> repeat' split
