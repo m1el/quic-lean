@@ -15,7 +15,9 @@ import QuicModel.Spec.Endpoint.Events
     and 3200), `Migration.MaySendDatagramOn av` (§9.3.1, line 3431) and
     §8.2.2 line 3183's "a PATH_RESPONSE frame MUST be sent on the network path
     where the PATH_CHALLENGE was received", which needs `OutDatagram.src` as
-    well as `dest` (`PathValidation` NOTES 11).
+    well as `dest` (`PathValidation` NOTES 11), and §7.2's connection ID fields
+    (`Handshake.MaySendDatagramOn`), whose line 2380 needs WP4's issued
+    connection IDs alongside WP11's state.
 
   Three more rules are about things that are not datagrams of QUIC packets at
   all, so they stay free functions with their own arguments, exactly as WP5,
@@ -162,6 +164,27 @@ theorem ecnMarkOk_iff (s : State) (d : OutDatagram) :
     ecnMarkOk s d = true ↔ EcnMarkOk s d := by
   simp only [ecnMarkOk, EcnMarkOk, Bool.and_eq_true, Ecn.mayMarkEcn_iff, and_assoc]
 
+/-- §7.2, lines 2340, 2341 and 2380: the connection ID fields of the packets in
+    a datagram, which WP11 states over `OutDatagram.dcid`/`scid` as
+    `Handshake.MaySendDatagramOn`.  Line 2380 ("Any further changes to the
+    Destination Connection ID are only permitted if the values are taken from
+    NEW_CONNECTION_ID frames") is about values WP11 never sees — WP4
+    `ConnIds.Remote` holds them — so WP11 exports the rule with the set as a
+    parameter, in the shape `Migration.MaySendDatagramOn` already uses, and it is
+    supplied here.  Every connection ID the peer ever issued counts, retired or
+    not: not using a retired one is §5.1.2's rule and WP4's, not §7.2's. -/
+def peerIssuedCids (s : State) : List ConnIds.Cid := s.cidRemote.entries.map (·.cid)
+
+def HandshakeHeaderOk (s : State) (d : OutDatagram) : Prop :=
+  Handshake.MaySendDatagramOn (some (peerIssuedCids s)) s.hs d
+
+def handshakeHeaderOk (s : State) (d : OutDatagram) : Bool :=
+  Handshake.maySendDatagramOn (some (peerIssuedCids s)) s.hs d
+
+theorem handshakeHeaderOk_iff (s : State) (d : OutDatagram) :
+    handshakeHeaderOk s d = true ↔ HandshakeHeaderOk s d :=
+  Handshake.maySendDatagramOn_iff _ _ _
+
 /-- Everything the model knows about a datagram this endpoint may send. -/
 def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
   -- §8, line 2735 / §8.1, line 2773: the anti-amplification budget
@@ -180,6 +203,8 @@ def MaySendDatagram (s : State) (d : OutDatagram) : Prop :=
   -- §13.4.2.2, line 5626: once ECN validation has failed on this path the ECT
   -- codepoint may not be set again.  One instance per space, so all three.
   EcnMarkOk s d ∧
+  -- §7.2, lines 2340, 2341 and 2380: the connection IDs the datagram carries
+  HandshakeHeaderOk s d ∧
   -- every packet coalesced in it
   ∀ p ∈ d.packets, MaySendPacket s p
 
@@ -191,6 +216,7 @@ def maySendDatagram (s : State) (d : OutDatagram) : Bool :=
   decide (Migration.MaySendDatagramOn s.av s.mig d) &&
   pathResponsesOnPath s d &&
   ecnMarkOk s d &&
+  handshakeHeaderOk s d &&
   d.packets.all (maySendPacket s)
 
 theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
@@ -198,12 +224,12 @@ theorem maySendDatagram_iff (s : State) (d : OutDatagram) :
   simp only [maySendDatagram, MaySendDatagram, Bool.and_eq_true, AddressValidation.maySendTo_iff,
     DatagramSize.maySendDatagram_iff, Migration.maySendDatagram_iff,
     PathValidation.maySendDatagramOn_iff, pathResponsesOnPath_iff, ecnMarkOk_iff,
-    decide_eq_true_eq, List.all_eq_true, and_assoc]
+    handshakeHeaderOk_iff, decide_eq_true_eq, List.all_eq_true, and_assoc]
   constructor
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, h7, fun p hp => (maySendPacket_iff s p).mp (h8 p hp)⟩
-  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩
-    exact ⟨h1, h2, h3, h4, h5, h6, h7, fun p hp => (maySendPacket_iff s p).mpr (h8 p hp)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, h8, fun p hp => (maySendPacket_iff s p).mp (h9 p hp)⟩
+  · rintro ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩
+    exact ⟨h1, h2, h3, h4, h5, h6, h7, h8, fun p hp => (maySendPacket_iff s p).mpr (h9 p hp)⟩
 
 instance instDecidableMaySendDatagram (s : State) (d : OutDatagram) :
     Decidable (MaySendDatagram s d) := decidable_of_iff _ (maySendDatagram_iff s d)
