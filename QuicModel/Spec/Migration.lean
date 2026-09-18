@@ -53,7 +53,7 @@ import QuicModel.Spec.Migration.Theorems
 | §9.3 (3401) | "an endpoint can abandon any path validation for other addresses" | not encoded: a MAY about `PathValidation`'s state, which WP5 owns; `Effect.abandonValidation` exists for the one case §9.6.3 makes a MUST |
 | §9.3 (3407) | "the server SHOULD send new address validation tokens … to the client" | `RecommendedNewTokens`; the token itself is WP5's |
 | §9.3.1 (3429) | an endpoint is required to validate a peer's new address | `State.mustValidate` |
-| §9.3.1 (3431) | "Until a peer's address is deemed valid, an endpoint limits the amount of data it sends to that address; see Section 8" | `AddressValidation.MaySendDatagram`, referenced by `MaySendDatagramOn`; not duplicated |
+| §9.3.1 (3431) | "Until a peer's address is deemed valid, an endpoint limits the amount of data it sends to that address; see Section 8" | `AddressValidation.MaySendTo`, referenced by `MaySendDatagramOn`; not duplicated |
 | §9.3.1 (3436) | "If an endpoint skips validation of a peer address …, it does not need to limit its sending rate" | already in WP5's predicate: a validated address has no budget |
 | §9.3.2 (3451) | "an endpoint MUST revert to using the last validated peer address when validation of a new peer address fails" | `Step.failRevert`, `revert_or_close`, `InvLastValidated` |
 | §9.3.2 (3454) | higher-numbered packets from the legitimate address trigger another migration | `RecvCase.migrate` on `State.isHighest` |
