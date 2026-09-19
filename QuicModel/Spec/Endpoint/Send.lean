@@ -380,7 +380,11 @@ def maySendDatagramWhy (s : State) (d : OutDatagram) : List String :=
      ("pathResponsesOnPath", pathResponsesOnPath s d),
      ("ecnMarkOk", ecnMarkOk s d),
      ("handshakeHeaderOk", handshakeHeaderOk s d),
-     ("dcidOk", dcidOk s d),
+     ("dcidOk" ++ (match d.dcid with
+        | none => ""
+        | some cid =>
+          s!"(seq={dcidSeq? s cid} entries={s.cidRemote.entries.map (·.seq)} retired={s.cidRemote.retired} dcidSent={s.hs.dcidSent.isSome} reusedLocal={(dcidSeq? s cid).map (s.mig.reusedAcrossLocal (datagramPath d))} reusedPeer={(dcidSeq? s cid).map (s.mig.reusedAcrossPeer (datagramPath d))} path={(datagramPath d).loc.id}->{(datagramPath d).peer.id} active={s.mig.active.loc.id}->{s.mig.active.peer.id})"),
+      dcidOk s d),
      ("retireNotSelf", retireNotSelf s d),
      ("StreamTable.maySendAll", StreamTable.maySendAll s.st (datagramFrames d)),
      ("maySendPacket", d.packets.all (maySendPacket s))]

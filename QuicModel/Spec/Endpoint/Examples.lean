@@ -795,7 +795,7 @@ private def retiredCli : State :=
 #guard retiredCli.cidRemote.isRetired 0
 #guard maySendDatagram cli (auditDg [[.ping]])
 #guard !maySendDatagram retiredCli (auditDg [[.ping]])
-#guard maySendDatagramWhy retiredCli (auditDg [[.ping]]) = ["dcidOk"]
+#guard (maySendDatagramWhy retiredCli (auditDg [[.ping]])).map (fun w => (w.splitOn "(").head!) = ["dcidOk"]
 #guard maySendDatagram retiredCli (auditDg [[.ping]] (dcid := newCid))
 -- A connection ID the peer never issued is not one either (§5.1, line 1668).
 #guard !maySendDatagram cli (auditDg [[.ping]] (dcid := bytes [1,2,3,4,5,6,7,8]))
@@ -812,7 +812,7 @@ private def issuedCli : State :=
 -- Sequence number 0 has left from local address 0, so it may not leave from 2;
 -- sequence number 1 has left from nowhere yet.
 #guard !maySendDatagram issuedCli (auditDg [[.ping]] (src := ⟨2⟩))
-#guard maySendDatagramWhy issuedCli (auditDg [[.ping]] (src := ⟨2⟩)) = ["dcidOk"]
+#guard (maySendDatagramWhy issuedCli (auditDg [[.ping]] (src := ⟨2⟩))).map (fun w => (w.splitOn "(").head!) = ["dcidOk"]
 #guard maySendDatagram issuedCli (auditDg [[.ping]] (src := ⟨2⟩) (dcid := newCid))
 -- … and once it has (`LocalAction.beginSendOn`), it may not come back to 0.
 #guard !maySendDatagram (loc issuedCli (.beginSendOn ⟨⟨2⟩, peerAddr⟩ 1)) (auditDg [[.ping]] (dcid := newCid))
