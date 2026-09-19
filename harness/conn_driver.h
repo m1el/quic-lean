@@ -30,6 +30,11 @@
 #define MH_TICK(h)                        ((void)0)
 #define MH_FINISH(h)                      ((void)0)
 #endif
+#ifndef MH_SYNTH_RECV
+/* A datagram the model must process without the outcome being compared:
+   quiche_driver.h's replay of the handshake's 1-RTT packets. */
+#define MH_SYNTH_RECV(h, pkt, len)        ((void)0)
+#endif
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -41,6 +46,10 @@
 #include "ngtcp2_cid.h"
 #include "ngtcp2_ksl.h"
 #include "ngtcp2_pq.h"
+
+#ifdef DRIVER_QUICHE
+static size_t g_q_dcidlen; /* quiche_driver.h: the endpoint's current DCID length */
+#endif
 
 #define TAGLEN 16
 #define MAX_STEPS 64
@@ -60,6 +69,13 @@ typedef struct harness_s {
   int64_t out_max_pn[3]; /* largest pn seen per space, for OUT pn recovery */
   size_t cb_mark; /* h->tr.len when the current step began (WP13) */
   void *model;    /* the Lean endpoint running beside it (WP13), or NULL */
+#ifdef DRIVER_QUICHE
+  struct quiche_conn *q;    /* the endpoint under test (quiche_driver.h) */
+  int64_t q_peer_pn_base;   /* first 1-RTT packet number the forged peer may use */
+  int64_t q_next_bidi, q_next_uni;
+  uint64_t q_sid[64], q_off[64]; /* read offset per stream, for the trace */
+  size_t q_nstreams;
+#endif
 } harness;
 
 static const uint8_t g_cid_local[CIDLEN] = {0xa0, 0xa1, 0xa2, 0xa3,
@@ -711,6 +727,7 @@ static void fill_params(ngtcp2_transport_params *params) {
   params->grease_quic_bit = 0;
 }
 
+#ifndef DRIVER_QUICHE
 /* Builds the connection exactly the way ngtcp2's own read_write_pkt fuzzer
    does: install all three key sets by hand, then force the post-handshake
    state.  Returns 0 on success. */
@@ -877,6 +894,8 @@ fail:
   return -1;
 }
 
+#endif /* !DRIVER_QUICHE */
+
 /* ------------------------------------------------------- packet building */
 
 /* Builds a protected packet in |space| with packet number |pn| carrying the
@@ -1013,8 +1032,12 @@ static void dump_out_datagram(harness *h, const uint8_t *pkt, size_t pktlen) {
          makes ngtcp2 switch to it.  Assuming CIDLEN then reads the packet number,
          the header-protection sample and the payload at the wrong offset, and
          the OUT record is noise (WP13-15). */
+#ifdef DRIVER_QUICHE
+      hdlen = ngtcp2_pkt_decode_hd_short(&hd, p, left, g_q_dcidlen);
+#else
       hdlen = ngtcp2_pkt_decode_hd_short(&hd, p, left,
                                          h->conn->dcid.current.cid.datalen);
+#endif
       if (hdlen < 0) { TR(h, "OUT parse=hd_short_err\n"); return; }
       pktend = left;
       space = 2;
@@ -1052,6 +1075,10 @@ static void dump_out_datagram(harness *h, const uint8_t *pkt, size_t pktlen) {
 
 /* ---------------------------------------------------------------- steps */
 
+#ifdef DRIVER_QUICHE
+/* The engine: setup_conn, tr_time and the step_* functions, for quiche. */
+#include "quiche_driver.h"
+#else
 static void tr_time(harness *h) {
   ngtcp2_tstamp e = ngtcp2_conn_get_expiry(h->conn);
   if (e == UINT64_MAX) TR(h, "TIME now=%" PRIu64 " expiry=none\n", h->ts);
@@ -1284,6 +1311,8 @@ static void step_extend(harness *h, int which, int64_t sid, uint64_t n) {
 
 /* --------------------------------------------------------------- driver */
 
+#endif /* DRIVER_QUICHE */
+
 static void harness_start(harness *h, int server) {
   memset(h, 0, sizeof(*h));
   h->server = server;
@@ -1317,8 +1346,12 @@ static void harness_finish(harness *h, int show) {
   v = trace_hash(&h->tr);
   g_sink = v;
   if (show) fputs(h->tr.p, stdout);
+#ifdef DRIVER_QUICHE
+  drv_free(h);
+#else
   if (h->conn) ngtcp2_conn_del(h->conn);
   h->conn = NULL;
+#endif
   free(h->tr.p);
   h->tr.p = NULL;
 }

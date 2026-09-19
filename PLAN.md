@@ -370,6 +370,49 @@ second paths remain outside the campaign.
 packet) was done next, on the same lookup: `Send.RetireNotSelf`, with
 `retire_ne_dcid_of_maySendDatagram`; guards in `Examples.lean` section WP13-4.
 
+## 4j. quiche as a second implementation (started 2026-09-19)
+
+`out/quiche_diff` is `harness/endpoint_diff.c` built with `-DDRIVER_QUICHE`:
+the model side is shared, `harness/quiche_driver.h` replaces conn_driver.h's
+ngtcp2 engine (`./build_quiche_harness.sh`).  Same script grammar, same binary
+fuzz format, same corpus.  Needs `../quiche` on branch `fuzz-mock-clock`
+(`clock::CLOCK`, an `AtomicU64` every time read goes through under the
+`fuzzing` feature; `quiche_fuzz_set_clock` in the FFI).  Not upstreamed, not
+committed there.
+
+What differs from the ngtcp2 harness, and why (details in quiche_driver.h):
+real in-memory TLS handshake, then the peer is forged; quiche's crypto stub
+(zero HP mask, no tag) converted to the model's at the boundary, so the model
+sees the bytes it would see from ngtcp2; 1-RTT packet numbers relative to what
+the handshake used, with the handshake's 1-RTT packets replayed into the model;
+no callbacks, so only `recv_stream_data` / `stream_reset` are observable and the
+exclusion-aware comparison is the first pass; `TlsEvent.tlsSend` read back off
+the wire (`Harness.cryptoEnd`) because a real handshake sends a session ticket.
+quiche pads Initial datagrams with raw zeros *after* the last packet, which the
+`fuzzing` stub "decrypts"; the driver trims them (`q_trim`).
+
+State: eight scripts, 0 mismatches on both engines, and quiche closes with the
+same transport error as ngtcp2 in all five error scripts.  Corpus replay
+(`-runs=0 corpus/conn_trace`, 2 458 inputs): ngtcp2 44 signatures (unchanged by
+the refactor), quiche 26 (21 maysend, 4 outcome, 1 obligation), untriaged.
+
+`DIFF_DIGEST=<file>` writes one line per compared step;
+`harness/scripts/digest_diff.py A B` joins two engines' files over the same
+inputs and classifies the first difference per input (latitude / A-only /
+B-only / both / model-only).  First join: 2 306 common inputs, 1 857 identical,
+276 "latitude" — **not yet cleaned of harness artefacts** (e.g. 47 are the
+idle-timer difference of WP13-12, where quiche sides with the model).
+
+Open, in order: (1) triage the 26 quiche signatures; the first looked at is a
+candidate quiche finding — PATH_RESPONSE on a validated path leaves in a 63–78
+byte datagram, §8.2.2 "MUST expand … to at least … 1200 bytes"; quiche pads
+only `if has_initial || !path.validated()` (quiche/src/lib.rs:5389); ngtcp2
+pads.  (2) `892de5bd…` (ACK refused by `ackPacketOk`) appears under both
+engines: the model is the suspect.  (3) ACK frames in scripts name absolute
+packet numbers, which mean different packets to the two engines.  (4) quiche's
+randomness is not reproducible: BoringSSL's `RAND_reset_for_fuzzing` is not in
+the vendored build.  (5) No fuzzing campaign with quiche_diff yet.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server

@@ -101,8 +101,10 @@ static void md_shutdown(harness *h, int which, int64_t sid, uint64_t err, int rv
 static void md_out(harness *h, const uint8_t *buf, size_t len);
 static void md_tick(harness *h);
 static void md_finish(harness *h);
+static void md_synth_recv(harness *h, const uint8_t *pkt, size_t len);
 
 #define MODEL_HOOKS
+#define MH_SYNTH_RECV(h, pkt, len)          md_synth_recv((h), (pkt), (len))
 #define MH_START(h, server)                 md_start((h), (server))
 #define MH_MARK(h)                          md_mark(h)
 #define MH_RECV(h, pkt, len, rv)            md_recv((h), (pkt), (len), (rv))
@@ -171,6 +173,8 @@ extern lean_object *quic_h_ev_timer(uint64_t now);
 extern lean_object *quic_h_ev_local(lean_object *a, uint64_t now);
 extern lean_object *quic_h_tls_keys(uint8_t is_write, uint8_t level);
 extern lean_object *quic_h_tls_complete(uint8_t dummy);
+extern lean_object *quic_h_tls_send(uint8_t level, uint64_t len);
+extern uint64_t quic_h_crypto_end(lean_object *frames);
 extern lean_object *quic_h_app_open_stream(uint8_t dir);
 extern lean_object *quic_h_app_write(uint64_t id, uint64_t len);
 extern lean_object *quic_h_app_fin(uint64_t id);
@@ -383,6 +387,8 @@ typedef struct {
   int max_cands;
   uint64_t max_stream_index;
   int64_t out_max_pn[3];
+  uint64_t crypto_handed[3]; /* CRYPTO bytes TLS is known to have handed over */
+  int digest_step;           /* DIFF_DIGEST: steps written so far in this run */
 } mstate;
 
 static int g_model_ready;
@@ -632,6 +638,11 @@ static void set_cands(mstate *m, lean_object *next) {
                                received ACK to StreamTable, so the model can
                                never produce Stream.Send.allDataAcked) */
 static int cb_excluded(const char *n) {
+#ifdef DRIVER_QUICHE
+  /* quiche has no callbacks; only what its API lets the driver poll for can
+     be compared (quiche_driver.h). */
+  if (!drv_cb_observable(n)) return 1;
+#endif
   return strcmp(n, "stream_close") == 0 ||
          strcmp(n, "acked_stream_data_offset") == 0;
 }
@@ -745,6 +756,67 @@ static lean_object *track_loose(harness *h, mstate *m, const evspec *e,
    `trackSet` + `Obs.matchesSpec` (Exports.lean's `quic_endpoint_track_trace`).
    |is_error| < 0 means "the error is not a QUIC transport error", which is not
    comparable; the step is then only advanced. */
+/* ---------------------------------------------------------------- digest
+ *
+ * DIFF_DIGEST=<file> appends one line per compared step:
+ *
+ *     <input> <step> <event> <result> <lean> <cbs>
+ *
+ *   input   FNV-1a of the fuzz input (or "script")
+ *   result  ok | err=<QUIC transport error code> | other
+ *   lean    accept | MISMATCH  -- did the model permit what was observed
+ *   cbs     the application-visible events both engines can report, as a
+ *           sorted set (ngtcp2 reports per frame, quiche per read, so neither
+ *           order nor multiplicity is comparable)
+ *
+ * Two implementations run over the same inputs produce two such files, and
+ * harness/scripts/digest_diff.py joins them.  A step where the results differ
+ * and both say `accept` is one where the implementations disagree *inside*
+ * what the model permits: genuine latitude in the text, or a rule the model is
+ * missing.  Neither pairwise diff reports those. */
+static FILE *g_digest;
+static int g_digest_tried;
+
+static int digest_cb_common(const char *n) {
+  return strcmp(n, "recv_stream_data") == 0 || strcmp(n, "stream_reset") == 0;
+}
+
+static void digest_step(harness *h, const evspec *e, int is_error, uint64_t code,
+                        int accepted) {
+  const char *names[64];
+  int n, i, j, seen_rsd = 0, seen_rst = 0;
+  mstate *m = M(h);
+  char in[32];
+  if (!g_digest_tried) {
+    const char *path = getenv("DIFF_DIGEST");
+    g_digest_tried = 1;
+    if (path) g_digest = fopen(path, "a");
+  }
+  if (!g_digest) return;
+  n = observed_names(h, names, 64);
+  for (i = 0; i < n; ++i) {
+    if (!digest_cb_common(names[i])) continue;
+    if (names[i][0] == 'r') seen_rsd = 1; else seen_rst = 1;
+  }
+  (void)j;
+  if (g_input) {
+    uint64_t v = 1469598103934665603ULL;
+    size_t k;
+    for (k = 0; k < g_inputlen; ++k) v = (v ^ g_input[k]) * 1099511628211ULL;
+    snprintf(in, sizeof(in), "%016" PRIx64, v);
+  } else {
+    snprintf(in, sizeof(in), "script");
+  }
+  fprintf(g_digest, "%s %d %s ", in, m->digest_step++, e->name);
+  if (is_error > 0) fprintf(g_digest, "err=%" PRIu64, code);
+  else if (is_error < 0) fprintf(g_digest, "other");
+  else fprintf(g_digest, "ok");
+  fprintf(g_digest, " %s %s%s%s\n", accepted ? "accept" : "MISMATCH",
+          seen_rsd ? "recv_stream_data" : "", (seen_rsd && seen_rst) ? "," : "",
+          seen_rst ? "stream_reset" : (seen_rsd ? "" : "-"));
+  fflush(g_digest);
+}
+
 static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
                        lean_object *cbs, const char *cbtext, const char *what) {
   mstate *m = M(h);
@@ -759,19 +831,31 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
   if (is_error < 0) {
     ++g_steps_skipped;
     if (cbs) lean_dec(cbs);
+    digest_step(h, e, is_error, code, 1);
     set_cands(m, advance_all(m, e, 0));
     return;
   }
 
   ++g_steps_compared;
+#ifdef DRIVER_QUICHE
+  /* quiche surfaces only some of the model's effects (drv_cb_observable), so
+     the exact comparison in Lean, which sees every effect, would find that only
+     a *dropped* datagram looks like "ok, nothing observed" and would discard the
+     candidates that processed it.  The first pass is therefore the one that
+     drops unobservable names from both sides. */
+  if (cbs) lean_dec(cbs);
+  cbs = NULL;
+#else
   lean_inc(m->cands);
   next = quic_endpoint_track_trace(m->cands, ev_build(e), (uint8_t)is_error, code,
                                    cbs ? cbs : l_nil());
   if (!lean_is_scalar(next)) {
+    digest_step(h, e, is_error, code, 1);
     set_cands(m, l_take(next, m->max_cands));
     return;
   }
   lean_dec(next);
+#endif
 
   /* Second chance: the same comparison with the two callbacks that name the
      same transport state at a different moment of the trace removed from both
@@ -779,6 +863,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
   next = track_loose(h, m, e, is_error, code, 0);
   if (!lean_is_scalar(next)) {
     ++g_steps_loose;
+    digest_step(h, e, is_error, code, 1);
     set_cands(m, next);
     return;
   }
@@ -798,6 +883,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
     ++g_steps_subseq;
     snprintf(softkey, sizeof(softkey), "%s|subsequence|%.300s", e->name, cbtext);
     soft_seen(fnv(softkey), softkey);
+    digest_step(h, e, is_error, code, 1);
     set_cands(m, next);
     return;
   }
@@ -813,6 +899,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
     snprintf(sigkey, sizeof(sigkey), "%s|OK|%.300s", e->name, cbtext);
   }
 
+  digest_step(h, e, is_error, code, 0);
   report(h, m, "outcome", sigkey, detail, e);
   /* resynchronise so the rest of the run still tests something */
   set_cands(m, advance_all(m, e, 0));
@@ -932,6 +1019,20 @@ static void md_start(harness *h, int server) {
   }
 }
 
+/* A datagram that really arrived but whose outcome is not compared: it only
+   has to bring the model to the state the endpoint is in. */
+static void md_synth_recv(harness *h, const uint8_t *pkt, size_t len) {
+  mstate *m = M(h);
+  evspec d;
+  if (!m || !m->alive) return;
+  d.kind = EV_DATAGRAM;
+  d.arg = model_bytes(pkt, len);
+  d.now = model_now(h);
+  d.name = "handshake-era 1-RTT datagram (replayed)";
+  synth_step(h, &d);
+  lean_dec(d.arg);
+}
+
 static void md_finish(harness *h) {
   mstate *m = M(h);
   if (!m) return;
@@ -944,6 +1045,9 @@ static void md_finish(harness *h) {
    derives it.  1 = a transport error with *code, 0 = no error, -1 = an error
    that is not a QUIC transport error (idle close, drop connection, ...). */
 static int obs_error(int rv, uint64_t *code) {
+#ifdef DRIVER_QUICHE
+  return drv_obs_error(rv, code);
+#else
   ngtcp2_ccerr ccerr;
   if (rv == 0) return 0;
   /* Not errors: ngtcp2 uses these to say "the datagram was processed and the
@@ -958,6 +1062,7 @@ static int obs_error(int rv, uint64_t *code) {
   if (ccerr.type != NGTCP2_CCERR_TYPE_TRANSPORT) return -1;
   *code = ccerr.error_code;
   return 1;
+#endif
 }
 
 /* §11.1: ngtcp2 answers a failing read_pkt with a CONNECTION_CLOSE carrying this
@@ -1216,7 +1321,11 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   lean_object *p;
 
   if (!m || !m->alive) return;
+#ifdef DRIVER_QUICHE
+  np = parse_out(m, g_q_dcidlen, buf, len, ps, 8);
+#else
   np = parse_out(m, h->conn->dcid.current.cid.datalen, buf, len, ps, 8);
+#endif
   if (np <= 0) return;
   /* conn_driver.h's unprotection assumes an 8-byte Destination Connection ID
      (`ngtcp2_pkt_decode_hd_short(..., CIDLEN)`).  When the peer has issued a
@@ -1238,6 +1347,25 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     lean_object *fs = ps[i].frames;
     lean_inc(fs);
     packets = l_cons(quic_h_out_packet((uint8_t)ps[i].ptype, fs), packets);
+  }
+
+  /* TLS handing bytes to the transport is invisible here; it is read back off
+     the wire (Harness.lean, `cryptoEnd`).  Space 0/1/2 is CryptoLevel
+     initial/handshake/oneRtt. */
+  for (i = 0; i < np; ++i) {
+    uint64_t end;
+    lean_inc(ps[i].frames);
+    end = quic_h_crypto_end(ps[i].frames);
+    if (end > m->crypto_handed[ps[i].space]) {
+      evspec e;
+      e.kind = EV_TLS;
+      e.arg = quic_h_tls_send((uint8_t)ps[i].space, end - m->crypto_handed[ps[i].space]);
+      e.now = model_now(h);
+      e.name = "tlsSend (read off the wire)";
+      synth_step(h, &e);
+      lean_dec(e.arg);
+      m->crypto_handed[ps[i].space] = end;
+    }
   }
 
   /* §5.1.1 / §5.1.2: ngtcp2 issues and retires connection IDs inside the

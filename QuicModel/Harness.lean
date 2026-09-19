@@ -196,6 +196,19 @@ private def sortBySeq : List (Nat × LocalAction) → List (Nat × LocalAction)
   | [] => []
   | x :: t => insertBySeq x (sortBySeq t)
 
+/-- The highest CRYPTO offset the frames reach (0 if none).  TLS hands bytes to
+    the transport out of the harness's sight, and the model lets a CRYPTO frame
+    out only for bytes TLS has handed over (`Handshake.maySendCryptoAt`), so the
+    harness reads the hand-over back off the wire as `TlsEvent.tlsSend`, exactly
+    as `presendActions` reads back the decision to issue a connection ID.  With
+    ngtcp2's stubbed handshake no CRYPTO frame is ever sent; quiche's real one
+    sends a NewSessionTicket in 1-RTT. -/
+@[export quic_h_crypto_end]
+def cryptoEnd (fs : List Frame) : UInt64 :=
+  (fs.foldl (fun m f => match f with
+    | Frame.crypto off data => max m (off + data.size)
+    | _ => m) 0).toUInt64
+
 @[export quic_h_presend_actions]
 def presendActions (fs : List Frame) (src dest now deadline : UInt64) : List LocalAction :=
   (sortBySeq (fs.filterMap fun f =>
