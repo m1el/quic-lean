@@ -82,6 +82,11 @@ class Index:
         # fine, `Ranges` vs `Ranges_mem` is not), so owners are recovered by
         # stripping the known worker suffixes instead.
         for n in names:
+            # A match splitter is emitted wherever a proof or a definition
+            # elsewhere case-splits on the name; it is not the definition's
+            # code, and alone it must not make a `Prop` look executable.
+            if re.search(r'_match__\d+_splitter', n):
+                continue
             base = n
             if base.startswith('lp_QuicModel_'):
                 base = base[len('lp_QuicModel_'):]

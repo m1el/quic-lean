@@ -760,6 +760,60 @@ Not planned: more engines (§4n item 1: they add no coverage); the 100 *no-code*
 rows — deciding which of them deserve a run-time check is a review of the
 coverage tables, to be scheduled separately.
 
+## 4p. §4o, first pass: A1–A5, B1, B2, B4 and WP13-6 done; B3's prerequisite located (2026-09-20)
+
+Work in progress found in the tree was kept where it was right (A1, A2, A4,
+`build_cov.sh`, `--diff`) and set aside where it was not: an ACK→stream routing
+in `Events.lean` that did not compile and fired "all data acknowledged" on the
+acknowledgment of any one packet (`out/wip/events-ack-routing.patch`; redone
+below).  `build_quiche_harness.sh` / `build_cov.sh` now prefer
+`../quiche-fuzz-mock-clock`, a worktree of the mock-clock branch, because
+`../quiche` moves between upstream-patch branches.
+
+| Step | Status |
+|---|---|
+| A1, A2 | `Endpoint.maySendNumbers` over `(space, number, size)` in wire order, threading a temporary state so a repeat inside one datagram is refused; `maySendNumbers_iff`, `largestSent_strictMono_of_maySendNumbers`, `maySendNumbers_append`; export `quic_endpoint_may_send_numbers`, conjunct `pnOk` |
+| A3 | `Ack.State.largestAcked` (set by `Step.ackOk`; an ACK of a number never sent is not counted); `Ack.maySendPacketNumberSize` for §17.1 lines 6023 and 6027; conjunct `pnSizeOk`.  `decode_of_maySendNumber`: a number both rules accept is what Appendix A.3's decoder returns, given `Ack.AckedWasSent` (`ackedWasSent_step`).  The general lemma needs `pn < 2^62` — the decoder never answers more; omega found that |
+| A4 | `Examples.lean` guards; `DIFF_SELFTEST=pn` offers every datagram twice: 10 099 / 10 829 / 14 438 repeats refused by `pnOk` (ngtcp2 / quiche / QUICHE), and a five-byte size by `pnSizeOk` |
+| A5 | as expected, no new signature under any engine |
+| B1 | `build_cov.sh`, `measure_spec_coverage.py`, `spec_coverage.py --diff`.  Guards written as projection chains (`s.phase.mayCarryData`) now resolve: "via outcomes" evidence 57 → 30 rows, guard 38 → 68; five rows that read exercised only because their component was stepped now read NOT exercised (Termination §10.2.1 lines 3995 and 4008, §10.3.1 line 4323; PathValidation §8.2.1 lines 3141 and 3150).  Per-row `hit/total` code regions in the TSV.  Match splitters no longer make a `Prop` look executable.  **§4n item 4 answered: §3.5 line 1254 was a mapping miss; `Phase.mayCarryData` ran 109 613 times** |
+| B2 | packet numbers in an input's ACK frames are *ordinals* into what the endpoint sent in that space, resolved in `build_peer_pkt` on the decoded frame (conn_driver.h, "engine-neutral references").  Identity under ngtcp2.  QUICHE 23/406 → 23/192 with 1 100 more steps compared; `bebccbdd…` 281 → 62, the rest being FRAME_ENCODING_ERROR for a stream ID over the limit.  RETIRE_CONNECTION_ID needs nothing (§5.1.1 fixes sequence numbers); PATH_RESPONSE `echo[k]` goes with B7 |
+| WP13-6 | `Pipeline.recvAckFrame`: `Ack` first, then `Retransmission.acked` for every in-flight packet covered, then `ackAllData` for a stream whose acknowledged segments reach the final size with the FIN, `ackReset` for an acknowledged RESET_STREAM.  **The harness had never reported what a sent packet carried** (`sentPacketFrames` exported, unused), so Retransmission was idle in every run — that, as much as the missing loss event, was its 1 %.  43 ngtcp2 steps no longer need the callback exclusion |
+| B4 | `Endpoint.recommendedWhy` → `quic_endpoint_recommended_why`; advisory class in the summary, never a mismatch.  First data, untriaged: ngtcp2 176 in 10 093 packets (RESET_STREAM with another code than STOP_SENDING's ×97, DATA_BLOCKED below the limit ×45, NEW_CONNECTION_ID/STREAM sent again after acknowledgment ×34), quiche 246 (DATA_BLOCKED ×150), QUICHE 31 |
+
+Two model defects found on the way, both "too narrow", both fixed:
+`Stream.Recv.Step.streamAfterResetDiscarded` (a STREAM frame after a reset may
+be discarded, §3.2 lines 1111/1127 — all three engines do; the model always
+delivered it, the tracker kept only the "packet not processed" candidate, and
+the engine's later ACK was refused: one root of `892de5bd…`, §4j (2)) and
+`Stream.Send.Step.stopSendingLateTold` (both ngtcp2 and QUICHE tell the
+application of a STOP_SENDING in "Data Recvd", a state that was unreachable
+before WP13-6).
+
+Replay of `corpus/conn_trace`, signatures / mismatches, before → after:
+ngtcp2 27/138 → 25/134, quiche 24/323 → 24/321, QUICHE 23/406 → 24/191.
+Requirement rows exercised (same script for both): 171 → 176 of 243 executable
+(430 normative); the plan's 167 of 244 was under the looser evidence rule.
+The row table moves little because what is left is behind B3, B5–B8; the
+gains here are in exactness and in what the rows' functions actually ran.
+
+**B3's prerequisite is not `ackPacketOk` as a whole but one reading.**  Every
+closing datagram bundles an ACK that covers *the packet whose frame caused the
+error* (QUICHE script 03: `ACK largest=1 first=1; CONNECTION_CLOSE`).  The
+model never records that packet: an `error` outcome carries no state.  §13.1
+line 5022 forbids acknowledging before "all frames contained in the packet
+have been processed"; whether a frame that raised a connection error was
+"processed" is the question, and all three engines answer yes.  Proposed:
+`LocalAction.localError` takes the packet's space and number and records it in
+`Ack.received` (the permissive reading, PLAN §1 "never stricter than the
+text"), then B3 as planned.  The rest of `892de5bd…` that was looked at is
+rejection after candidate loss (§4k's open cap), not a rule.
+
+Open, in order: the reading above, then B3; B5 (loss step — the bookkeeping it
+needs now exists); triage of the advisory counts, starting with
+`retransmitAcked:NEW_CONNECTION_ID` under ngtcp2, which may be the model
+acknowledging more than the engine did; the candidate cap; B6–B9 unchanged.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
