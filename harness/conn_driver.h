@@ -47,8 +47,14 @@
 #include "ngtcp2_ksl.h"
 #include "ngtcp2_pq.h"
 
+/* DRIVER_QUICHE: the engine is not ngtcp2 (quiche_driver.h).  DRIVER_GQUICHE
+   selects Google QUICHE among those (gquiche_driver.h). */
+#if defined(DRIVER_GQUICHE) && !defined(DRIVER_QUICHE)
+#define DRIVER_QUICHE
+#endif
+
 #ifdef DRIVER_QUICHE
-static size_t g_q_dcidlen; /* quiche_driver.h: the endpoint's current DCID length */
+static size_t g_q_dcidlen; /* the endpoint's current DCID length */
 #endif
 
 #define TAGLEN 16
@@ -69,7 +75,9 @@ typedef struct harness_s {
   int64_t out_max_pn[3]; /* largest pn seen per space, for OUT pn recovery */
   size_t cb_mark; /* h->tr.len when the current step began (WP13) */
   void *model;    /* the Lean endpoint running beside it (WP13), or NULL */
-#ifdef DRIVER_QUICHE
+#ifdef DRIVER_GQUICHE
+  struct gq_conn *gq;       /* the endpoint under test (gquiche_driver.h) */
+#elif defined(DRIVER_QUICHE)
   struct quiche_conn *q;    /* the endpoint under test (quiche_driver.h) */
   int64_t q_peer_pn_base;   /* first 1-RTT packet number the forged peer may use */
   int64_t q_next_bidi, q_next_uni;
@@ -1075,8 +1083,11 @@ static void dump_out_datagram(harness *h, const uint8_t *pkt, size_t pktlen) {
 
 /* ---------------------------------------------------------------- steps */
 
-#ifdef DRIVER_QUICHE
-/* The engine: setup_conn, tr_time and the step_* functions, for quiche. */
+#ifdef DRIVER_GQUICHE
+/* The engine: setup_conn, tr_time and the step_* functions, for Google QUICHE. */
+#include "gquiche_driver.h"
+#elif defined(DRIVER_QUICHE)
+/* The same, for Cloudflare quiche. */
 #include "quiche_driver.h"
 #else
 static void tr_time(harness *h) {

@@ -342,3 +342,76 @@ Unchanged from PLAN §4a, plus what this run added:
   library error, and that datagram is not offered to `may_send_datagram`).
 * The send side is one-directional throughout: a frame ngtcp2 does *not* send is
   never a finding.
+
+## 11. Google QUICHE (Chrome's QUIC) as the engine
+
+`out/gquiche_diff` is this harness with Google QUICHE — the QUIC implementation
+Chrome ships — in ngtcp2's place.  The model side, the script grammar, the
+binary fuzz format and the corpus are shared; the engine is
+`harness/gquiche_driver.h` (`-DDRIVER_GQUICHE`), which talks to QUICHE through
+the C calls of `harness/gquiche/gquiche_shim.h`.
+
+```sh
+git clone https://github.com/google/quiche ../google-quiche   # unmodified
+./build_gquiche_harness.sh          # needs bazelisk (or BAZEL=...), clang
+./out/gquiche_diff --script harness/scripts/01-stream-in-order.txt
+./out/gquiche_diff -print_funcs=0 -max_total_time=600 -max_len=4096 -rss_limit_mb=4096 \
+    -timeout=30 out/corpus-gq corpus/conn_trace
+```
+
+`harness/gquiche` is a Bazel workspace of one target: `gquiche_shim.cc` and all
+of QUICHE in `libgquiche_shim.so`, exporting `gq_*` only (a version script), so
+QUICHE's BoringSSL never meets anything else in the process.  QUICHE's own
+sources are built with `-fsanitize=fuzzer-no-link`; libFuzzer sees the library
+as a second module.  The first build takes about four minutes.
+`-print_funcs=0` is not optional: printing a `NEW_FUNC` that lies in the shared
+library deadlocks libFuzzer against `llvm-symbolizer` (both ends waiting on the
+pipe; seen with LLVM 23).
+
+QUICHE needs no patch.  Everything the harness has to control is an interface:
+
+| what | QUICHE interface | the shim's implementation |
+|---|---|---|
+| packet protection | `QuicEncrypter`, `QuicDecrypter` | `Quic.Protection.stub` itself: payload in the clear, tag 16 × `0xA5`, mask = first five bytes of the sample. Nothing is converted at the boundary. |
+| handshake | `QuicCryptoStream` | none: keys by hand, the peer's `TransportParameters` handed to `QuicConfig`, then what `TlsServerHandshaker` does on completion. |
+| clock, timers | `QuicClock`, `QuicAlarmFactory` | `h->ts`; an alarm fires only from `gq_fire_alarms`, earliest deadline first, creation order breaking ties. |
+| output | `QuicPacketWriter` | a queue, with the DCID length noted per datagram. |
+| randomness | `QuicRandom` | an LCG; runs are reproducible. |
+
+| environment variable | meaning |
+|---|---|
+| `DIFF_GQ_CHECK_CLOSE` | also offer a closing connection's datagram to `may_send_datagram` |
+| `GQ_DEBUG` | QUICHE's log on stderr, and per-datagram receive statistics |
+
+What differs from the ngtcp2 engine, and the reasons:
+
+* **Setup replays one Handshake packet at a server** — the Handshake/PADDING
+  packet of §2 item 3, for the reason given there.  QUICHE validates the
+  client's address when it decrypts a Handshake or 1-RTT packet *while the
+  handshake is unconfirmed*; a crypto stream that claims "confirmed" from the
+  start leaves the server under the 3× limit for good, and the symptom is not
+  an error but acknowledgments that are never written once a stream write has
+  used the budget up.  The Initial and Handshake keys are dropped afterwards.
+* **QUICHE writes when it likes**, from inside `ProcessUdpPacket`, an alarm or a
+  stream write.  The queue is handed to `MH_OUT` at the end of the step, after
+  the step's own hook.  Setup itself sends (`HANDSHAKE_DONE`,
+  `NEW_CONNECTION_ID`), and that is checked too.
+* **Alarms due "now" run at the end of a receive step.**  QUICHE defers part of
+  a packet's processing to zero-delay alarms (retiring a connection ID, for
+  one); an event loop runs them before the next datagram.
+* **Packet numbers.**  QUICHE numbers its packets from 1, ngtcp2 from 0.  A
+  corpus input that acknowledges packet 0 acknowledges a packet QUICHE never
+  sent.
+* **Callbacks** are `QuicStream` / `QuicSession` virtuals reported under
+  ngtcp2's names: `stream_open`, `recv_stream_data`, `stream_reset`,
+  `recv_stop_sending`, `recv_crypto_data`; the last two are more than
+  Cloudflare quiche shows.  `stream_reset` and `recv_stop_sending` are reported
+  once per stream — QUICHE calls the virtual for every duplicate frame.
+* **The connection window.**  `QuicConfig` refuses `initial_max_data` below
+  16 KiB, so the shim sets the session flow controller's receive window to
+  4096 directly.
+* **The closing datagram is not checked by default**, as it is not for the
+  other two engines.  With `DIFF_GQ_CHECK_CLOSE` every error input mismatches:
+  QUICHE bundles an ACK with its CONNECTION_CLOSE and the model's closing state
+  refuses the packet.  Not triaged.
+* `extend_*` steps are accepted and ignored, as for Cloudflare quiche.

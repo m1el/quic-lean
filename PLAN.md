@@ -434,6 +434,62 @@ mismatch.  Open next: the quiche `bfd34bc6…` residue (201 steps), the candidat
 cap (233 of quiche's 323 steps are after candidate loss), the digest join has
 not been re-run.
 
+## 4l. Google QUICHE (Chrome's QUIC) as a third implementation (2026-09-20)
+
+`out/gquiche_diff` is `harness/endpoint_diff.c` built with `-DDRIVER_GQUICHE`
+(`./build_gquiche_harness.sh`): `harness/gquiche_driver.h` is the engine,
+`harness/gquiche/gquiche_shim.{h,cc}` puts QUICHE's C++ behind C calls, and a
+one-target Bazel workspace there links it with an **unmodified**
+`../google-quiche` (github.com/google/quiche at `535a2730`, 2026-09-18) into
+`out/libgquiche_shim.so`.  Same scripts, same binary format, same corpus.
+`harness/endpoint_diff.md` §11 has the design; in one line: crypto, clock,
+alarms, writer and randomness are all QUICHE interfaces, so the model's stub
+cipher is installed directly, nothing is converted, packet numbers are
+absolute, and runs are reproducible.
+
+State: eight scripts, 0 mismatches.  QUICHE closes with ngtcp2's code in
+scripts 02, 05 and 06, and with PROTOCOL_VIOLATION where ngtcp2 says
+FINAL_SIZE_ERROR (03) and FRAME_ENCODING_ERROR (04, MAX_STREAMS > 2^60) — which
+the model accepts.  Corpus replay (`-runs=0
+corpus/conn_trace`, 2 456 inputs): no crash, 14 581 steps compared, 14 438 send
+checks, 0 unparsable datagrams, **23 signatures / 406 mismatches, untriaged**
+beyond the first look below.  Every mismatching input was replayed on all three
+engines; the artifacts are in `out/artifacts-gq`.  A first five-minute fuzzing
+run (`out/corpus-gq` in front of `corpus/conn_trace`, so the shared corpus is
+not written to): 26 881 runs at ~90/s, no crash, QUICHE coverage feeding
+libFuzzer (823 new inputs), 36 signatures, `bebccbdd…` alone 1 012 of 1 746.
+
+First look, by size:
+
+1. `bebccbdd…` ×281 — ACK with Largest Acknowledged = 0 closes QUICHE with
+   FRAME_ENCODING_ERROR ("QUIC_INVALID_ACK_DATA: Largest acked is 0"); the
+   model permits OK or PROTOCOL_VIOLATION.  QUICHE never sends packet 0, so
+   this is an acknowledgment of an unsent packet, for which §13.1 asks
+   PROTOCOL_VIOLATION.  Mostly an artefact of a corpus grown against ngtcp2
+   (which does send packet 0) — item (3) of §4j again — but the code is
+   QUICHE's choice.
+2. `1cdbc1cd…` ×42 — STREAMS_BLOCKED with Maximum Streams = 2^60 exactly:
+   QUICHE closes with PROTOCOL_VIOLATION, §19.14 forbids only values *above*
+   2^60 and names STREAM_LIMIT_ERROR / FRAME_ENCODING_ERROR.  Also mismatches
+   under ngtcp2.
+3. `892de5bd…` ×16 — ACK refused by `ackPacketOk`: now under all three
+   engines; see §4j (2), the model is the suspect.
+4. `405f42eb…` ×10 — a client accepts RETIRE_CONNECTION_ID for sequence
+   numbers it never issued; the model wants §19.16's PROTOCOL_VIOLATION.
+5. `dcidOk` ×2 — after NEW_CONNECTION_ID with Retire Prior To = 1, the ACK
+   written in the same pass still carries the retired DCID; QUICHE switches in
+   a zero-delay alarm.  §5.1.2 "MUST stop using".
+6. `StreamTable` send refusals (STREAMS_BLOCKED after a refused `open`,
+   STREAM/RESET_STREAM/MAX_STREAMS) ×~25 and `pathResponsesOnPath` ×~10: not
+   looked at; the first suspect is the driver's `open`/`write` mapping, not
+   QUICHE.
+7. With `DIFF_GQ_CHECK_CLOSE`: every closing datagram is refused (ACK bundled
+   with CONNECTION_CLOSE).  Off by default for parity with the other engines.
+
+Open: triage 4–7; `DIFF_DIGEST` three-way join; `extend_max_*` callbacks
+(`OnCanCreateNewOutgoingStream`, `OnCanWrite`) are not surfaced yet; QUICHE's
+dependencies are built without coverage and the library without ASan.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server

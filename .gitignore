@@ -3,3 +3,4 @@ build-c-ndebug/
 .lake/
 out/
 *.log
+harness/gquiche/bazel-*

@@ -1,0 +1,20 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "libgquiche_shim.so",
+    srcs = [
+        "gquiche_shim.cc",
+        "gquiche_shim.h",
+    ],
+    additional_linker_inputs = ["gquiche_shim.lds"],
+    # Only gq_* leaves the library: the harness also links Cloudflare quiche's
+    # and ngtcp2's dependencies, and BoringSSL's symbols must not meet them.
+    linkopts = ["-Wl,--version-script=$(location gquiche_shim.lds)"],
+    linkshared = True,
+    deps = [
+        "@com_google_absl//absl/log:globals",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@quiche//quiche:quiche_unstable_api",
+    ],
+)

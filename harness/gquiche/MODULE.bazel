@@ -1,0 +1,13 @@
+# Builds libgquiche_shim.so: gquiche_shim.cc and all of Google QUICHE behind the
+# C interface of gquiche_shim.h.  build_gquiche_harness.sh passes
+# --override_module=quiche=$GQUICHE; the path below is its default.
+module(name = "gquiche_shim")
+
+bazel_dep(name = "quiche")
+local_path_override(
+    module_name = "quiche",
+    path = "../../../google-quiche",
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.9")
+bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_absl")
