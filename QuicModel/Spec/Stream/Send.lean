@@ -259,6 +259,12 @@ inductive Step : State → Event → Out → Prop
       and the terminal states no reset is owed, so the frame has no effect. -/
   | stopSendingLate {s code} (h : s.phase.mayCarryData = false) :
       Step s (.recvStopSending code) (.ok s [])
+  /-- The same, with the application told: the text says nothing about what an
+      application learns, and ngtcp2 and Google QUICHE both report a
+      STOP_SENDING that arrives in "Data Recvd".  No state changes and no reset
+      becomes owed. -/
+  | stopSendingLateTold {s code} (h : s.phase.mayCarryData = false) :
+      Step s (.recvStopSending code) (.ok s [.peerStopSending code])
   /-- §3.1, line 940: the first STREAM frame moves "Ready" to "Send";
       §3.1, line 964: "After the application indicates that all stream data has
       been sent and a STREAM frame containing the FIN bit is sent, the sending
@@ -325,7 +331,7 @@ def outcomes (s : State) : Event → List Out
   | .recvStopSending code =>
       if s.phase.mayCarryData then
         [.ok { s with resetCode := some code } [.peerStopSending code]]
-      else [.ok s []]
+      else [.ok s [], .ok s [.peerStopSending code]]
   | .sentStream offset len fin =>
       if maySendStream s offset len fin then
         [.ok { s with
@@ -389,8 +395,10 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
       simp only [outcomes] at h
       split at h
       · simp only [List.mem_singleton] at h; subst h; exact .stopSending ‹_›
-      · simp only [List.mem_singleton] at h; subst h
-        exact .stopSendingLate (Bool.eq_false_iff.mpr ‹_›)
+      · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+        rcases h with h | h <;> subst h
+        · exact .stopSendingLate (Bool.eq_false_iff.mpr ‹_›)
+        · exact .stopSendingLateTold (Bool.eq_false_iff.mpr ‹_›)
     | sentStream offset len fin =>
       simp only [outcomes] at h
       split at h
@@ -438,6 +446,7 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | maxStreamDataIgnored h1 h2 => simp [outcomes, h1, h2]
     | stopSending h => simp [outcomes, h]
     | stopSendingLate h => simp [outcomes, h]
+    | stopSendingLateTold h => simp [outcomes, h]
     | sendStream h => simp [outcomes, h]
     | sendStreamForbidden h => simp [outcomes, h]
     | sendBlocked h => simp [outcomes, h]
@@ -491,6 +500,7 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
     exact ⟨h1, by simp only; omega, h3, h4⟩
   | stopSending => exact ⟨h1, h2, h3, h4⟩
   | stopSendingLate => exact ⟨h1, h2, h3, h4⟩
+  | stopSendingLateTold => exact ⟨h1, h2, h3, h4⟩
   | @sendStream offset len fin hc =>
     simp only [maySendStream, Bool.and_eq_true, decide_eq_true_eq] at hc
     obtain ⟨⟨⟨⟨-, hw⟩, hm⟩, hfin⟩, hfs⟩ := hc
@@ -617,6 +627,7 @@ theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect} {f : N
   | maxStreamDataRaise => exact hf
   | stopSending => exact hf
   | stopSendingLate => exact hf
+  | stopSendingLateTold => exact hf
   | sendBlocked => exact hf
   | allAcked => exact hf
   | resetAcked => exact hf
@@ -651,6 +662,7 @@ theorem terminal_absorbing {s s' : State} {e : Event} {fx : List Effect}
   | maxStreamDataRaise => rfl
   | stopSending hw => exact absurd hw (by simp [hc])
   | stopSendingLate => rfl
+  | stopSendingLateTold => rfl
   | sendStream hw => rw [maySendStream, hc] at hw; simp at hw
   | sendBlocked hw => rw [maySendBlocked, hc] at hw; simp at hw
   | sendReset hw => rw [maySendReset, ht] at hw; simp at hw
@@ -687,6 +699,7 @@ theorem terminal_absorbing_state {s s' : State} {e : Event} {fx : List Effect}
   | @maxStreamDataRaise v hw => exact Or.inr ⟨v, by simpa using hw, rfl⟩
   | stopSending hw => exact absurd hw (by simp [hc])
   | stopSendingLate => exact Or.inl rfl
+  | stopSendingLateTold => exact Or.inl rfl
   | sendStream hw => rw [maySendStream, hc] at hw; simp at hw
   | sendBlocked hw => rw [maySendBlocked, hc] at hw; simp at hw
   | sendReset hw => rw [maySendReset, ht] at hw; simp at hw
@@ -745,6 +758,7 @@ theorem step_follows_diagram {s s' : State} {e : Event} {fx : List Effect}
   | maxStreamDataRaise => cases hp : s.phase <;> simp [Reaches]
   | stopSending => cases hp : s.phase <;> simp [Reaches]
   | stopSendingLate => cases hp : s.phase <;> simp [Reaches]
+  | stopSendingLateTold => cases hp : s.phase <;> simp [Reaches]
   | @sendStream offset len fin hw =>
     simp only [maySendStream, Bool.and_eq_true] at hw
     have hc : s.phase.mayCarryData = true := hw.1.1.1.1
@@ -1177,6 +1191,10 @@ theorem stopSending_obliges_reset {s s' : State} {code : Nat} {fx : List Effect}
              | _, _ => true) = true
       cases hp : s.phase <;> simp_all [Phase.beforeFin]
   | stopSendingLate hc =>
+    have : s.phase.mayCarryData = true := by
+      cases hp : s.phase <;> simp_all [Phase.beforeFin, Phase.mayCarryData]
+    rw [this] at hc; exact absurd hc (by simp)
+  | stopSendingLateTold hc =>
     have : s.phase.mayCarryData = true := by
       cases hp : s.phase <;> simp_all [Phase.beforeFin, Phase.mayCarryData]
     rw [this] at hc; exact absurd hc (by simp)

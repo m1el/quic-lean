@@ -303,9 +303,19 @@ The same source explicitly requires the harness to synthesize `appOpenStream`
 before local first use. Missing that event or losing a candidate can also
 explain rejection; the conjunct alone is not proof of a spec defect.
 
-### B8. `acked_stream_data_offset` can never be produced — open, WP13-6
+### B8. `acked_stream_data_offset` could never be produced — fixed, WP13-6
 
-Nothing routes a received ACK to `StreamTable`.  Excluded from the comparison.
+Fixed 2026-09-20 (PLAN §4p).  `Pipeline.recvAckFrame`: after `Ack`'s own rules,
+every in-flight packet an ACK frame covers is acknowledged to `Retransmission`
+(§13.3, line 5333), and a stream whose acknowledged segments reach its final
+size with the FIN moves "Data Sent" → "Data Recvd" (§3.1, line 975); an
+acknowledged RESET_STREAM moves "Reset Sent" → "Reset Recvd" (line 990).  The
+harness now reports what each sent packet carried
+(`LocalAction.sentPacketFrames`), which it never had.  43 ngtcp2 replay steps
+that needed the callback exclusion match exactly.  It exposed one API
+difference: ngtcp2 and Google QUICHE tell the application about a STOP_SENDING
+that arrives in "Data Recvd"; the text is silent, so `Step.stopSendingLateTold`
+permits it (section C).
 
 ### B9. quiche harness integration and TLS scope limitations
 

@@ -1057,4 +1057,70 @@ private def numberAcked : State :=
 -- An acknowledgment of a number never sent (tolerated, §13.1) is not counted.
 #guard (numberState.ackAppData.afterAckRecv 9).largestAcked = none
 
+/-! ## WP13-6: an acknowledgment reaches `Retransmission` and the streams
+
+Script 07's two STREAM packets, numbered 0 and 1, now also recorded by
+`LocalAction.sentPacketFrames`; then the peer's ACK frames.  Stream 4 was sent
+whole with its FIN in packet 1; stream 0 has no FIN. -/
+
+private def cli07rec : State :=
+  loc (loc (loc (loc cli07sent (.sentPacket .oneRtt 0 true))
+    (.sentPacketFrames .appData 0 [.stream 0 0 false (filler 16)]))
+    (.sentPacket .oneRtt 1 true))
+    (.sentPacketFrames .appData 1 [.stream 4 0 true (filler 8)])
+
+private def sendPhase (s : State) (id : Nat) : Option Stream.Send.Phase :=
+  ((s.st.streams.get? ⟨id⟩).bind (·.send)).map (·.phase)
+
+#guard sendPhase cli07rec 4 = some .dataSent
+#guard cli07rec.rtx.inFlight.keys = [⟨.appData, 0⟩, ⟨.appData, 1⟩]
+
+-- ACK of packet 0 only: stream 0's bytes are acknowledged, but it has no FIN;
+-- stream 4 is untouched.  §13.3, line 5333: packet 0 leaves the flight.
+private def cli07ack0 : State := recvNext cli07rec 0 [.ack 0 0 0 #[] none]
+#guard cli07ack0.rtx.inFlight.keys = [⟨.appData, 1⟩]
+#guard sendPhase cli07ack0 0 = some .send
+#guard sendPhase cli07ack0 4 = some .dataSent
+#guard cli07ack0.ackAppData.largestAcked = some 0
+
+-- ACK of packet 1: §3.1, line 975, "Data Sent" → "Data Recvd", announced as
+-- ngtcp2's `acked_stream_data_offset`.
+private def cli07ack1 : Out := recv cli07ack0 1 [.ack 1 0 0 #[] none]
+#guard sendPhase (cli07ack1.next cli07ack0) 4 = some .dataRecvd
+#guard (match cli07ack1 with
+  | .ok _ fx => fx.any (fun e => e matches .st (.stream ⟨4⟩ (.send .allDataAcked)))
+  | _ => false)
+-- …and §13.3, line 5355: `Retransmission` hears that the send part is done.
+#guard (cli07ack1.next cli07ack0).rtx.sendDataAcked = [⟨4⟩]
+
+-- Both packets in one ACK frame give the same end state.
+#guard sendPhase (recvNext cli07rec 0 [.ack 1 0 1 #[] none]) 4 = some .dataRecvd
+-- An ACK that covers nothing in flight changes nothing but `largestAcked`…
+#guard sendPhase (recvNext cli07ack0 1 [.ack 0 0 0 #[] none]) 4 = some .dataSent
+
+-- A FIN acknowledged without all the bytes is not "all stream data": stream 8
+-- sends bytes 0..7 in packet 2 and bytes 8..15 with the FIN in packet 3.
+private def cli07split : State :=
+  let s := app (app (app cli07rec (.openStream .bidi)) (.write ⟨8⟩ 16)) (.fin ⟨8⟩)
+  let s := loc s (.sentFrameIn .oneRtt thePath (.stream 8 0 false (filler 8)))
+  let s := loc s (.sentFrameIn .oneRtt thePath (.stream 8 8 true (filler 8)))
+  let s := loc (loc s (.sentPacket .oneRtt 2 true))
+    (.sentPacketFrames .appData 2 [.stream 8 0 false (filler 8)])
+  loc (loc s (.sentPacket .oneRtt 3 true))
+    (.sentPacketFrames .appData 3 [.stream 8 8 true (filler 8)])
+#guard sendPhase cli07split 8 = some .dataSent
+#guard sendPhase (recvNext cli07split 0 [.ack 3 0 0 #[] none]) 8 = some .dataSent
+#guard sendPhase (recvNext (recvNext cli07split 0 [.ack 3 0 0 #[] none]) 1
+  [.ack 2 0 0 #[] none]) 8 = some .dataRecvd
+
+-- §3.1, line 990: the RESET_STREAM of stream 0 travels in packet 2 and is
+-- acknowledged: "Reset Sent" → "Reset Recvd".
+private def cli07reset : State :=
+  loc (loc (loc (app cli07rec (.reset ⟨0⟩ 7))
+    (.sentFrameIn .oneRtt thePath (.resetStream 0 7 16)))
+    (.sentPacket .oneRtt 2 true))
+    (.sentPacketFrames .appData 2 [.resetStream 0 7 16])
+#guard sendPhase cli07reset 0 = some .resetSent
+#guard sendPhase (recvNext cli07reset 0 [.ack 2 0 0 #[] none]) 0 = some .resetRecvd
+
 end Quic.Spec.Endpoint.Examples

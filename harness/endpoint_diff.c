@@ -190,6 +190,8 @@ extern lean_object *quic_h_app_fin(uint64_t id);
 extern lean_object *quic_h_app_reset(uint64_t id, uint64_t code);
 extern lean_object *quic_h_app_stop_sending(uint64_t id, uint64_t code);
 extern lean_object *quic_h_local_sent_packet(uint8_t ptype, uint64_t pn, uint8_t ae);
+extern lean_object *quic_h_local_sent_packet_frames(uint8_t space, uint64_t pn,
+                                                    lean_object *fs);
 extern lean_object *quic_h_local_sent_frame_in(uint8_t ptype, uint64_t src,
                                                uint64_t dest, lean_object *f);
 extern lean_object *quic_h_local_sent_datagram(uint64_t dest, uint64_t n);
@@ -1600,6 +1602,14 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
                                      quic_h_ack_eliciting(ps[i].frames));
     e.now = model_now(h);
     e.name = "sentPacket";
+    synth_step(h, &e);
+    lean_dec(e.arg);
+    /* What the packet carried, for section 13.3: an ACK of it then reaches
+       `Retransmission` and the streams (TRIAGE WP13-6; Pipeline.recvAckFrame). */
+    lean_inc(ps[i].frames);
+    e.arg = quic_h_local_sent_packet_frames((uint8_t)ps[i].space, (uint64_t)ps[i].pn,
+                                            ps[i].frames);
+    e.name = "sentPacketFrames";
     synth_step(h, &e);
     lean_dec(e.arg);
   }

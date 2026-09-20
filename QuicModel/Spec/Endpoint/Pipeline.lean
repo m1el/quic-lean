@@ -361,6 +361,149 @@ theorem stepPvThen_inv {s : State} (hs : Inv s) (mp : Migration.Path)
   | error c => simp at hmem
   | drop => simp at hmem
 
+/-! ### What an acknowledgment means beyond `Ack` (TRIAGE WP13-6)
+
+§13.3, line 5333: "sending ceases when a packet containing that information is
+acknowledged"; §3.1, line 975: "Once all stream data has been successfully
+acknowledged, the sending part of the stream enters the "Data Recvd" state";
+line 990: "Once a packet containing a RESET_STREAM has been acknowledged, the
+sending part of the stream enters the "Reset Recvd" state".  *Which* packets an
+ACK frame acknowledges is §19.3.1's arithmetic (`Ack.acked`); what they carried
+is `Retransmission`'s record (`LocalAction.sentPacketFrames`); loss detection
+(RFC 9002) is not involved.  An endpoint that records nothing acknowledges
+nothing here, and every step below is one the owning component always permits
+in the state it is asked in, so nothing here can refuse a packet. -/
+
+/-- The packets of `sp` still in flight that the ranges acknowledge. -/
+def ackedInFlight (s : State) (sp : PnSpace) (l : List Ack.Rng) : List Retransmission.PktId :=
+  s.rtx.inFlight.keys.filter (fun k => decide (k.space = sp) && Ack.Ranges.mem l k.pn)
+
+/-- The acknowledged STREAM segments of `id`: offset, length, FIN. -/
+def ackedSegments (infos : List Retransmission.Info) (id : StreamId) : List (Nat × Nat × Bool) :=
+  infos.filterMap (fun i =>
+    match i with
+    | .streamData j off len fin => if j = id then some (off, len, fin) else none
+    | _ => none)
+
+/-- How far acknowledged data reaches from offset 0 without a hole.  One round
+    per segment is enough: a round that moves the frontier consumes a segment. -/
+def ackedFrontier (segs : List (Nat × Nat × Bool)) : Nat :=
+  segs.foldl (fun fr _ =>
+    segs.foldl (fun a seg => if seg.1 ≤ fr then max a (seg.1 + seg.2.1) else a) fr) 0
+
+/-- §3.1, line 975's "all stream data": every byte up to the final size, and the
+    FIN that announced it. -/
+def allStreamDataAcked (s : State) (id : StreamId) (finalSize : Nat) : Bool :=
+  let segs := ackedSegments s.rtx.ackedInfo id
+  decide (finalSize ≤ ackedFrontier segs) && segs.any (·.2.2)
+
+/-- "Data Sent" → "Data Recvd", if the acknowledgments now cover the stream. -/
+def streamDataAcked (id : StreamId) (s : State) : List Out :=
+  match (s.st.streams.get? id).bind (·.send) with
+  | some snd =>
+    match snd.finalSize with
+    | some fs =>
+      if snd.phase.isDataSent && allStreamDataAcked s id fs then
+        bindAll (stepSt s (.stream id (.send .ackAllData)))
+          (fun s1 => stepRtx s1 (.sendPartDataAcked id))
+      else keep s
+    | none => keep s
+  | none => keep s
+
+/-- "Reset Sent" → "Reset Recvd". -/
+def streamResetAcked (id : StreamId) (s : State) : List Out :=
+  match (s.st.streams.get? id).bind (·.send) with
+  | some snd =>
+    if snd.phase.isResetSent then stepSt s (.stream id (.send .ackReset)) else keep s
+  | none => keep s
+
+theorem streamDataAcked_ne (id : StreamId) (s : State) : streamDataAcked id s ≠ [] := by
+  unfold streamDataAcked
+  repeat' split
+  all_goals first
+    | exact keep_ne _
+    | exact bindAll_ne (stepSt_ne _ _) (fun _ => stepRtx_ne _ _)
+
+theorem streamDataAcked_inv {s : State} (hs : Inv s) (id : StreamId) :
+    InvOk (streamDataAcked id s) := by
+  unfold streamDataAcked
+  repeat' split
+  all_goals first
+    | exact keep_inv hs
+    | exact invOk_bindAll (stepSt_inv hs _) (fun _ h => stepRtx_inv h _)
+
+theorem streamResetAcked_ne (id : StreamId) (s : State) : streamResetAcked id s ≠ [] := by
+  unfold streamResetAcked
+  repeat' split
+  all_goals first | exact keep_ne _ | exact stepSt_ne _ _
+
+theorem streamResetAcked_inv {s : State} (hs : Inv s) (id : StreamId) :
+    InvOk (streamResetAcked id s) := by
+  unfold streamResetAcked
+  repeat' split
+  all_goals first | exact keep_inv hs | exact stepSt_inv hs _
+
+/-- `f` for each element, left to right, threading the state. -/
+def forEach {α : Type} (f : α → State → List Out) : List α → State → List Out
+  | [], s => keep s
+  | a :: as, s => bindAll (f a s) (forEach f as)
+
+theorem forEach_ne {α : Type} {f : α → State → List Out} (hf : ∀ a s, f a s ≠ []) :
+    ∀ (as : List α) (s : State), forEach f as s ≠ []
+  | [], s => keep_ne s
+  | a :: as, s => bindAll_ne (hf a s) (fun s' => forEach_ne hf as s')
+
+theorem forEach_inv {α : Type} {f : α → State → List Out}
+    (hf : ∀ a s, Inv s → InvOk (f a s)) :
+    ∀ (as : List α) (s : State), Inv s → InvOk (forEach f as s)
+  | [], _, hs => keep_inv hs
+  | a :: as, s, hs => invOk_bindAll (hf a s hs) (fun s' h' => forEach_inv hf as s' h')
+
+/-- One acknowledged packet: `Retransmission` stops owing what it carried, then
+    the streams it carried data or a reset for are asked whether that completes
+    them. -/
+def packetAcked (pkt : Retransmission.PktId) (s : State) : List Out :=
+  let carried := s.rtx.carried pkt
+  let dataIds := (carried.filterMap (fun i =>
+    match i with | .streamData id _ _ _ => some id | _ => none)).eraseDups
+  let resetIds := (carried.filterMap (fun i =>
+    match i with | .resetStream id _ _ => some id | _ => none)).eraseDups
+  bindAll (stepRtx s (.acked pkt)) (fun s1 =>
+    bindAll (forEach streamDataAcked dataIds s1) (forEach streamResetAcked resetIds))
+
+theorem packetAcked_ne (pkt : Retransmission.PktId) (s : State) : packetAcked pkt s ≠ [] :=
+  bindAll_ne (stepRtx_ne _ _) (fun _ =>
+    bindAll_ne (forEach_ne streamDataAcked_ne _ _) (fun _ => forEach_ne streamResetAcked_ne _ _))
+
+theorem packetAcked_inv {s : State} (hs : Inv s) (pkt : Retransmission.PktId) :
+    InvOk (packetAcked pkt s) :=
+  invOk_bindAll (stepRtx_inv hs _) (fun _ h1 =>
+    invOk_bindAll (forEach_inv (fun a _ h => streamDataAcked_inv h a) _ _ h1)
+      (fun _ h2 => forEach_inv (fun a _ h => streamResetAcked_inv h a) _ _ h2))
+
+/-- An ACK frame in space `sp`: `Ack`'s own rules first (they can refuse the
+    frame), then every in-flight packet it covers. -/
+def recvAckFrame (sp : PnSpace) (largest first : Nat) (ranges : List AckRange) (s : State) :
+    List Out :=
+  bindAll (stepAck s sp (.recvAck largest first ranges)) (fun s1 =>
+    match Ack.acked largest first ranges with
+    | some l => forEach packetAcked (ackedInFlight s1 sp l) s1
+    | none => keep s1)
+
+theorem recvAckFrame_ne (sp : PnSpace) (largest first : Nat) (ranges : List AckRange)
+    (s : State) : recvAckFrame sp largest first ranges s ≠ [] :=
+  bindAll_ne (stepAck_ne _ _ _) (fun s1 => by
+    split
+    · exact forEach_ne packetAcked_ne _ _
+    · exact keep_ne _)
+
+theorem recvAckFrame_inv {s : State} (hs : Inv s) (sp : PnSpace) (largest first : Nat)
+    (ranges : List AckRange) : InvOk (recvAckFrame sp largest first ranges s) :=
+  invOk_bindAll (stepAck_inv hs _ _) (fun s1 h1 => by
+    split
+    · exact forEach_inv (fun a _ h => packetAcked_inv h a) _ _ h1
+    · exact keep_inv h1)
+
 /-- Frame by frame: the component that owns this frame's semantics.
     `FrameRules` has already decided that the frame is legal in this packet
     type (§12.4, line 4901); what is left is what the frame *means*. -/
@@ -370,7 +513,7 @@ def dispatchFrame (now : Time) (mp : Migration.Path) (pt : PacketType) (dcidSeq 
   | .padding _ | .ping => keep s
   | .ack largest _ first ranges _ =>
     match pt.space with
-    | some sp => stepAck s sp (.recvAck largest first ranges.toList)
+    | some sp => recvAckFrame sp largest first ranges.toList s
     | none => keep s
   | .resetStream id code fs => stepSt s (.stream ⟨id⟩ (.recv (.recvResetStream code fs)))
   | .stopSending id code => stepSt s (.stream ⟨id⟩ (.send (.recvStopSending code)))
@@ -415,7 +558,7 @@ theorem dispatchFrame_ne (now : Time) (mp : Migration.Path) (pt : PacketType) (d
       | (split <;>
           first
             | exact keep_ne _
-            | exact stepAck_ne _ _ _
+            | exact recvAckFrame_ne _ _ _ _ _
             | exact stepHs_ne _ _
             | exact stepTerm_ne _ _)
 
@@ -435,7 +578,7 @@ theorem dispatchFrame_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration.
       | (split <;>
           first
             | exact keep_inv hs
-            | exact stepAck_inv hs _ _
+            | exact recvAckFrame_inv hs _ _ _ _
             | exact stepHs_inv hs _
             | exact stepTerm_inv hs _)
 

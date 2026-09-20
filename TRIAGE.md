@@ -204,6 +204,8 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
 
 ## WP13-6 — `acked_stream_data_offset`: nothing routes a received ACK to `StreamTable`
 
+**Status (2026-09-20): fixed** — `Pipeline.recvAckFrame`, `DIFFERENCES.md` B8, PLAN §4p.
+
 * **Reproducer**
 
   ```
