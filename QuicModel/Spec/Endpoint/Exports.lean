@@ -59,6 +59,11 @@ def streamEffectName : Stream.Effect → Option String
 def Effect.cbName : Effect → Option String
   | .st (.stream _ e) => streamEffectName e
   | .st (.streamOpened _) => some "stream_open"
+  -- §2.1, line 718's implicitly opened streams are not an application event:
+  -- ngtcp2 announces only the stream a frame names, quiche none at all.
+  | .st (.streamsOpenedBelow ..) => none
+  -- … and ngtcp2 announces one of those the first time a frame names it.
+  | .st (.streamFirstUsed _) => some "stream_open"
   | .st (.dataCreditAvailable _) => some "extend_max_data"
   | .st (.streamsAvailable .bidi _) => some "extend_max_local_streams_bidi"
   | .st (.streamsAvailable .uni _) => some "extend_max_local_streams_uni"
@@ -109,6 +114,8 @@ def Effect.render : Effect → String
     s!"reset_requested id={id.val} app_error_code={c}"
   | .st (.stream id (.send .resetAcked)) => s!"reset_acked id={id.val}"
   | .st (.streamOpened id) => s!"stream_open id={id.val}"
+  | .st (.streamsOpenedBelow first n) => s!"streams_opened_below first={first.val} count={n}"
+  | .st (.streamFirstUsed id) => s!"stream_first_used id={id.val}"
   | .st (.dataCreditAvailable m) => s!"extend_max_data max_data={m}"
   | .st (.streamsAvailable d m) => s!"extend_max_local_streams_{dirName d} max_streams={m}"
   | .hs .handshakeComplete => "handshake_completed"
@@ -160,9 +167,33 @@ def Effect.render : Effect → String
   | .skippedRest => "skipped_rest"
   | .packetProcessed => "packet_processed"
 
+/-- Did this step make new bytes of stream `id` available to the application? -/
+def deliversData (fx : List Effect) (id : StreamId) : Bool :=
+  fx.any fun e =>
+    match e with
+    | .st (.stream i (.recv (.dataAvailable _))) => i == id
+    | _ => false
+
+/-- How one effect shows in an implementation's read interface.
+
+    The model keeps two facts apart: new bytes are available
+    (`Stream.Recv.Effect.dataAvailable`) and the final size has been reached
+    (`allDataReceived`).  An implementation's read interface reports both
+    through one channel — a read result that carries a FIN flag — so reaching
+    the final size in a step that delivers *no* new bytes (an empty STREAM frame
+    with FIN, or a FIN that closes a gap-free stream) is still a read: zero
+    bytes, fin set.  ngtcp2 and quiche both report it (`DIFFERENCES.md` B6).
+    That read is the completion, not data: no `dataAvailable` is invented, so
+    nothing is delivered twice, and `stream_close` is still listed so the
+    completion is not erased for an implementation that has such a callback. -/
+def Effect.cbNames (fx : List Effect) : Effect → List String
+  | .st (.stream id (.recv (.allDataReceived _))) =>
+    if deliversData fx id then ["stream_close"] else ["recv_stream_data", "stream_close"]
+  | e => e.cbName.toList
+
 /-- The callback names one outcome's effects would show as `CB` lines, in order
     and with the ones ngtcp2 does not surface removed. -/
-def observedCbs (fx : List Effect) : List String := fx.filterMap Effect.cbName
+def observedCbs (fx : List Effect) : List String := fx.flatMap (Effect.cbNames fx)
 
 /-! ## Building an initial state -/
 

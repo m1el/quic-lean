@@ -199,6 +199,11 @@ theorem recv_buf_received {c : Crypto} (h : c.WF) {off len n : Nat}
     Ack.Ranges.mem c.buf n = true ∨ (off ≤ n ∧ n < off + len) :=
   (mem_insertRange (wf_of_WF h) off len n).mp (mem_of_mem_flush hm)
 
+/-- §7.5's "buffer of CRYPTO data received out of order" has to reach from the
+    delivered offset to the end of the highest byte it holds, whatever is
+    missing in between: the reordering span.  0 when nothing is buffered. -/
+def span (c : Crypto) : Nat := (c.buf.map (fun r => r.hi + 1)).foldl max 0 - c.delivered
+
 /-- A fully flushed stream is a fixed point of `flush`. -/
 theorem flush_of_wfFrom {d : Nat} {l : List Rng} (h : Ack.Ranges.wfFrom (d + 1) l = true) :
     flush d l = (d, l) := by
@@ -218,5 +223,70 @@ theorem recv_zero {c : Crypto} (h : c.WF) (off : Nat) : c.recv off 0 = c := by
   simp [recv, flush_of_wfFrom h]
 
 end Crypto
+
+/-! ## Buffer resource policies (§7.5)
+
+§7.5 speaks of "an endpoint's buffer" and of being "unable to buffer all data in
+a CRYPTO frame" without saying how the buffer's occupancy is measured, and
+implementations measure it differently.  One that stores the ranges it received
+pays for the *payload bytes* it holds; one that reassembles into a window
+starting at the delivered offset pays for the *span* up to the highest byte,
+gaps included — for it sixteen bytes two hundred kilobytes ahead cost two
+hundred kilobytes.  A policy carries a limit for each accounting; one that does
+not use an accounting sets that limit out of reach.
+
+What the text does fix is the floor, line 2703: "Implementations MUST support
+buffering at least 4096 bytes of data received in out-of-order CRYPTO frames."
+`Admissible` is that floor under both accountings, so out-of-order data that
+lies within 4096 bytes of the delivered offset is bufferable under every
+admissible policy (`not_exceeded_of_minimum`).  Nothing else is granted: a
+policy is *not* free to refuse a frame for its absolute offset, because a frame
+that arrives in order occupies no buffer at all (`not_exceeded_in_order`). -/
+
+/-- §7.5, line 2703's floor. -/
+def minCryptoBuffer : Nat := 4096
+
+structure BufferPolicy where
+  /-- The payload bytes the buffer can hold. -/
+  maxBytes : Nat := minCryptoBuffer
+  /-- How far past the delivered offset buffered data may reach. -/
+  maxSpan : Nat := minCryptoBuffer
+  deriving DecidableEq, Repr
+
+namespace BufferPolicy
+
+/-- §7.5, line 2703: "MUST support buffering at least 4096 bytes". -/
+def Admissible (p : BufferPolicy) : Prop :=
+  minCryptoBuffer ≤ p.maxBytes ∧ minCryptoBuffer ≤ p.maxSpan
+
+instance (p : BufferPolicy) : Decidable p.Admissible := inferInstanceAs (Decidable (_ ∧ _))
+
+/-- §7.5, lines 2711 and 2716: the "buffer is exceeded", the endpoint is "unable
+    to buffer all data in a CRYPTO frame" — `c` is the stream with that frame
+    already in it. -/
+def Exceeded (p : BufferPolicy) (c : Crypto) : Prop :=
+  p.maxBytes < bufferedBytes c.buf ∨ p.maxSpan < c.span
+
+instance (p : BufferPolicy) (c : Crypto) : Decidable (p.Exceeded c) :=
+  inferInstanceAs (Decidable (_ ∨ _))
+
+/-- Out-of-order data within the floor, under both accountings, exceeds no
+    admissible policy. -/
+theorem not_exceeded_of_minimum {p : BufferPolicy} (hp : p.Admissible) {c : Crypto}
+    (hb : bufferedBytes c.buf ≤ minCryptoBuffer) (hs : c.span ≤ minCryptoBuffer) :
+    ¬ p.Exceeded c := by
+  intro h
+  rcases h with h | h
+  · exact absurd (Nat.lt_of_lt_of_le h hb) (Nat.not_lt.mpr hp.1)
+  · exact absurd (Nat.lt_of_lt_of_le h hs) (Nat.not_lt.mpr hp.2)
+
+/-- A stream that holds nothing out of order exceeds no policy at all, whatever
+    offset it has reached: §7.5 limits buffering, not the length of the CRYPTO
+    stream. -/
+theorem not_exceeded_in_order (p : BufferPolicy) {c : Crypto} (h : c.buf = []) :
+    ¬ p.Exceeded c := by
+  simp [Exceeded, Crypto.span, h]
+
+end BufferPolicy
 
 end Quic.Spec.Handshake

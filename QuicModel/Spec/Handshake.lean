@@ -735,15 +735,15 @@ example : component.step cliB (.recvCrypto .initial 0 10)
 example : ((cliB.stream .initial).recv 0 10).delivered = 20 := by decide
 
 -- §7.5, line 2703: an endpoint MUST be able to buffer at least 4096 bytes of
--- out-of-order data, which is what `Inv` demands of `bufLimit` …
+-- out-of-order data, which is what `Inv` demands of `bufPolicy` …
 example : Inv (initClient C1 S1) := by
-  refine ⟨by simp [initClient], by simp [initClient], fun l => ?_⟩
+  refine ⟨by simp [initClient], by decide, fun l => ?_⟩
   cases l <;> exact Crypto.WF_default
 -- … and line 2713: past the limit, an endpoint that does not expand its buffer
 -- MUST close with CRYPTO_BUFFER_EXCEEDED — but expanding is also permitted.
 -- (A limit of 8 stands in for 4096 here so that `decide` stays small; nothing
 -- in the rules depends on the value.)
-private def cliSmall : State := { initClient C1 S1 with bufLimit := 8 }
+private def cliSmall : State := { initClient C1 S1 with bufPolicy := ⟨8, 9⟩ }
 example : component.accepts cliSmall (.recvCrypto .initial 1 8)
     (.ok (cliSmall.setStream .initial ((cliSmall.stream .initial).recv 1 8)) []) = true := by
   decide
@@ -773,6 +773,51 @@ private def cliDiscarding : State :=
 example : component.outcomes cliDiscarding (.recvCrypto .initial 1 9) =
     [.ok cliDiscarding [], .error .cryptoBufferExceeded] := by decide
 example : component.accepts cliDiscarding (.recvCrypto .initial 1 9) .drop = false := by decide
+
+-- Audit 2026-09-19, B1: the buffer is a resource, and payload bytes are not the
+-- only way to pay for it (`BufferPolicy`).  Sixteen bytes at offset 196611 are
+-- sixteen bytes of payload and a reordering span of 196627, which a
+-- reassembly window cannot hold: CRYPTO_BUFFER_EXCEEDED is permitted — what
+-- ngtcp2 and quiche both answer — and so is buffering it (line 2707).
+private def cliDone : State := { initClient C1 S1 with complete := true }
+example : bufferedBytes ((cliDone.stream .oneRtt).recv 196611 16).buf = 16 := by decide
+example : ((cliDone.stream .oneRtt).recv 196611 16).span = 196627 := by decide
+example : component.accepts cliDone (.recvCrypto .oneRtt 196611 16)
+    (.error .cryptoBufferExceeded) = true := by decide
+example : component.accepts cliDone (.recvCrypto .oneRtt 196611 16)
+    (.ok (cliDone.setStream .oneRtt ((cliDone.stream .oneRtt).recv 196611 16)) []) = true := by
+  decide
+-- After the handshake the frame may also be discarded — an `.ok`, so the packet
+-- that carried it is still acknowledged (line 2719); never a `.drop`.
+example : component.accepts cliDone (.recvCrypto .oneRtt 196611 16)
+    (.ok (cliDone.setStream .oneRtt { cliDone.stream .oneRtt with discarding := true })
+         [.cryptoDiscarding .oneRtt]) = true := by decide
+example : component.accepts cliDone (.recvCrypto .oneRtt 196611 16) .drop = false := by decide
+-- During the handshake the choice is to expand or to close (line 2713); the
+-- discard is not on offer.
+example : component.outcomes cli0 (.recvCrypto .initial 196611 16) =
+    [.ok (cli0.setStream .initial ((cli0.stream .initial).recv 196611 16)) [],
+     .error .cryptoBufferExceeded] := by decide
+-- The floor (line 2703) under both accountings: out-of-order data that ends
+-- within 4096 bytes of the delivered offset MUST be buffered — no error …
+set_option maxRecDepth 1000000 in
+example : component.outcomes cliDone (.recvCrypto .oneRtt 1 4095) =
+    [.ok (cliDone.setStream .oneRtt ((cliDone.stream .oneRtt).recv 1 4095)) []] := by decide
+-- … and one byte further the endpoint may be unable to.
+set_option maxRecDepth 1000000 in
+example : component.accepts cliDone (.recvCrypto .oneRtt 1 4096)
+    (.error .cryptoBufferExceeded) = true := by decide
+-- Contiguous delivery occupies no buffer, however long the stream gets and
+-- wherever it has got to, so an absolute offset cutoff is *not* a permitted
+-- buffer policy (`BufferPolicy.not_exceeded_in_order`).
+set_option maxRecDepth 1000000 in
+example : component.accepts cliDone (.recvCrypto .oneRtt 0 5000)
+    (.error .cryptoBufferExceeded) = false := by decide
+private def cliFar : State :=
+  cliDone.setStream .oneRtt { cliDone.stream .oneRtt with delivered := 196611 }
+example : component.outcomes cliFar (.recvCrypto .oneRtt 196611 16) =
+    [.ok (cliFar.setStream .oneRtt ((cliFar.stream .oneRtt).recv 196611 16))
+         [.deliverCrypto .oneRtt 196611 16]] := by decide
 
 -- §19.6, line 7545: offset + length above 2^62-1 is FRAME_ENCODING_ERROR or
 -- CRYPTO_BUFFER_EXCEEDED, and nothing else.
@@ -972,9 +1017,9 @@ end Examples
 | §7.3 (2433–2444) | the three "TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION" bullets | `cidMismatch`, `ParamStep.mismatchTpe`/`mismatchPv`, `authOutcomes_mismatch`; the three bullets split out by role and Retry in `cids_ok_client_noRetry`, `cids_ok_client_retry`, `cids_ok_server` |
 | §7.3 (2446) | "If a zero-length connection ID is selected, the corresponding transport parameter is included with a zero-length value" | `optCid`: `some []` is a legal value and compares equal to a zero-length `Cid` |
 | §7.3 (2449, 2479) | Figures 7 and 8 | examples; `cids_ok_client_noRetry` is Figure 7 and `cids_ok_client_retry` Figure 8 |
-| §7.5 (2703) | "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames" | `Inv` (`4096 ≤ s.bufLimit`) — **assumed of a conforming endpoint, not checked by any outcome**: `bufLimit` is a parameter of the state, so this MUST is a side condition on the states WP12 may build, and `step_inv` only preserves it.  The `cliSmall` examples deliberately use `bufLimit := 8`, a state for which `Inv` is false, so that `decide` stays small |
-| §7.5 (2704) | "Endpoints MAY choose to allow more data to be buffered" | `State.bufLimit` is a parameter |
-| §7.5 (2707) | "An endpoint's buffer size does not need to remain constant during the life of the connection" | `CryptoStep.expand`, which stays available after the handshake completes for exactly this reason (NOTE 15).  No event changes `bufLimit` itself: growing the buffer shows up as the frame being accepted, not as a new limit |
+| §7.5 (2703) | "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames" | `Inv` (`s.bufPolicy.Admissible`: 4096 under both accountings, NOTE 15a) — **assumed of a conforming endpoint, not checked by any outcome**: `bufPolicy` is a parameter of the state, so this MUST is a side condition on the states WP12 may build, and `step_inv` only preserves it; `BufferPolicy.not_exceeded_of_minimum` is what it buys.  The `cliSmall` examples deliberately use `bufPolicy := ⟨8, 9⟩`, a state for which `Inv` is false, so that `decide` stays small |
+| §7.5 (2704) | "Endpoints MAY choose to allow more data to be buffered" | `State.bufPolicy` is a parameter |
+| §7.5 (2707) | "An endpoint's buffer size does not need to remain constant during the life of the connection" | `CryptoStep.expand`, which stays available after the handshake completes for exactly this reason (NOTE 15).  No event changes `bufPolicy` itself: growing the buffer shows up as the frame being accepted, not as a new limit |
 | §7.5 (2711) | "it can expand its buffer temporarily to complete the handshake" | `CryptoStep.expand` |
 | §7.5 (2713) | "If an endpoint does not expand its buffer, it MUST close the connection with a CRYPTO_BUFFER_EXCEEDED error code" | `CryptoStep.overflowClose` |
 | §7.5 (2716) | once complete, "it MAY discard that CRYPTO frame and all CRYPTO frames received in the future, or it MAY close the connection" | `CryptoStep.overflowDiscard`, `Crypto.discarding`, `CryptoStep.alreadyDiscarding` |
@@ -1040,8 +1085,8 @@ NOTES — ambiguities in the text and the readings encoded
 2. **Where §7.5's limit is measured.**  The text says "unable to buffer all data
    in a CRYPTO frame" without saying whether in-order data counts.  Reading
    encoded: the frame is first merged into the range set and the deliverable
-   prefix handed to TLS, and only what is *left buffered* is compared with
-   `bufLimit`.  An in-order frame of any size is therefore always accepted,
+   prefix handed to TLS, and only what is *left buffered* is measured against
+   `bufPolicy` (NOTE 15a).  An in-order frame of any size is therefore always accepted,
    which is what "buffering … data received in out-of-order CRYPTO frames"
    (line 2703) says the limit is about.
 
@@ -1196,10 +1241,28 @@ NOTES — ambiguities in the text and the readings encoded
     and simply accepting the frame is permitted at every point in the
     connection.  `CryptoStep.expand` therefore lost its `s.complete = false`
     hypothesis and `outcomes` lists three alternatives past the limit once the
-    handshake is complete.  `bufLimit` is the size the endpoint has *committed*
+    handshake is complete.  `bufPolicy` is the size the endpoint has *committed*
     to (the invariant keeps it at line 2703's 4096 or more); growing it is not
     an event of this component, so expanding shows up as the frame being
-    accepted rather than as a change to `bufLimit`.
+    accepted rather than as a change to `bufPolicy`.
+
+15a. **The buffer is a resource with more than one accounting** (audit
+    2026-09-19, B1).  This file used to measure the buffer in payload bytes
+    only (`bufferedBytes`), so sixteen bytes at offset 196611 cost sixteen bytes
+    and CRYPTO_BUFFER_EXCEEDED was not permitted — while ngtcp2 and quiche both
+    answer exactly that, because a reassembly window pays for the *span* from
+    the delivered offset, gaps included.  §7.5 does not say how "an endpoint's
+    buffer" is measured; it fixes the floor (line 2703).  `BufferPolicy` carries
+    a limit per accounting, `Exceeded` is "unable to buffer", and `Admissible`
+    is the floor under both, so: out-of-order data ending within 4096 bytes of
+    the delivered offset is never a buffer error; beyond that the three (during
+    the handshake, two) outcomes of §7.5 apply.  What is deliberately *not*
+    admitted is an absolute offset cutoff — ngtcp2's per-level limits
+    (`ngtcp2_conn.c:7375`) and quiche's `MAX_CRYPTO_STREAM_OFFSET` both are
+    one: in-order data occupies no buffer (`BufferPolicy.not_exceeded_in_order`),
+    so an engine that refuses a contiguous CRYPTO stream for its length alone
+    is still a mismatch.  The default policy is the floor itself, which is the
+    widest latitude a conforming endpoint can have.
 
 16. **The two `.ok` outcomes past a completed handshake's buffer limit are
     told apart by an effect.**  §7.5's "discard that CRYPTO frame and all CRYPTO
@@ -1217,7 +1280,7 @@ NOTES — ambiguities in the text and the readings encoded
     latches the decision on the level whose frame overflowed.  After the
     handshake completes only the 1-RTT stream can still receive CRYPTO, so no
     reachable trace tells the two readings apart; the per-level form is chosen
-    because `bufLimit` is compared against one stream's buffer, which is where
+    because `bufPolicy` is compared against one stream's buffer, which is where
     §7.5's "data received in out-of-order CRYPTO frames" lives.
 
 18. **The §7.5 close is granted per frame.**  Line 2716 offers the discard and

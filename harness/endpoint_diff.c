@@ -100,6 +100,7 @@ static void md_write(harness *h, int64_t sid, size_t n, int fin);
 static void md_shutdown(harness *h, int which, int64_t sid, uint64_t err, int rv);
 static void md_out(harness *h, const uint8_t *buf, size_t len);
 static void md_tick(harness *h);
+static void step_drain(harness *h);
 static void md_finish(harness *h);
 static void md_synth_recv(harness *h, const uint8_t *pkt, size_t len);
 
@@ -173,6 +174,7 @@ extern lean_object *quic_h_ev_timer(uint64_t now);
 extern lean_object *quic_h_ev_local(lean_object *a, uint64_t now);
 extern lean_object *quic_h_tls_keys(uint8_t is_write, uint8_t level);
 extern lean_object *quic_h_tls_complete(uint8_t dummy);
+extern lean_object *quic_h_tls_discard_keys(uint8_t level);
 extern lean_object *quic_h_tls_send(uint8_t level, uint64_t len);
 extern uint64_t quic_h_crypto_end(lean_object *frames);
 extern lean_object *quic_h_app_open_stream(uint8_t dir);
@@ -298,6 +300,7 @@ typedef struct {
 static soft_entry g_soft[128];
 static int g_nsoft;
 static int g_nmm;
+static unsigned long g_mm_after_loss; /* mismatches in runs where the cap had cut */
 static unsigned long g_mm_total;
 static unsigned long g_steps_compared, g_steps_skipped, g_send_checks;
 static unsigned long g_steps_loose, g_steps_subseq, g_send_unparsed, g_runs_closed;
@@ -322,9 +325,11 @@ static void mm_summary(void) {
           "stream_close/acked_stream_data_offset exclusion, %lu the "
           "subsequence rule)  steps not compared=%lu  send checks=%lu "
           "(%lu datagrams unparsable)  runs abandoned after the model closed=%lu\n"
-          "distinct mismatches=%d  total mismatches=%lu\n",
+          "distinct mismatches=%d  total mismatches=%lu\n"
+          "mismatches after candidate loss (not exhaustive)=%lu\n",
           g_runs, g_steps_compared, g_steps_loose, g_steps_subseq, g_steps_skipped,
-          g_send_checks, g_send_unparsed, g_runs_closed, g_nmm, g_mm_total);
+          g_send_checks, g_send_unparsed, g_runs_closed, g_nmm, g_mm_total,
+          g_mm_after_loss);
   for (i = 0; i < g_nmm; ++i)
     fprintf(stderr, "  sig=%016" PRIx64 " x%lu\n", g_mm[i].sig, g_mm[i].count);
   if (g_nsoft) {
@@ -364,7 +369,8 @@ static int mm_seen(uint64_t sig) {
   for (i = 0; i < g_nmm; ++i) {
     if (g_mm[i].sig == sig) {
       ++g_mm[i].count;
-      return 0;
+      /* DIFF_ALL: report every occurrence, for triaging one coarse signature. */
+      return getenv("DIFF_ALL") != NULL;
     }
   }
   if (g_nmm < MAX_MISMATCH_KINDS) {
@@ -389,6 +395,8 @@ typedef struct {
   int64_t out_max_pn[3];
   uint64_t crypto_handed[3]; /* CRYPTO bytes TLS is known to have handed over */
   int digest_step;           /* DIFF_DIGEST: steps written so far in this run */
+  int in_tick_drain;         /* md_tick is giving the engine a send opportunity */
+  int cands_lost;            /* times the cap cut permitted candidates in this run */
 } mstate;
 
 static int g_model_ready;
@@ -575,6 +583,14 @@ static void report_candidates(sbuf *sb, mstate *m, const evspec *e) {
   if (!lean_is_scalar(p)) sb_printf(sb, "  ... (%d more)\n", l_len(p));
 }
 
+/* The cap, and a note of whether it cost anything: a candidate it cuts may have
+   been the execution the engine is on, so a later empty set is then not an
+   exhaustive rejection (audit 2026-09-19, §6). */
+static lean_object *cap_cands(mstate *m, lean_object *next) {
+  if (l_len(next) > m->max_cands) ++m->cands_lost;
+  return l_take(next, m->max_cands);
+}
+
 /* One mismatch: dedup, print once, save the input. */
 static void report(harness *h, mstate *m, const char *kind, const char *sigkey,
                    const char *detail, const evspec *e) {
@@ -584,6 +600,7 @@ static void report(harness *h, mstate *m, const char *kind, const char *sigkey,
 
   snprintf(key, sizeof(key), "%s|%s", kind, sigkey);
   sig = fnv(key);
+  if (m && m->cands_lost) ++g_mm_after_loss;
   if (!mm_seen(sig)) return;
 
   sb_reserve(&sb, 256);
@@ -593,6 +610,13 @@ static void report(harness *h, mstate *m, const char *kind, const char *sigkey,
   sb_puts(&sb, detail);
   sb_puts(&sb, "\n");
   if (m) {
+    if (m->cands_lost)
+      sb_printf(&sb,
+                "rejection after candidate loss: the cap of %d cut permitted "
+                "candidates %d time(s) earlier in this run\n",
+                m->max_cands, m->cands_lost);
+    else
+      sb_puts(&sb, "rejection is exhaustive: no candidate was cut in this run\n");
     sb_printf(&sb, "model candidates: %d\n", l_len(m->cands));
     report_candidates(&sb, m, e);
   }
@@ -615,9 +639,12 @@ static void report(harness *h, mstate *m, const char *kind, const char *sigkey,
    candidate set doubles at every branch and the run exhausts memory.
    |only_ok| drops the outcomes that are connection errors. */
 static lean_object *advance_all(mstate *m, const evspec *e, int only_ok) {
+  lean_object *next;
   lean_inc(m->cands);
-  return quic_h_advance_all(m->cands, ev_build(e), (uint8_t)(only_ok != 0),
-                            (uint64_t)m->max_cands);
+  /* one more than the cap, so that a cut can be told from a fit */
+  next = quic_h_advance_all(m->cands, ev_build(e), (uint8_t)(only_ok != 0),
+                            (uint64_t)m->max_cands + 1);
+  return cap_cands(m, next);
 }
 
 static void set_cands(mstate *m, lean_object *next) {
@@ -732,8 +759,13 @@ static lean_object *track_loose(harness *h, mstate *m, const evspec *e,
     lean_object *os = ev_outcomes(e, s), *q = os;
     while (!lean_is_scalar(q)) {
       lean_object *o = l_head(q);
-      if (kept < m->max_cands &&
-          outcome_matches(o, is_error, code, names, nnames, subseq)) {
+      if (kept >= m->max_cands) {
+        if (outcome_matches(o, is_error, code, names, nnames, subseq)) {
+          ++m->cands_lost;
+          q = l_tail(q);
+          break;
+        }
+      } else if (outcome_matches(o, is_error, code, names, nnames, subseq)) {
         lean_object *c;
         lean_inc(s);
         lean_inc(o);
@@ -851,7 +883,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
                                    cbs ? cbs : l_nil());
   if (!lean_is_scalar(next)) {
     digest_step(h, e, is_error, code, 1);
-    set_cands(m, l_take(next, m->max_cands));
+    set_cands(m, cap_cands(m, next));
     return;
   }
   lean_dec(next);
@@ -957,7 +989,10 @@ static void md_start(harness *h, int server) {
   m->alive = 1;
   m->tolerance = CFG_MAX_ACK_DELAY;
   m->max_cands = 12;
-  m->max_stream_index = 1u << 14;
+  /* No cap by default since the audit of 2026-09-19 (B4): implicit opening is
+     one range effect, so a step costs the same whatever stream it names.
+     DIFF_MAX_STREAM_INDEX still restores the old skip. */
+  m->max_stream_index = UINT64_MAX;
   m->out_max_pn[0] = m->out_max_pn[1] = m->out_max_pn[2] = -1;
   env = getenv("DIFF_ACK_TOLERANCE");
   if (env) m->tolerance = strtoull(env, NULL, 10);
@@ -1015,6 +1050,27 @@ static void md_start(harness *h, int server) {
       d.name = "handshake packet (synthesised)";
       synth_step(h, &d);
       lean_dec(d.arg);
+    }
+  }
+
+  /* Both engines have discarded their Initial and Handshake keys by now
+     (conn_driver.h calls ngtcp2_conn_discard_initial_state / _handshake_state;
+     quiche drops them as its real handshake is confirmed), so a packet of
+     either kind is undecryptable to them.  RFC 9001 §4.9's discards are TLS
+     events in the model, and without them it processes — and owes an
+     acknowledgment for — packets the engine cannot read.  That used to hide
+     behind `DatagramSize`'s blanket discard (audit 2026-09-19, B3).
+     Handshake.Level: 0 = initial, 2 = handshake. */
+  {
+    static const uint8_t gone[2] = {0, 2};
+    size_t i;
+    for (i = 0; i < 2; ++i) {
+      e.kind = EV_TLS;
+      e.arg = quic_h_tls_discard_keys(gone[i]);
+      e.now = 0;
+      e.name = "tlsDiscardKeys";
+      synth_step(h, &e);
+      lean_dec(e.arg);
     }
   }
 }
@@ -1529,6 +1585,9 @@ static void md_tick(harness *h) {
       return;
     }
   }
+  /* An engine that has closed (an error, or §10.1's idle timeout inside the
+     same clock step as the deadline) owes no acknowledgment. */
+  if (h->fatal) return;
   p = m->cands;
   while (!lean_is_scalar(p)) {
     lean_object *s = l_head(p);
@@ -1538,6 +1597,19 @@ static void md_tick(harness *h) {
       break;
     }
     p = l_tail(p);
+  }
+  /* §13.2.1's deadline binds an endpoint that had the chance to send.  A
+     script or fuzz input that steps the clock without a `drain` never gives
+     the engine one, and the acknowledgment it owes is simply never written
+     (DIFFERENCES.md D5; audit 2026-09-19, §6).  So before calling the ACK
+     overdue, let the engine write once: step_drain feeds whatever it sends
+     through MH_OUT and ends in tr_time, which re-enters this check. */
+  if (!met && !lean_is_scalar(m->cands) && !h->fatal && !m->in_tick_drain) {
+    m->in_tick_drain = 1;
+    step_drain(h);
+    m = M(h);
+    if (m) m->in_tick_drain = 0;
+    return;
   }
   if (!met && !lean_is_scalar(m->cands)) {
     char detail[256];

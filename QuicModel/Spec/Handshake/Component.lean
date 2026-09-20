@@ -157,7 +157,7 @@ theorem mem_cryptoOutcomes_iff (s : State) (l : CryptoLevel) (off len : Nat) (o 
               · exact .expand hk (by omega) (by simpa using hd) hb
               · exact .overflowClose hk (by omega) (by simpa using hd) hb
           · rename_i hb; simp only [List.mem_singleton] at h; subst h
-            exact .accept hk (by omega) (by simpa using hd) (by omega)
+            exact .accept hk (by omega) (by simpa using hd) hb
   · intro h
     cases h with
     | levelGone hk => simp [cryptoOutcomes, hk]
@@ -168,7 +168,7 @@ theorem mem_cryptoOutcomes_iff (s : State) (l : CryptoLevel) (off len : Nat) (o 
     | discardingClose hk ho hd =>
       simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho]
     | accept hk ho hd hb =>
-      simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho, Nat.not_lt.mpr hb]
+      simp [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho, hb]
     | expand hk ho hd hb =>
       simp only [cryptoOutcomes, hk, hd, Nat.not_lt.mpr ho, hb, ↓reduceIte, Bool.false_eq_true]
       split <;> simp
@@ -407,7 +407,7 @@ theorem outcomes_ne (s : State) (e : Event) : outcomes s e ≠ [] := by
 * every CRYPTO stream is canonical and fully flushed — nothing buffered is
   already deliverable. -/
 def Inv (s : State) : Prop :=
-  (s.confirmed = true → s.complete = true) ∧ 4096 ≤ s.bufLimit ∧
+  (s.confirmed = true → s.complete = true) ∧ s.bufPolicy.Admissible ∧
     ∀ l : CryptoLevel, (s.stream l).WF
 
 theorem stream_setStream (s : State) (l l' : CryptoLevel) (c : Crypto) :

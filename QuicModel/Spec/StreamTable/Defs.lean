@@ -225,9 +225,23 @@ inductive Event where
 inductive Effect where
   /-- An effect of one stream (WP2), tagged with the stream it came from. -/
   | stream (id : StreamId) (e : Stream.Effect)
-  /-- A stream came into existence, whether explicitly or implicitly (§2.1,
-      line 718).  One per stream, in increasing order of stream ID. -/
+  /-- The stream that was *used* came into existence: the one the application
+      opened, or the one a frame from the peer named (§2.1). -/
   | streamOpened (id : StreamId)
+  /-- §2.1, line 718: "A stream ID that is used out of order results in all
+      streams of that type with lower-numbered stream IDs also being opened."
+      The `count` streams of `first`'s type from `first` on were opened that
+      way.  One effect for the whole range, however long: the sentence is about
+      which streams exist (`State.opened`, a counter), not about telling the
+      application of each one, and a frame may legally name a stream 2^60
+      places ahead.  `count` is never 0. -/
+  | streamsOpenedBelow (first : StreamId) (count : Nat)
+  /-- The first frame from the peer for a stream that `streamsOpenedBelow`
+      opened.  Nothing about the connection changes — the stream has existed
+      since — but this is the moment an implementation that allocates stream
+      state lazily tells its application about the stream, which is all the
+      effect is for (`Endpoint.Exports.Effect.cbName`). -/
+  | streamFirstUsed (id : StreamId)
   /-- §4.1: the peer raised the connection-level limit; more may be sent. -/
   | dataCreditAvailable (max : Nat)
   /-- §4.6: the peer raised the stream limit; more streams may be opened. -/
@@ -347,12 +361,29 @@ def afterStep (s : State) (id : StreamId) (st st' : Stream.State) : State :=
       recvTotal := s.recvTotal + (recvHighest st' - recvHighest st),
       sentTotal := s.sentTotal + (sentHighest st' - sentHighest st) }
 
-/-- §2.1, line 718: one `streamOpened` per stream that opening `id` creates,
-    in increasing order of stream ID. -/
+/-- Does this effect announce that stream `id` came into existence? -/
+def Effect.opens : Effect → StreamId → Bool
+  | .streamOpened i, id => i == id
+  | .streamsOpenedBelow first count, id =>
+    id.initiator == first.initiator && id.dir == first.dir &&
+      decide (first.index ≤ id.index) && decide (id.index < first.index + count)
+  | _, _ => false
+
+/-- §2.1, line 718: what opening `id` creates — the lower-numbered streams of
+    its type that did not exist yet, as one range, then `id` itself.  Constant
+    size whatever `id` is. -/
 def openedEffects (s : State) (id : StreamId) : List Effect :=
-  (List.range' (s.opened.get id.initiator id.dir)
-      (id.index + 1 - s.opened.get id.initiator id.dir)).map
-    (fun n => Effect.streamOpened (StreamId.make id.initiator id.dir n))
+  let lo := s.opened.get id.initiator id.dir
+  (if lo < id.index then
+    [Effect.streamsOpenedBelow (StreamId.make id.initiator id.dir lo) (id.index - lo)]
+   else []) ++ [Effect.streamOpened id]
+
+/-- `streamFirstUsed`, when this is a frame from the peer for a stream of the
+    peer's that exists (§2.1, line 718) but has never been touched. -/
+def firstUse (s : State) (id : StreamId) (e : Stream.Event) : List Effect :=
+  if peerFrame e && decide (id.initiator ≠ s.role) && (s.streams.get? id).isNone then
+    [Effect.streamFirstUsed id]
+  else []
 
 /-- Lift one stream's outcome to the table: `base` is the table after any
     implicit opening, `pre` the effects that opening produced.

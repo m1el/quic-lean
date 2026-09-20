@@ -38,6 +38,10 @@ structure State where
   role : Role
   /-- §18.2: the peer's `max_udp_payload_size`, once it has been received. -/
   peerMaxUdpPayload : Option Nat
+  /-- §18.2, line 6957: this endpoint's own `max_udp_payload_size`, which
+      "limits the size of UDP payloads that the endpoint is willing to
+      receive". -/
+  localMaxUdpPayload : Nat := defaultMaxUdpPayloadSize
   /-- §14.2, line 5742: "The largest UDP payload an endpoint sends at any given
       time is referred to as the endpoint's maximum datagram size." -/
   maxDatagramSize : Nat
@@ -54,9 +58,14 @@ inductive Event where
   /-- §14.1: an Initial packet arrived, carried in a UDP datagram whose payload
       was `datagramSize` bytes. -/
   | recvInitial (datagramSize : Nat)
-  /-- Any other datagram arrived.  §14, line 5695: whatever its size, receiving
-      it must not close the connection. -/
-  | recvDatagram (size : Nat)
+  /-- A datagram of `size` bytes arrived.  §14, line 5695: whatever its size,
+      receiving it must not close the connection.  `required` is the smallest
+      size the text required of the *sender* of this datagram on account of
+      what it carries — 1200 for a PATH_CHALLENGE (§8.2.1, line 3154) or a
+      PATH_RESPONSE (§8.2.2, line 3197) — and 0 when no such rule applies.
+      Only the layer that sees the frames can know it, so the caller supplies
+      it.  §14.1's rule for Initial packets is `recvInitial`'s. -/
+  | recvDatagram (size : Nat) (required : Nat)
   /-- §18.2: the peer's `max_udp_payload_size` transport parameter arrived.
       Validating the value is WP1's (`TransportParams`) job, not this file's. -/
   | recvMaxUdpPayload (v : Nat)
@@ -79,6 +88,18 @@ inductive Effect where
   deriving DecidableEq, Repr
 
 abbrev Out := Outcome State Effect
+
+/-- §14, line 5695's "a datagram that does not meet size constraints", for a
+    received datagram: it is smaller than a rule of the text required of its
+    sender (line 5691, "QUIC sometimes requires datagrams to be no smaller than
+    a certain size"), or larger than this endpoint said it is willing to receive
+    (§18.2, line 6966: `max_udp_payload_size` "does act as an additional
+    constraint on datagram size"). -/
+def FailsSizeConstraint (s : State) (size required : Nat) : Prop :=
+  size < required ∨ s.localMaxUdpPayload < size
+
+instance (s : State) (size required : Nat) : Decidable (FailsSizeConstraint s size required) :=
+  inferInstanceAs (Decidable (_ ∨ _))
 
 /-! ## 2. The specification -/
 
@@ -105,13 +126,16 @@ inductive Step : State → Event → Out → Prop
       Step s (.recvInitial n) .drop
   /-- §14, line 5695: "an endpoint MUST NOT close a connection when it receives a
       datagram that does not meet size constraints".  No size constraint of §14
-      governs a datagram that carries no Initial packet, so it is processed. -/
-  | datagramOk {s n} : Step s (.recvDatagram n) (.ok s [.deliver])
+      is attached to a datagram as such, so processing it is always permitted —
+      the discard below is a MAY. -/
+  | datagramOk {s n r} : Step s (.recvDatagram n r) (.ok s [.deliver])
   /-- §14, line 5697: "endpoint MAY however discard such datagrams" — the
-      permission that goes with the MUST NOT above.  This component cannot see
-      which size constraint (if any) a datagram had to meet, so the discard the
-      text permits is permitted here for any datagram; see NOTES. -/
-  | datagramDiscard {s n} : Step s (.recvDatagram n) .drop
+      permission that goes with the MUST NOT above, and like it limited to a
+      datagram "that does not meet size constraints".  A datagram that meets
+      them is not discarded *here*; the discards other rules permit (failed
+      decryption, duplicates, §9's and §5.2's) live with those rules. -/
+  | datagramDiscard {s n r} (h : FailsSizeConstraint s n r) :
+      Step s (.recvDatagram n r) .drop
   /-- §18.2, line 6966: the peer's limit "does act as an additional constraint on
       datagram size in the same way as the path MTU".  Recording it is all this
       component does with it; the value's validity is WP1's. -/
@@ -156,7 +180,8 @@ def outcomes (s : State) : Event → List Out
     if s.role = .server ∧ n < smallestMaxDatagramSize then
       [.drop, .error .protocolViolation]
     else [.ok s [.deliver], .drop]
-  | .recvDatagram _ => [.ok s [.deliver], .drop]
+  | .recvDatagram n r =>
+    if FailsSizeConstraint s n r then [.ok s [.deliver], .drop] else [.ok s [.deliver]]
   | .recvMaxUdpPayload v => [.ok { s with peerMaxUdpPayload := some v } []]
   | .icmpPtb p =>
     if p < smallestMaxDatagramSize then [.ok s []]
@@ -184,11 +209,14 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
         rcases h with h | h <;> subst h
         · exact .initialOk ‹_›
         · exact .initialDiscard ‹_›
-    | recvDatagram n =>
-      simp only [outcomes, List.mem_cons, List.not_mem_nil, or_false] at h
-      rcases h with h | h <;> subst h
-      · exact .datagramOk
-      · exact .datagramDiscard
+    | recvDatagram n r =>
+      simp only [outcomes] at h
+      split at h
+      · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+        rcases h with h | h <;> subst h
+        · exact .datagramOk
+        · exact .datagramDiscard ‹_›
+      · simp only [List.mem_singleton] at h; subst h; exact .datagramOk
     | recvMaxUdpPayload v =>
       simp only [outcomes, List.mem_singleton] at h; subst h; exact .maxUdpPayload
     | icmpPtb p =>
@@ -219,8 +247,8 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | initialTooSmallClose hr hn => simp [outcomes, hr, hn]
     | initialOk h => simp [outcomes, h]
     | initialDiscard h => simp [outcomes, h]
-    | datagramOk => simp [outcomes]
-    | datagramDiscard => simp [outcomes]
+    | datagramOk => simp only [outcomes]; split <;> simp
+    | datagramDiscard h => simp [outcomes, h]
     | maxUdpPayload => simp [outcomes]
     | icmpBelowMinimum h => simp [outcomes, h]
     | icmpNoIncrease h hp => simp [outcomes, h, hp]
@@ -367,16 +395,30 @@ theorem server_never_processes_small_initial {s : State} {n : Nat} {o : Out}
 /-- §14, line 5695: "an endpoint MUST NOT close a connection when it receives a
     datagram that does not meet size constraints".  For every datagram that does
     not carry an Initial packet — whatever its size — no outcome is an error. -/
-theorem no_close_on_datagram_size {s : State} {n : Nat} {o : Out}
-    (h : Step s (.recvDatagram n) o) : ∀ c, o ≠ .error c := by
+theorem no_close_on_datagram_size {s : State} {n r : Nat} {o : Out}
+    (h : Step s (.recvDatagram n r) o) : ∀ c, o ≠ .error c := by
   cases h <;> (intro c; simp)
 
-/-- §14 line 5697, §5.2 line 1878 and §11.1 line 4485: discarding a received
-    datagram is always permitted, whatever its size; this component never forces
-    an endpoint to process one. -/
-theorem drop_always_permitted (s : State) (n : Nat) :
-    Step s (.recvDatagram n) .drop ∧ Step s (.recvInitial n) .drop := by
-  refine ⟨.datagramDiscard, ?_⟩
+/-- §14, line 5697: the discard is permitted for "such datagrams" only — a
+    datagram is discarded by this component exactly when it fails a size
+    constraint. -/
+theorem datagram_drop_iff {s : State} {n r : Nat} :
+    Step s (.recvDatagram n r) .drop ↔ FailsSizeConstraint s n r :=
+  ⟨fun h => by cases h; assumption, .datagramDiscard⟩
+
+/-- … so a datagram that meets its size constraints is handed on, and whatever
+    error its content mandates cannot be evaded through this component. -/
+theorem datagram_delivered_of_size_ok {s : State} {n r : Nat} {o : Out}
+    (hc : ¬ FailsSizeConstraint s n r) (h : Step s (.recvDatagram n r) o) :
+    o = .ok s [.deliver] := by
+  cases h with
+  | datagramOk => rfl
+  | datagramDiscard h => exact absurd h hc
+
+/-- §14.1 line 5727, §5.2 line 1878 and §11.1 line 4485: discarding an Initial
+    packet is always permitted. -/
+theorem initial_drop_always_permitted (s : State) (n : Nat) :
+    Step s (.recvInitial n) .drop := by
   by_cases h : s.role = .server ∧ n < smallestMaxDatagramSize
   · exact .initialTooSmallDrop h.1 h.2
   · exact .initialDiscard h
@@ -461,11 +503,21 @@ example : component.accepts srv (.recvInitial 1200) .drop = true := by decide
 -- A client has no size rule for Initials it receives, and may still discard.
 example : component.step cli (.recvInitial 200) = .ok cli [.deliver] := by decide
 example : component.accepts cli (.recvInitial 200) .drop = true := by decide
--- §14 lines 5695/5697: receiving an undersized datagram never closes the
--- connection, and discarding it is permitted.
-example : component.step srv (.recvDatagram 20) = .ok srv [.deliver] := by decide
-example : component.accepts srv (.recvDatagram 20) .drop = true := by decide
-example : component.accepts srv (.recvDatagram 20) (.error .protocolViolation) = false := by decide
+-- §14 lines 5695/5697: receiving an undersized datagram — here one that carries
+-- a PATH_CHALLENGE and so had to be 1200 bytes — never closes the connection,
+-- and discarding it is permitted.
+example : component.step srv (.recvDatagram 20 1200) = .ok srv [.deliver] := by decide
+example : component.accepts srv (.recvDatagram 20 1200) .drop = true := by decide
+example : component.accepts srv (.recvDatagram 20 1200) (.error .protocolViolation) = false := by
+  decide
+-- The same for a datagram larger than our own `max_udp_payload_size` (§18.2).
+example : component.accepts { srv with localMaxUdpPayload := 1472 } (.recvDatagram 1473 0) .drop =
+    true := by decide
+-- A datagram that meets its size constraints is *not* discarded on §14's
+-- authority: 20 bytes with nothing in them that had to be expanded …
+example : component.accepts srv (.recvDatagram 20 0) .drop = false := by decide
+-- … and an expanded PATH_CHALLENGE datagram.
+example : component.accepts srv (.recvDatagram 1200 1200) .drop = false := by decide
 -- §14.2.1: "MUST ignore an ICMP message that claims the PMTU has decreased
 -- below QUIC's smallest allowed maximum datagram size."
 example : component.step { cli with maxDatagramSize := 1452 } (.icmpPtb 1000) =
@@ -527,7 +579,7 @@ Assigned range: lines 5640–5919 (§14) and, for the size constant, 5920–5958
 | §14 (5679) | enforcement of `max_udp_payload_size` might limit datagram size | `RecommendedDatagram` fourth clause; no normative keyword here, and §18.2 line 6966 makes it path-MTU-strength, i.e. SHOULD |
 | §14 (5687) | UDP datagrams MUST NOT be fragmented at the IP layer; DF bit MUST be set | out of scope: below the transport, not observable in this model |
 | §14 (5695) | MUST NOT close a connection on a datagram that fails size constraints | `Step.datagramOk`, theorem `no_close_on_datagram_size` |
-| §14 (5697) | "endpoint MAY however discard such datagrams" | `Step.datagramDiscard`, theorem `drop_always_permitted` |
+| §14 (5697) | "endpoint MAY however discard such datagrams" | `Step.datagramDiscard`, gated on `FailsSizeConstraint`; theorems `datagram_drop_iff`, `datagram_delivered_of_size_ok` |
 | §14.1 (5701) | a client MUST expand Initial-carrying datagrams to ≥ 1200 | `MaySendDatagram` first clause, `client_initial_expanded` |
 | §14.1 (5706) | a server MUST expand ack-eliciting-Initial-carrying datagrams to ≥ 1200 | `MaySendDatagram` first clause, `server_ackEliciting_initial_expanded` |
 | §14.1 (5723) | Initial datagrams MAY exceed 1200 bytes | `MaySendDatagram` bounds size only from below |
@@ -565,15 +617,21 @@ NOTES
   reading encoded is that the specific rule wins — `Step.initialTooSmallClose`
   exists, and `no_close_on_datagram_size` is therefore stated only for
   `.recvDatagram`, not for `.recvInitial`.
-- **Discarding is always permitted.**  §14 line 5697 lets an endpoint discard a
-  datagram that fails a size constraint, but this component cannot see which
-  constraint a given datagram had to meet — §8.1's and §8.2.1's 1200-byte rules
-  for path validation belong to WP5, which sees the frames.  Rather than invent
-  a flag on the event, `Step.datagramDiscard` permits the discard for any
-  datagram, and `Step.initialDiscard` does the same for Initial packets on the
-  strength of §5.2 line 1878 and §11.1 line 4485.  Nothing is lost: §14 has no
-  "MUST process" sentence, so this component never had grounds to force
-  delivery, and the rules that do live in the frame-level components.
+- **Discarding is for datagrams that fail a size constraint.**  §14 line 5697's
+  MAY is about "such datagrams", so `Step.datagramDiscard` carries
+  `FailsSizeConstraint`.  This component cannot see which constraint a datagram
+  had to meet — §8.2.1's and §8.2.2's 1200-byte rules are about frames — so the
+  event carries `required`, which `Endpoint.Pipeline.requiredSize` reads off the
+  datagram's frames; the upper bound is the endpoint's own
+  `max_udp_payload_size`.  Until the audit of 2026-09-19 (finding B3) the
+  discard was permitted for *every* datagram, which let any mandated error be
+  evaded through this component and hid ngtcp2's repeated-sequence
+  NEW_CONNECTION_ID deviation (`DIFFERENCES.md` A2) from the pairwise harness.
+  The discards the text permits for other reasons stay with their rules:
+  failed decryption and §12.2 (`Pipeline.recvParsed`), §12.3 duplicates (`Ack`),
+  §9 (`Migration`), §5.2.1/§5.2.2 (`VersionNeg`), §11.1 for an invalid Initial
+  (`Pipeline.packetErrOutcomes`).  `Step.initialDiscard` is still unconditional
+  for Initial packets, on the strength of §5.2 line 1878 and §11.1 line 4485.
 - **`.drop` is per-datagram here.**  "A server MUST discard an Initial packet" is
   about a *packet*; this model handles a datagram as a whole, so `.drop` means
   the Initial packet is discarded.  A datagram smaller than 1200 bytes cannot

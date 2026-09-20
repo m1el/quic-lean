@@ -69,6 +69,9 @@ structure Config where
   greaseQuicBit : Bool := false
   /-- §14.2: the endpoint's maximum datagram size at the start. -/
   maxDatagramSize : Nat := DatagramSize.smallestMaxDatagramSize
+  /-- §18.2 `max_udp_payload_size` we advertised: the largest datagram we said
+      we are willing to receive (§14, line 5679). -/
+  localMaxUdpPayload : Nat := DatagramSize.defaultMaxUdpPayloadSize
   /-- RFC 9002's probe timeout, in µs.  Out of scope, so it is carried. -/
   pto : Nat
   /-- §8.2: the path the handshake runs on. -/
@@ -76,6 +79,9 @@ structure Config where
   peerAddr : Addr
   /-- §7.5: how much out-of-order CRYPTO data we buffer (at least 4096). -/
   bufLimit : Nat := 4096
+  /-- §7.5: how far past the delivered offset out-of-order CRYPTO data may
+      reach (at least 4096); with `bufLimit`, the `Handshake.BufferPolicy`. -/
+  bufSpan : Nat := 4096
   /-- Packet protection.  Abstract in general; `Protection.stub tagLen` is what
       the differential harness uses. -/
   prot : Protection
@@ -193,10 +199,10 @@ end State
 def initHandshake (cfg : Config) : Handshake.State :=
   match cfg.role with
   | .client =>
-    { Handshake.initClient cfg.localCid cfg.peerCid cfg.bufLimit with
+    { Handshake.initClient cfg.localCid cfg.peerCid ⟨cfg.bufLimit, cfg.bufSpan⟩ with
       originalDcid := some cfg.origDcid }
   | .server =>
-    { Handshake.initServer cfg.localCid cfg.bufLimit with
+    { Handshake.initServer cfg.localCid ⟨cfg.bufLimit, cfg.bufSpan⟩ with
       dcidSent := some cfg.peerCid, peerScid := some cfg.peerCid,
       originalDcid := some cfg.origDcid, sawPeerInitial := true, dcidChanges := 1 }
 
@@ -244,7 +250,8 @@ def init (cfg : Config) : State where
     { dcid := bytes cfg.peerCid, scid := bytes cfg.localCid, chosen := cfg.chosen,
       processedAny := false, abandoned := false }
   dsz :=
-    { role := cfg.role, peerMaxUdpPayload := none, maxDatagramSize := cfg.maxDatagramSize,
+    { role := cfg.role, peerMaxUdpPayload := none,
+      localMaxUdpPayload := cfg.localMaxUdpPayload, maxDatagramSize := cfg.maxDatagramSize,
       pathUsable := true, runsPmtuDiscovery := false }
   rtx := {}
   ecnInitial := initEcn .initial

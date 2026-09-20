@@ -44,11 +44,49 @@ example : component.step (run srv [.appOpenStream .uni, .appOpenStream .uni, .ap
     (.appOpenStream .uni) = .drop := by decide
 
 -- §2.1, line 718: a STREAM frame for client-initiated bidirectional stream 8
--- (index 2) opens streams 0 and 4 as well, in increasing order …
+-- (index 2) opens streams 0 and 4 as well — one range effect, then the stream …
 example : component.step srv (.stream ⟨8⟩ (.recv (.recvStream 0 5 false))) =
     .ok ((component.step srv (.stream ⟨8⟩ (.recv (.recvStream 0 5 false)))).next srv)
-      [.streamOpened ⟨0⟩, .streamOpened ⟨4⟩, .streamOpened ⟨8⟩,
+      [.streamsOpenedBelow ⟨0⟩ 2, .streamOpened ⟨8⟩,
        .stream ⟨8⟩ (.recv (.dataAvailable 5))] := by decide
+-- The first frame for one of the implicitly opened streams says so
+-- (`streamFirstUsed`: an API moment, not a second opening); the next does not.
+example : component.step (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))])
+      (.stream ⟨4⟩ (.recv (.recvStream 0 5 false))) =
+    .ok (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false)),
+                  .stream ⟨4⟩ (.recv (.recvStream 0 5 false))])
+      [.streamFirstUsed ⟨4⟩, .stream ⟨4⟩ (.recv (.dataAvailable 5))] := by decide
+example : component.step (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false)),
+                                   .stream ⟨4⟩ (.recv (.recvStream 0 5 false))])
+      (.stream ⟨4⟩ (.recv (.recvStream 5 5 false))) =
+    .ok (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false)),
+                  .stream ⟨4⟩ (.recv (.recvStream 0 5 false)),
+                  .stream ⟨4⟩ (.recv (.recvStream 5 5 false))])
+      [.stream ⟨4⟩ (.recv (.dataAvailable 10))] := by decide
+-- Audit 2026-09-19, B4: the range is one effect however long it is, so a frame
+-- naming a stream near the encoding bound (2^62 - 4 is client-initiated
+-- bidirectional stream 2^60 - 1) is evaluated in constant time — both where it
+-- breaks the limit we advertised (§4.6, line 1546) …
+example : component.outcomes srv (.stream ⟨2 ^ 62 - 4⟩ (.recv (.recvStream 0 5 false))) =
+    [.error .streamLimitError] := by decide
+-- … and where the limit allows it: every lower-numbered stream is opened.
+private def srvWide : State := init .server { lim with maxStreamsBidi := 2 ^ 60 } lim
+example : component.step srvWide (.stream ⟨2 ^ 62 - 4⟩ (.recv (.recvStream 0 5 false))) =
+    .ok ((component.step srvWide (.stream ⟨2 ^ 62 - 4⟩ (.recv (.recvStream 0 5 false)))).next
+          srvWide)
+      [.streamsOpenedBelow ⟨0⟩ (2 ^ 60 - 1), .streamOpened ⟨2 ^ 62 - 4⟩,
+       .stream ⟨2 ^ 62 - 4⟩ (.recv (.dataAvailable 5))] := by decide
+example : (run srvWide [.stream ⟨2 ^ 62 - 4⟩ (.recv (.recvStream 0 5 false))]).has ⟨4⟩ = true := by
+  decide
+example : (run srvWide [.stream ⟨2 ^ 62 - 4⟩ (.recv (.recvStream 0 5 false))]).has
+    ⟨2 ^ 62 - 8⟩ = true := by decide
+-- The limit is still enforced one stream further on, and a stream opened that
+-- way is not opened again.
+example : (component.outcomes (run srvWide [.stream ⟨2 ^ 62 - 8⟩ (.recv (.recvStream 0 5 false))])
+    (.stream ⟨2 ^ 62 - 4⟩ (.recv (.recvStream 0 5 false)))).all
+      (fun o => match o with
+        | .ok _ fx => fx.all (fun e => !e.opens ⟨4⟩)
+        | _ => true) = true := by decide
 -- … and they really exist afterwards, while stream 12 does not.
 example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨0⟩ = true := by decide
 example : (run srv [.stream ⟨8⟩ (.recv (.recvStream 0 5 false))]).has ⟨4⟩ = true := by decide

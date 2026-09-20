@@ -100,11 +100,12 @@ is not realised at all.  See §3 below.
 |---|---|---|
 | `Migration` vs all | §9 line 3325 and §9.3.2 line 3460 are MUST-discards that must beat any other component's `.ok` for the same packet (`reviews/wave2.md`, composition note 4) | `Migration` is the **first** gate of `processPayload`; its `.drop` short-circuits, so no frame is dispatched and `Handshake`'s §7.2 rules do not run. Proved: `migration_discard_wins` |
 | `Termination` vs `PathValidation` | `recvChallenge` / `recvResponse` have no `.drop` in any state, which §10.2.1 line 3984 ("an endpoint that is closing is not required to process any received frame") contradicts (`PathValidation` NOTES 12) | `phaseGate` runs before anything is parsed: only `Phase.active` reaches `routeDatagram`. Proved: `no_dispatch_unless_active`, `closedPhase_is_term_only` |
-| `DatagramSize` vs every error-producing component | §14 line 5695 and §11.1 line 4485 permit discarding *even where an error is mandated* | `dszGate` is sequenced with `bindAll`, so `DatagramSize`'s `.drop` becomes a top-level alternative beside every error the rest of the pipeline can raise. Visible in `Examples`: every scenario's `outcomes` ends in `DROP`. §11.1's Initial-only widening is `packetErrOutcomes` |
+| `DatagramSize` vs every error-producing component | §14 line 5697 permits discarding a datagram *that fails a size constraint*, §11.1 line 4485 an invalid Initial, *even where an error is mandated* | `dszGate` is sequenced with `bindAll`, so `DatagramSize`'s `.drop` — offered only under `DatagramSize.FailsSizeConstraint`, with `Pipeline.requiredSize` reading the constraint off the frames (audit 2026-09-19, B3) — is a top-level alternative beside every error the rest of the pipeline can raise. A datagram that meets its constraints has no such alternative (`Examples` B3). §11.1's Initial-only widening is `packetErrOutcomes` |
 | `VersionNeg.Server` vs the rest | line 1946's blanket drop, and the fact that answering with a VN packet must *not* be followed by processing the datagram | `vnServerGate`: `eventOfDatagram = none → [.drop]`; an outcome whose effects contain `isSendVn` stops there; otherwise the continuation runs |
 | `VersionNeg.Client` vs the rest | lines 1889 and 1898 must fire *before* the packet is processed, line 2100's `processedAny` *after* | `vnClientGate` is a pre-gate for the first two; `vnAfterPacket` fires `recvOther ver true` after the frames |
 | `AddressValidation` on `newToken` / `serverInitialProcessed` | its `.drop` must not veto the packet (AV NOTES 5) | `gate s (stepAv …) keep` — the bookkeeping did not happen, the packet continues |
 | `Ack` §12.3 duplicate suppression | a duplicate is a drop of the whole packet, not of one frame | `gate s2 (stepAck s2 sp (.recvPacket …))` wraps `processFrames` |
+| `Ack` §12.3 (4717) minimum packet number | *when* an endpoint raises its minimum leaves no trace, and no endpoint event fired `Ack.Event.raiseMinimum` — the blanket datagram discard was standing in for it | `Pipeline.minimumRaised`: a non-duplicate packet older than the largest processed in its space has the alternative "the minimum moved past it" (`raiseMinimum (pn + 1)`, nothing processed). The newest packet never has it |
 | `Handshake` NOTE 10 / review K-2 | `recvHeader` may be fired **only** after protection was successfully removed | `processPayload` runs it after `parseOne` succeeded; every failure path goes to `packetErrOutcomes`, which never touches `Handshake` |
 | three copies of "handshake confirmed" | WP11 owns it, WP6 needs it for §10.2.3 line 4056 and WP10 for §9 line 3280 | `syncConfirmed` after every component write; `InvConfirmed`; justified by `handshake_confirmed_mono` |
 | `Migration.Path` vs `PathValidation.Path` | `Migration` NOTES 1 leaves the bijection to WP12 | `State.pathIds` / `nextPathId` / `register`, with `InvPaths` (bounded and injective) and `pathOfId` for the reverse lookup in `pvEffects` |
@@ -123,7 +124,7 @@ Every `WP12` mention under `QuicModel/Spec`, with where it landed.
 | `Termination` 721 | §10.3 (4125) MAY send a stateless reset for a packet it cannot associate with a connection | same no-connection path, above `Endpoint`; `maySendStatelessReset` is exported for when it exists |
 | audit 2026-09-18, D34-1 | §10.1 (3841) the idle timer restarts when a packet is "received and processed successfully" | `Effect.packetProcessed` is emitted at the end of a packet no component discarded (`Pipeline.processed`); `idleGate` runs `afterDatagram` only for an outcome that carries it. A datagram whose packets were all discarded leaves `term.idleStart` alone. `Examples` §12b |
 | audit 2026-09-18, D34-2 | §17.2.5.2 (6626) discard a Retry whose Retry Integrity Tag cannot be validated | `Protection.retryTagOk` is the abstract check; `Pipeline.retryIntegrityOk` hands its verdict to `AddressValidation.Step.retryBadTag` through `retryPacket`. `Protection.stub` validates sixteen bytes of 0xA5 |
-| audit 2026-09-18, D34-3 | §14.1 (5727) a server MUST discard an Initial carried in a datagram under 1200 bytes | per packet, in `Pipeline.recvOne`: `DatagramSize`'s `.recvInitial buf.size` is asked for *every* Initial of the datagram, before it is unprotected; its `.drop` skips that packet only (`gateElse` / `afterSkipped`), its PROTOCOL_VIOLATION (line 5729) is terminal. `dszGate` is now only the datagram-level `.recvDatagram` |
+| audit 2026-09-18, D34-3 | §14.1 (5727) a server MUST discard an Initial carried in a datagram under 1200 bytes | per packet, in `Pipeline.recvOne`: `DatagramSize`'s `.recvInitial buf.size` is asked for *every* Initial of the datagram, before it is unprotected; its `.drop` skips that packet only (`gateElse` / `afterSkipped`), its PROTOCOL_VIOLATION (line 5729) is terminal. `dszGate` is now only the datagram-level `.recvDatagram`, whose `.drop` needs a failed size constraint (audit 2026-09-19, B3) |
 | `Termination` 727 | §10.3 (4220) MUST discard packets too small to be a valid QUIC packet | receive half: the decoder's `.header` error → `[.ok s [.skippedRest]]`; send half: `Send.maySendStatelessReset` |
 | `Termination` 718 | §10.2.3 (4099) CONNECTION_CLOSE in several packet types may be coalesced | `MaySendDatagram` quantifies `MaySendPacket` over `d.packets`, and `Termination.MaySendPacket` is per packet type, so each coalesced packet is checked on its own |
 | `Termination` 719 | §10.2.3 (4111) MAY discard rather than close on errors in unauthenticated packets | `packetErrOutcomes`'s Initial `.drop`, as above |
@@ -136,7 +137,7 @@ Every `WP12` mention under `QuicModel/Spec`, with where it landed.
 | `PathValidation` 949 (NOTES 12) | `Termination`'s phase must gate challenge and response handling | `phaseGate` |
 | `FrameRules` 850 | the frame-by-frame walk of a payload | `processFrames` fires `.recvFrame pt f` per frame, and `.recvPacketFrames pt []` for an empty payload |
 | `Handshake` 889 | §7.1 (2264) coalescing | `recvPackets`, a fuel loop over `parseOne`; §12.2 line 4619's "MUST attempt to process the remaining packets" makes an undecryptable packet leave `Effect.skippedRest` and the loop go on (`packetEndOf`) |
-| `Handshake` 914 | §7.5 (2703) buffer at least 4096 bytes of out-of-order CRYPTO | `ConfigOk.bufLimit` — a side condition on the `Config`s WP12 may build, preserved by `step_inv` |
+| `Handshake` 914 | §7.5 (2703) buffer at least 4096 bytes of out-of-order CRYPTO | `ConfigOk.bufLimit` and `ConfigOk.bufSpan` (the two accountings of `Handshake.BufferPolicy`) — a side condition on the `Config`s WP12 may build, preserved by `step_inv` |
 | `Handshake` 924 | §17.2.2 (6364) "A server sends its first Initial packet in response to a client Initial" | **Not encoded**, and reasoned: a liveness MUST with no deadline. `Obligations.lean` states only the obligations that have one (§13.2.1) or that can be checked at the end of a run (§3.5, §13.3, §13.4.1); a deadline-less "something must eventually happen" cannot be checked from a finite trace without inventing a bound |
 | `Handshake` 927 | §17.2.2 (6376) first sentence: a client's first packet always includes a CRYPTO frame | **Not encoded**, and reasoned: `Endpoint` fires `sentPacket` but carries no "have we sent anything at all" flag, and requiring a CRYPTO frame in *every* first-flight Initial would wrongly reject the second packet of a ClientHello that spans packets. The second sentence (offset 0) *is* encoded, in `Handshake.MaySendPacket`; `Examples` §11 asserts both directions |
 | `Handshake` 1060 (NOTE 10), review K-2 | `recvHeader` only after successful unprotection | honoured; see §2 |
@@ -194,12 +195,12 @@ depends on that.  The one exception is `Endpoint.Examples`, which uses
 | Effect | `CB` name |
 |---|---|
 | `st (.stream _ (.recv (.dataAvailable _)))` | `recv_stream_data` |
-| `st (.stream _ (.recv (.allDataReceived _)))` | `stream_close` — **compare loosely**, see `TRIAGE.md` `WP13-1` |
+| `st (.stream _ (.recv (.allDataReceived _)))` | `stream_close` — **compare loosely**, see `TRIAGE.md` `WP13-1`; preceded by `recv_stream_data` when the step delivers no new bytes of that stream (the zero-length FIN read, `Exports.Effect.cbNames`) |
 | `st (.stream _ (.recv (.streamReset _ _)))` | `stream_reset` |
 | `st (.stream _ (.send (.creditAvailable _)))` | `extend_max_stream_data` |
 | `st (.stream _ (.send (.peerStopSending _)))` | `recv_stop_sending` |
 | `st (.stream _ (.send .allDataAcked))` | `acked_stream_data_offset` |
-| `st (.streamOpened _)` | `stream_open` |
+| `st (.streamOpened _)`, `st (.streamFirstUsed _)` | `stream_open` |
 | `st (.dataCreditAvailable _)` | `extend_max_data` |
 | `st (.streamsAvailable .bidi/.uni _)` | `extend_max_local_streams_bidi` / `_uni` |
 | `hs .handshakeComplete` / `.handshakeConfirmed` | `handshake_completed` / `handshake_confirmed` |
@@ -211,7 +212,7 @@ depends on that.  The one exception is `Endpoint.Examples`, which uses
 | `vnClient .abandon` / `(.attemptVersion _)` | `recv_version_negotiation` / `version_negotiation` |
 | everything else | `none` |
 
-`none` covers `keysDiscarded`, `peerParams`, `cryptoDiscarding`, `dcidChanged`,
+`none` covers `streamsOpenedBelow` (§2.1 line 718's range), `keysDiscarded`, `peerParams`, `cryptoDiscarding`, `dcidChanged`,
 `addressValidated`, `handshakeProceeds`, `queueRetire`, `switchPath`,
 `fr (.deliver _)`, `sendPending`, `skippedRest`, `packetProcessed`, the
 `Ack`/`Termination`/
@@ -244,10 +245,13 @@ text permits three and ngtcp2 picks one.
 
 Two warnings about what the set can and cannot falsify:
 
-1. `DatagramSize.Step.datagramDiscard` permits `.drop` for **every** received
-   datagram (§14, line 5695), so an observation of "processed, no callbacks"
-   never empties the candidate set.  The discriminating observations are the
-   *error codes* and the *non-empty* callback lists.
+1. "Processed, no callbacks" is still a weak observation — `ok []` and `drop`
+   look alike — but since the audit of 2026-09-19 (B3) it *can* empty the
+   candidate set: a datagram that meets its size constraints has no `.drop`
+   alternative, so an engine that silently ignores a frame whose error is
+   mandated is a mismatch.  The discards that remain are the text's own:
+   a failed size constraint, an undecryptable or duplicate packet, one below a
+   minimum packet number (`Pipeline.minimumRaised`), §9, §5.2.
 2. The send side is one-directional: every datagram ngtcp2 writes must satisfy
    `quic_endpoint_may_send_datagram`, but the absence of a datagram proves
    nothing (pacing, congestion window).

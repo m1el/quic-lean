@@ -211,43 +211,60 @@ theorem opened_step {s s' : State} {e : Event} {fx : List Effect}
   | _ => exact Nat.le_refl _
 
 /-- **(c) Once a stream exists it exists forever**, and no step ever announces
-    the opening of a stream that already existed: §2.1, line 687 "A QUIC
+    the opening of a stream that already existed — neither by name nor inside a
+    range of implicitly opened ones (`Effect.opens`): §2.1, line 687 "A QUIC
     endpoint MUST NOT reuse a stream ID within a connection." -/
 theorem no_reuse {s s' : State} {e : Event} {fx : List Effect} (h : Step s e (.ok s' fx))
     {id : StreamId} (hh : s.has id = true) :
-    s'.has id = true ∧ ∀ id', Effect.streamOpened id' ∈ fx → id' ≠ id := by
+    s'.has id = true ∧ ∀ fe ∈ fx, fe.opens id = false := by
   constructor
   · simp only [State.has, decide_eq_true_eq] at hh ⊢
     exact Nat.lt_of_lt_of_le hh (opened_step h _ _)
-  · intro id' hmem
+  · intro fe hmem
     cases h with
     | @existOk id₀ e2 st2 gx hx hb hs hfc =>
-      simp only [List.mem_map] at hmem
-      obtain ⟨a, -, ha⟩ := hmem
-      exact absurd ha (by simp)
+      simp only [List.mem_append, List.mem_map] at hmem
+      rcases hmem with hmem | ⟨a, -, ha⟩
+      · simp only [firstUse] at hmem
+        split at hmem
+        · simp only [List.mem_singleton] at hmem; subst hmem; rfl
+        · simp at hmem
+      · subst ha; rfl
     | @openOk id₀ e2 st2 gx hx hp hr hl hs hfc =>
       simp only [List.mem_append, List.mem_map] at hmem
       rcases hmem with hmem | ⟨a, -, ha⟩
-      · simp only [openedEffects, List.mem_map] at hmem
-        obtain ⟨n, hn, hid⟩ := hmem
-        simp only [List.mem_range'_1] at hn
-        simp only [Effect.streamOpened.injEq] at hid
-        subst hid
-        intro hc
-        subst hc
-        simp only [State.has, StreamId.initiator_make, StreamId.dir_make, StreamId.index_make,
-          decide_eq_true_eq] at hh
-        omega
-      · exact absurd ha (by simp)
+      · simp only [openedEffects, List.mem_append, List.mem_singleton] at hmem
+        rcases hmem with hmem | hmem
+        · split at hmem
+          · simp only [List.mem_singleton] at hmem
+            subst hmem
+            simp only [State.has, decide_eq_true_eq] at hh
+            simp only [Effect.opens, StreamId.initiator_make, StreamId.dir_make,
+              StreamId.index_make, Bool.and_eq_false_iff, decide_eq_false_iff_not,
+              beq_eq_false_iff_ne, ne_eq]
+            by_cases hi : id.initiator = id₀.initiator
+            · by_cases hd : id.dir = id₀.dir
+              · rw [hi, hd] at hh
+                exact Or.inl (Or.inr (by omega))
+              · exact Or.inl (Or.inl (Or.inr hd))
+            · exact Or.inl (Or.inl (Or.inl hi))
+          · simp at hmem
+        · subst hmem
+          simp only [Effect.opens, beq_eq_false_iff_ne, ne_eq]
+          intro hc
+          subst hc
+          simp [hh] at hx
+      · subst ha; rfl
     | @openLocal dir hlt =>
-      simp only [List.mem_singleton, Effect.streamOpened.injEq] at hmem
+      simp only [List.mem_singleton] at hmem
       subst hmem
+      simp only [Effect.opens, beq_eq_false_iff_ne, ne_eq]
       intro hc
       subst hc
       simp only [State.nextLocal, State.has, StreamId.initiator_make, StreamId.dir_make,
         StreamId.index_make, decide_eq_true_eq] at hh
       omega
-    | _ => simp_all
+    | _ => simp_all [Effect.opens]
 
 /-- The reachable form of (c): every stream of the initial state, and every
     stream opened on the way, is still there. -/

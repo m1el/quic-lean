@@ -63,6 +63,8 @@ that was **found and fixed** while writing the examples.
 
 ## WP13-3 — the model permits discarding *any* received datagram
 
+**Status (2026-09-19): fixed** — `DIFFERENCES.md` B3.
+
 * **Scenario:** all eight.  `Endpoint.outcomes` for a received datagram always
   ends in `DROP`, whatever else it contains.
 * **ngtcp2:** processes the datagram (or fails it with a code).  It never
@@ -235,6 +237,8 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
 
 ## WP13-7 — `outcomes` is not evaluable for a large stream ID
 
+**Status (2026-09-19): fixed** — `DIFFERENCES.md` B4; the harness skip is off by default.
+
 * **Reproducer** (binary, not a script; libFuzzer found it first)
 
   ```sh
@@ -295,6 +299,8 @@ any run).  `WP13-5` was not reached either: the stub AEAD cannot fail.
   code, not the packets.
 
 ## WP13-9 — §7.5's CRYPTO_BUFFER_EXCEEDED is not among the permitted outcomes
+
+**Status (2026-09-19): fixed** — the gap was the buffer accounting, not the error; `DIFFERENCES.md` B1.
 
 * **Reproducer**
 

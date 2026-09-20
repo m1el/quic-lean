@@ -19,8 +19,9 @@ export ASAN_OPTIONS=detect_leaks=0 DIFF_OUT=out/artifacts && mkdir -p out/artifa
 | `DIFF_OUT` | `.` | where a mismatching fuzz input is saved |
 | `DIFF_ACK_TOLERANCE` | `25000` (µs) | slack allowed on §13.2.1's acknowledgment deadline |
 | `DIFF_MAX_CANDS` | `12` | cap on the candidate-state set |
-| `DIFF_MAX_STREAM_INDEX` | `16384` | above this the model is not evaluable (see "Tractability") |
+| `DIFF_MAX_STREAM_INDEX` | unlimited | skip steps naming a stream index above this (see "Tractability"; no longer needed) |
 | `DIFF_FAIL_ON_MISMATCH` | unset | make `--script` exit 3 when anything mismatched |
+| `DIFF_ALL` | unset | report every mismatch, not only the first of each signature (triage of a coarse signature) |
 | `TRACE_SHOW` | unset | print the ngtcp2 trace of a fuzz input |
 
 ## 1. One driver, two consumers
@@ -70,6 +71,15 @@ its own events — never by writing a field:
    count towards the anti-amplification budget exactly as the real packet's
    would.  Without it a server's very first datagram is rejected by
    `AddressValidation.MaySendTo` and every later send check is meaningless.
+
+4. `Event.tls (.tlsDiscardKeys .initial)` and `… .handshake`, after the
+   synthesised Handshake packet.  `setup_conn` calls
+   `ngtcp2_conn_discard_initial_state` / `_handshake_state`, and quiche drops
+   both key sets when its real handshake is confirmed, so an Initial or
+   Handshake packet is undecryptable to either engine.  Without these events
+   the model processes such packets — forbidden frames in them are
+   PROTOCOL_VIOLATION, PINGs in them owe an acknowledgment — which used to hide
+   behind `DatagramSize`'s blanket discard (audit 2026-09-19, B3).
 
 **Time unit.**  ngtcp2 keeps time in nanoseconds (`NGTCP2_SECONDS = 1e9`);
 `Spec.Time` is microseconds.  `model_now(h) = h->ts / 1000` is the only
@@ -198,6 +208,17 @@ deadline has passed in **every** candidate, that is a mismatch of kind
 `obligation`: *ngtcp2 failed to do what the spec requires*.  It is reported once
 per run (the deadline stays passed, so every later record would repeat it).
 
+**A send opportunity first** (audit 2026-09-19, §6; `DIFFERENCES.md` D5).  A
+script or fuzz input that moves the clock without a `drain` never lets the
+engine write, so the acknowledgment it owes is simply never written — quiche has
+no ACK timer at all and acknowledges only when `send` is called.  Before
+reporting, `md_tick` therefore runs the driver's own `step_drain` once: what the
+engine writes goes through `MH_OUT` like any other datagram, and the check is
+repeated.  Only an engine that *still* owes the acknowledgment is reported.  An
+engine that has closed (an error, or the idle timeout inside the same clock
+step) is not checked: it owes nothing.  `harness/scripts/` and `conn_trace` are
+unaffected — the extra drain exists only in `endpoint_diff.c`.
+
 **The tolerance, and why it is what it is.**  `Ack.ackDeadline` is
 `min arrival + ackDelayBudget`, and `ackDelayBudget` is `max_ack_delay`
 (25 ms) in the application-data space and **0** in the Initial and Handshake
@@ -259,6 +280,13 @@ only in offset are one line of triage:
 * `maysend`: the frame *kinds* of the first packet;
 * `app`, `synth`: the action's name; `obligation`: one per run.
 
+Every report says whether the rejection is **exhaustive**.  The candidate set
+is capped (`DIFF_MAX_CANDS`), and a candidate the cap cuts may be the execution
+the engine is actually on; a mismatch later in such a run is "rejection after
+candidate loss", counted separately in the summary
+(`mismatches after candidate loss (not exhaustive)`), and is evidence about the
+cap before it is evidence about a rule (audit 2026-09-19, §6).
+
 The first occurrence prints the observation, the number of candidates, each
 candidate's `quic_endpoint_state_render`, **every outcome every candidate
 permits** as `quic_endpoint_outcome_render`, and the ngtcp2 trace so far; the
@@ -270,20 +298,14 @@ every soft (level-3) finding.
 
 ## 9. Tractability
 
-`StreamTable.openedEffects` is §2.1 line 718 made executable: `List.range'` over
-the stream *index*.  A frame naming stream 2^60 therefore makes `Endpoint.outcomes`
-allocate ~10^14 list cells — even on the branch that answers
-STREAM_LIMIT_ERROR, because that branch still evaluates the delegated outcomes
-in order to filter the errors out of them.  ngtcp2 answers STREAM_LIMIT in
-constant time.
-
-Before every received packet the harness therefore reads the plaintext frames
-(`g_build_plain`, what the driver's builder encrypted) and takes the largest
-stream index they name.  Above `DIFF_MAX_STREAM_INDEX` the step is skipped and
-tracking for that run stops: the model could not be advanced past the packet, so
-comparing the rest of the run would produce false mismatches.  Skipped steps are
-counted and reported; in the ten-minute run they are 1.8 % of steps.
-`TRIAGE.md` `WP13-7` has the finding.
+`StreamTable.openedEffects` used to enumerate every stream §2.1 line 718 opens
+implicitly, so a frame naming stream 2^60 made `Endpoint.outcomes` unevaluable
+and the harness skipped such steps and stopped tracking the run (`TRIAGE.md`
+`WP13-7`, 1.8 % of steps).  Since the audit of 2026-09-19 (B4) the range is one
+effect, `streamsOpenedBelow first count`, the STREAM_LIMIT_ERROR branch builds
+no effects at all, and a frame for stream 2^62 − 4 is compared in the same
+~30 ms as any other.  The skip is therefore **off by default**;
+`DIFF_MAX_STREAM_INDEX=<n>` turns it back on.
 
 Two further guards, both for comparisons the harness cannot make honestly rather
 than for comparisons it does not like:

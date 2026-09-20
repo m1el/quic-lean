@@ -131,9 +131,10 @@ structure State where
   role : Role
   /-- §7.5, line 2703: "Implementations MUST support buffering at least 4096
       bytes of data received in out-of-order CRYPTO frames.  Endpoints MAY
-      choose to allow more data to be buffered during the handshake."  The
-      invariant keeps this at 4096 or more. -/
-  bufLimit : Nat := 4096
+      choose to allow more data to be buffered during the handshake."  How
+      this endpoint accounts for its CRYPTO buffer and how much it has
+      committed to; the invariant keeps it `BufferPolicy.Admissible`. -/
+  bufPolicy : BufferPolicy := {}
   /-- Keys for reading the peer's packets. -/
   read : Keys := {}
   /-- Keys for protecting our own packets. -/
@@ -187,14 +188,14 @@ structure State where
     Connection ID and the unpredictable Destination Connection ID of §7.2 line
     2337, and Initial keys are derived from the latter (RFC 9001 §5.2), so they
     exist in both directions from the outset. -/
-def initClient (scid dcid : Cid) (bufLimit : Nat := 4096) : State :=
-  { role := .client, bufLimit, localScid := scid,
+def initClient (scid dcid : Cid) (bufPolicy : BufferPolicy := {}) : State :=
+  { role := .client, bufPolicy, localScid := scid,
     dcidSent := some dcid, originalDcid := some dcid,
     read := { initial := .present }, write := { initial := .present } }
 
 /-- A server before the client's first Initial has arrived. -/
-def initServer (scid : Cid) (bufLimit : Nat := 4096) : State :=
-  { role := .server, bufLimit, localScid := scid,
+def initServer (scid : Cid) (bufPolicy : BufferPolicy := {}) : State :=
+  { role := .server, bufPolicy, localScid := scid,
     read := { initial := .present }, write := { initial := .present } }
 
 namespace State
@@ -455,7 +456,7 @@ def cryptoOutcomes (s : State) (lvl : CryptoLevel) (off len : Nat) : List Out :=
   -- CRYPTO_BUFFER_EXCEEDED error code" -- is offered per frame, so electing to
   -- discard on one frame does not forfeit it on the next (NOTE 18).
   else if (s.stream lvl).discarding then [.ok s [], .error .cryptoBufferExceeded]
-  else if s.bufLimit < bufferedBytes ((s.stream lvl).recv off len).buf then
+  else if s.bufPolicy.Exceeded ((s.stream lvl).recv off len) then
     -- Three outcomes are permitted past the limit, and buffering anyway is one
     -- of them at every point in the connection: §7.5, line 2707, "An endpoint's
     -- buffer size does not need to remain constant during the life of the
@@ -615,7 +616,7 @@ inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
       buffered (§7.5, line 2698). -/
   | accept {s l o n} (hk : s.read.get l.level ≠ .discarded) (h : o + n ≤ maxCryptoOffset)
       (hd : (s.stream l).discarding = false)
-      (hb : bufferedBytes ((s.stream l).recv o n).buf ≤ s.bufLimit) :
+      (hb : ¬ s.bufPolicy.Exceeded ((s.stream l).recv o n)) :
       CryptoStep s l o n (.ok (s.setStream l ((s.stream l).recv o n))
                              (deliverFx l (s.stream l) ((s.stream l).recv o n)))
   /-- §7.5, line 2711: "If an endpoint's buffer is exceeded during the
@@ -627,21 +628,21 @@ inductive CryptoStep : State → CryptoLevel → Nat → Nat → Out → Prop
       See NOTE 15. -/
   | expand {s l o n} (hk : s.read.get l.level ≠ .discarded) (h : o + n ≤ maxCryptoOffset)
       (hd : (s.stream l).discarding = false)
-      (hb : s.bufLimit < bufferedBytes ((s.stream l).recv o n).buf) :
+      (hb : s.bufPolicy.Exceeded ((s.stream l).recv o n)) :
       CryptoStep s l o n (.ok (s.setStream l ((s.stream l).recv o n))
                              (deliverFx l (s.stream l) ((s.stream l).recv o n)))
   /-- §7.5, line 2713: "If an endpoint does not expand its buffer, it MUST close
       the connection with a CRYPTO_BUFFER_EXCEEDED error code." -/
   | overflowClose {s l o n} (hk : s.read.get l.level ≠ .discarded) (h : o + n ≤ maxCryptoOffset)
       (hd : (s.stream l).discarding = false)
-      (hb : s.bufLimit < bufferedBytes ((s.stream l).recv o n).buf) :
+      (hb : s.bufPolicy.Exceeded ((s.stream l).recv o n)) :
       CryptoStep s l o n (.error .cryptoBufferExceeded)
   /-- §7.5, line 2716: "Once the handshake completes, if an endpoint is unable to
       buffer all data in a CRYPTO frame, it MAY discard that CRYPTO frame and all
       CRYPTO frames received in the future". -/
   | overflowDiscard {s l o n} (hk : s.read.get l.level ≠ .discarded)
       (h : o + n ≤ maxCryptoOffset) (hd : (s.stream l).discarding = false)
-      (hb : s.bufLimit < bufferedBytes ((s.stream l).recv o n).buf) (hc : s.complete = true) :
+      (hb : s.bufPolicy.Exceeded ((s.stream l).recv o n)) (hc : s.complete = true) :
       CryptoStep s l o n (.ok (s.setStream l { s.stream l with discarding := true })
                              [.cryptoDiscarding l])
 

@@ -285,9 +285,11 @@ private def srv03 : State := recvNext srv 0 [.stream 0 0 true abc]
 private def badFin : Frame := .stream 0 0 true ⟨#[0x61, 0x62, 0x63, 0x64, 0x65]⟩
 
 #guard acceptsC srv03 (dgEvent (dgram 1 [badFin])) (.error .finalSizeError) = 1
--- Three alternatives: the error, processing it anyway, and §14 line 5695's
--- discard.  ngtcp2 takes the first, and so does `Endpoint.step`.
-#guard (outcomes prot srv03 (dgEvent (dgram 1 [badFin]))).length = 3
+-- Two alternatives: the error and processing it anyway.  ngtcp2 takes the
+-- first, and so does `Endpoint.step`.  Discarding the datagram is not a third:
+-- it meets its size constraints, so §14 line 5697 does not apply (B3, below).
+#guard (outcomes prot srv03 (dgEvent (dgram 1 [badFin]))).length = 2
+#guard accepts prot srv03 (dgEvent (dgram 1 [badFin])) .drop = false
 #guard outcomeErrorC (recvOut srv03 (dgram 1 [badFin])) = 6
 
 /-! ## 6. `harness/scripts/04-max-streams-too-large`
@@ -738,6 +740,85 @@ private def freshSrv : State := init (cfgOf true)
 #guard (recvNextB freshSrv (mixed ++ ⟨Array.replicate (1200 - mixed.size) 0⟩) 100
           ).ackInitial.received = [⟨0, 0⟩]
 
+/-! ### B3 (audit 2026-09-19) — §14, line 5697 permits discarding a datagram
+"that does not meet size constraints", and no other -/
+
+/-- `DIFFERENCES.md` A2's frame: a NEW_CONNECTION_ID whose Retire Prior To
+    exceeds its Sequence Number (§19.15, line 7993: FRAME_ENCODING_ERROR), with
+    a sequence number already seen. -/
+private def badNcid : Frame := .newConnectionId 0 2 (cidOf 0xc1) (tokOf 0x11)
+
+-- An authenticated, processable packet carrying it has the error as its *only*
+-- outcome: it can no longer be evaded through `DatagramSize`.
+#guard (outcomes prot cli (dgEvent (dgram 0 [badNcid]))).all (outcomeErrorC · == 7)
+#guard accepts prot cli (dgEvent (dgram 0 [badNcid])) .drop = false
+-- A PATH_CHALLENGE in a datagram under 1200 bytes fails §8.2.1 line 3154's size
+-- constraint, so discarding that datagram is still permitted …
+private def challenge : Frame := .pathChallenge ⟨Array.replicate 8 7⟩
+#guard requiredSize prot srv (dgram 0 [challenge]) = 1200
+#guard accepts prot srv (dgEvent (dgram 0 [challenge])) .drop = true
+-- … never closing on it (§14, line 5695) …
+#guard (outcomes prot srv (dgEvent (dgram 0 [challenge]))).all (outcomeErrorC · == 0xffffffff)
+-- … and not once it is expanded.
+#guard accepts prot srv (dgEvent (dgram 0 [challenge, .padding 1200])) .drop = false
+-- The discards other rules permit are untouched.  §12.3: a duplicate packet is
+-- not processed again …
+#guard outcomeCbsC (recvOut (recvNext srv 0 [.stream 0 0 false abc]) (dgram 0 [.stream 0 0 false abc]))
+          = []
+-- §12.3, line 4717: a packet older than the largest one processed may have
+-- fallen below a minimum packet number, so it may be dropped whatever it carries
+-- (`Pipeline.minimumRaised`) — but not the newest packet, and not the first.
+private def srvAt9 : State := recvNext srv 9 [.ping]
+#guard (outcomes prot srvAt9 (dgEvent (dgram 3 [badNcid]))).any
+          (fun o => match o with | .ok s' _ => s'.ackAppData.minPn == 4 | _ => false)
+#guard (outcomes prot srvAt9 (dgEvent (dgram 10 [badNcid]))).all (outcomeErrorC · == 7)
+-- … and §12.2 line 4619: skipping an undersized Initial (D34-3 above) or an
+-- unreadable packet (D34-4 below) still leaves the packets behind it processed.
+
+/-! ### B1 (audit 2026-09-19) — §7.5: a CRYPTO frame the buffer cannot hold
+
+`recv app 0 0680030003100000…` — CRYPTO offset 196611, length 16, after the
+handshake.  Sixteen payload bytes, a reordering span of 196627
+(`Handshake.BufferPolicy`). -/
+
+private def farCrypto : Frame := .crypto 196611 ⟨Array.replicate 16 0⟩
+
+-- Both engines close with CRYPTO_BUFFER_EXCEEDED (13), which is permitted …
+#guard acceptsC cli (dgEvent (dgram 0 [farCrypto])) (.error .cryptoBufferExceeded) = 1
+-- … as is discarding the frame (line 2716).  That is not a packet-level drop:
+-- line 2719, "Packets containing discarded CRYPTO frames MUST be acknowledged",
+-- so the packet is processed and its number becomes acknowledgeable.
+#guard (outcomes prot cli (dgEvent (dgram 0 [farCrypto]))).any (fun o =>
+  match o with
+  | .ok s' fx => fx.contains (.hs (.cryptoDiscarding .oneRtt)) &&
+      fx.contains .packetProcessed && s'.ackAppData.received == [⟨0, 0⟩]
+  | _ => false)
+#guard accepts prot cli (dgEvent (dgram 0 [farCrypto])) .drop = false
+-- In-order CRYPTO data is never a buffer error.
+#guard (outcomes prot cli (dgEvent (dgram 0 [.crypto 0 ⟨Array.replicate 16 0⟩]))).all
+  (outcomeErrorC · == 0xffffffff)
+
+/-! ### B6 (audit 2026-09-19) — reaching the final size without new bytes is a
+FIN-bearing read, in the observation layer only -/
+
+-- `recv app 0 0f070000`: STREAM id=7 off=0 len=0 fin.  Both engines hand the
+-- application a zero-length read with fin set.  The model's effects are
+-- unchanged — completion, and no `dataAvailable`, because no byte arrived …
+#guard match recv cli 0 [.stream 7 0 true .empty] with
+  | .ok _ fx => !deliversData fx ⟨7⟩ | _ => false
+-- … and the observation of that completion is the read.
+#guard outcomeCbsC (recv cli 0 [.stream 7 0 true .empty])
+          = ["stream_open", "recv_stream_data", "stream_close"]
+-- Data with FIN is one read, as before: the FIN rides on the data.
+#guard outcomeCbsC (recv cli 0 [.stream 7 0 true abc])
+          = ["stream_open", "recv_stream_data", "stream_close"]
+-- A FIN that arrives after the data is a second read, with nothing in it …
+#guard outcomeCbsC (recvOut (recvNext cli 0 [.stream 7 0 false abc]) (dgram 1 [.stream 7 3 true .empty]))
+          = ["recv_stream_data", "stream_close"]
+-- … and repeating it is neither a read nor a second completion.
+#guard outcomeCbsC (recvOut (recvNext cli 0 [.stream 7 0 true .empty]) (dgram 1 [.stream 7 0 true .empty]))
+          = []
+
 /-! ### D34-4 — §12.2, line 4619: a packet too short for a header-protection
 sample does not stop the coalesced packets after it -/
 
@@ -907,16 +988,13 @@ private def srvEcnFailed : State :=
    events at different points of the trace.  Left as `none`; recorded as
    `WP13-2`.
 
-3. **Every datagram may be dropped.**  `DatagramSize.Step.datagramDiscard`
-   permits `.drop` for *any* received datagram (§14, line 5695: "an endpoint MUST
-   NOT close a connection when it receives a datagram that does not meet size
-   constraints; the endpoint MAY however discard such datagrams"), and WP7's own
-   NOTES admit the component cannot see which size constraint, if any, a
-   datagram had to meet.  The consequence at endpoint level is visible in every
-   scenario above: `outcomes` always ends in `DROP`.  It is safe for
-   differential testing — it only makes `accepts` more permissive — but it means
-   a trace in which ngtcp2 silently ignores a datagram can never falsify the
-   model.  Recorded as `WP13-3`.
+3. **Datagram discard (fixed, audit 2026-09-19 B3).**  `DatagramSize.Step.datagramDiscard`
+   used to permit `.drop` for *any* received datagram, so every scenario's
+   `outcomes` ended in `DROP` and a trace in which ngtcp2 silently ignored a
+   datagram could never falsify the model (`WP13-3`).  The discard is now gated
+   on `DatagramSize.FailsSizeConstraint`, with the constraint read off the
+   datagram's frames by `Pipeline.requiredSize`; §8 "B3" above asserts both
+   directions.
 
 4. **The post-handshake state.**  There is no `init`-with-keys variant; the five
    TLS events of `postHandshake` are how `Endpoint.State` is put where

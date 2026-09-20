@@ -16,7 +16,10 @@ import QuicModel.Spec.Endpoint.Dispatch
   2. `Termination`'s phase gate — §10.2.2, line 4023 (draining sends nothing)
      and §10.2.1, line 3965 (closing answers with CONNECTION_CLOSE).  Only the
      `active` phase goes on to parse;
-  3. §14's datagram-level size rule (`DatagramSize`, line 5695/5697).  §14.1
+  3. §14's datagram-level size rule (`DatagramSize`, line 5695/5697): a datagram
+     that fails a size constraint — `requiredSize` reads the constraint off its
+     frames — may be discarded and never closes the connection; one that meets
+     them goes on.  §14.1
      line 5727's "a server MUST discard an Initial packet … smaller than 1200
      bytes" is asked again for *each* Initial packet in step 5, because the
      first header of a datagram says nothing about the packets behind it;
@@ -26,7 +29,8 @@ import QuicModel.Spec.Endpoint.Dispatch
      (`Migration`) — whose two MUST-discards take precedence over every other
      component, as `reviews/wave2.md` note 4 requires — then `Handshake`'s key
      and connection-ID rules (fired **only** after successful unprotection,
-     `Handshake` NOTE 10), then §12.3's duplicate check (`Ack`), then frame by
+     `Handshake` NOTE 10), then §12.3's duplicate check (`Ack`) and its minimum
+     packet number (`minimumRaised`), then frame by
      frame §12.4/§12.5 (`FrameRules`) and dispatch to the component that owns
      the frame's semantics;
   6. after the datagram: §10.1 line 3841's idle-timer restart, which the text
@@ -550,6 +554,33 @@ theorem vnPacket_inv {s : State} (hs : Inv s) (d c : ByteArray) (vs : List Nat) 
       | exact invOk_bindAll (stepVnClient_inv hs _) (fun _ h => processed_inv h)
       | exact InvOk.drop
 
+/-- §12.3, line 4717: "The data required for detecting duplicates can be limited
+    by maintaining a minimum packet number below which all packets are
+    immediately dropped."  *When* an endpoint raises that minimum is its own
+    business and leaves no trace, so the choice is offered where it shows: a
+    packet that is not a duplicate and is older than the largest one processed
+    in its space may have fallen below a minimum the endpoint has just raised.
+    A minimum above the largest processed packet would be no bound on
+    duplicate-detection state at all, so a packet at or above it is never
+    discarded on this sentence's authority. -/
+def belowLargest (s : State) (sp : PnSpace) (pn : Nat) : Bool :=
+  match (s.ack sp).largest with
+  | some l => decide (pn < l) && !Ack.Ranges.mem (s.ack sp).received pn
+  | none => false
+
+/-- The alternative `belowLargest` permits: the minimum moves past `pn`
+    (`Ack.Step.raiseMin`) and the packet is dropped — nothing is processed,
+    nothing becomes acknowledgeable. -/
+def minimumRaised (s : State) (sp : PnSpace) (pn : Nat) : List Out :=
+  if belowLargest s sp pn then stepAck s sp (.raiseMinimum (pn + 1)) else []
+
+theorem minimumRaised_inv {s : State} (hs : Inv s) (sp : PnSpace) (pn : Nat) :
+    InvOk (minimumRaised s sp pn) := by
+  simp only [minimumRaised]
+  split
+  · exact stepAck_inv hs _ _
+  · exact InvOk.nil
+
 /-- The body of one 1-RTT / 0-RTT / Initial / Handshake packet, in the order of
     the pipeline: `Handshake`'s key and connection-ID rules, §9's receive rules,
     §12.3's duplicate check, then the frames. -/
@@ -575,7 +606,8 @@ def processPayload (now : Time) (mp : Migration.Path) (av : Bool) (ver : Option 
             (fun s3 =>
               bindAll (processFrames now mp pt (dcidSeqOf s3 dcid) av fs s3) (fun s4 =>
                 bindAll (avAfterPacket pt mp.peer s4) (fun s5 =>
-                  bindAll (vnAfterPacket ver s5) processed)))))
+                  bindAll (vnAfterPacket ver s5) processed)))
+          ++ minimumRaised s2 sp pn))
 
 theorem processPayload_ne (now : Time) (mp : Migration.Path) (av : Bool) (ver : Option Nat)
     (pt : PacketType) (dcid scid : ByteArray) (pn : Nat) (fs : List Frame) (s : State) :
@@ -586,10 +618,10 @@ theorem processPayload_ne (now : Time) (mp : Migration.Path) (av : Bool) (ver : 
   · refine gate_ne (stepMig_ne _ _) (fun _ => gate_ne (stepHs_ne _ _) (fun _ => ?_))
     split
     · exact processed_ne _
-    · exact gate_ne (stepAck_ne _ _ _) (fun _ =>
+    · exact List.append_ne_nil_of_left_ne_nil (gate_ne (stepAck_ne _ _ _) (fun _ =>
         bindAll_ne (processFrames_ne _ _ _ _ _ _ _)
           (fun _ => bindAll_ne (avAfterPacket_ne _ _ _)
-            (fun _ => bindAll_ne (vnAfterPacket_ne _ _) processed_ne)))
+            (fun _ => bindAll_ne (vnAfterPacket_ne _ _) processed_ne)))) _
 
 theorem processPayload_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration.Path)
     (av : Bool) (ver : Option Nat) (pt : PacketType) (dcid scid : ByteArray) (pn : Nat)
@@ -601,11 +633,11 @@ theorem processPayload_inv {s : State} (hs : Inv s) (now : Time) (mp : Migration
       gate_inv h1 (stepHs_inv h1 _) (fun s2 h2 => ?_))
     split
     · exact processed_inv h2
-    · exact gate_inv h2 (stepAck_inv h2 _ _) (fun s3 h3 =>
+    · exact InvOk.append (gate_inv h2 (stepAck_inv h2 _ _) (fun s3 h3 =>
         invOk_bindAll (processFrames_inv h3 _ _ _ _ _ _)
           (fun s4 h4 => invOk_bindAll (avAfterPacket_inv h4 _ _)
             (fun _ h5 => invOk_bindAll (vnAfterPacket_inv h5 _)
-              (fun _ h6 => processed_inv h6))))
+              (fun _ h6 => processed_inv h6))))) (minimumRaised_inv h2 _ _)
 
 /-- One decoded packet of a datagram.  `retryOk` is the Retry Integrity Tag
     verdict for a packet whose body is a Retry's, given its tag. -/
@@ -937,19 +969,59 @@ theorem vnClientGate_inv {s : State} (hs : Inv s) {k : Option Nat → State → 
 
 /-! ## 2i. §14's size rules -/
 
-/-- The datagram-level half: §14, line 5695's "MUST NOT close" with line 5697's
-    MAY-discard, for any datagram.  §14.1's rule for Initial packets is *not*
-    decided here — a datagram's first header says nothing about the packets
-    coalesced behind it — but per packet, in `recvOne`. -/
-def dszGate (buf : ByteArray) (k : State → List Out) (s : State) : List Out :=
-  bindAll (stepDsz s (.recvDatagram buf.size)) k
+/-- §8.2.1, line 3154 and §8.2.2, line 3197: the frames whose datagram the
+    sender "MUST expand … to at least the smallest allowed maximum datagram size
+    of 1200 bytes". -/
+def needsExpansion : Frame → Bool
+  | .pathChallenge _ => true
+  | .pathResponse _ => true
+  | _ => false
 
-theorem dszGate_ne {k : State → List Out} (hk : ∀ s, k s ≠ []) (buf : ByteArray) (s : State) :
-    dszGate buf k s ≠ [] := by
+/-- The size the text required of the sender of this datagram on account of the
+    frames in it, from `pos` on: what `DatagramSize.Event.recvDatagram` calls
+    `required`.  Only packets whose protection can be removed count — what an
+    unreadable packet carries cannot make the datagram discardable — and a
+    packet that cannot be read is stepped over the way `afterSkipped` does. -/
+def requiredSizeFrom (prot : Protection) (s : State) (buf : ByteArray) : Nat → Nat → Nat
+  | 0, _ => 0
+  | fuel + 1, pos =>
+    if buf.size ≤ pos then 0
+    else match parseOne prot s buf pos with
+      | .ok (pkt, next) =>
+        let here :=
+          match pkt.body with
+          | .payload _ _ _ frames =>
+            if frames.any (fun f => needsExpansion f.1) then DatagramSize.smallestMaxDatagramSize
+            else 0
+          | _ => 0
+        if next ≤ pos then here else max here (requiredSizeFrom prot s buf fuel next)
+      | .error _ =>
+        match packetEndOf s buf pos with
+        | some next => if next ≤ pos then 0 else requiredSizeFrom prot s buf fuel next
+        | none => 0
+
+/-- `requiredSizeFrom` for the whole datagram.  No rule asks for more than 1200
+    bytes, so a datagram that large is not looked into. -/
+def requiredSize (prot : Protection) (s : State) (buf : ByteArray) : Nat :=
+  if DatagramSize.smallestMaxDatagramSize ≤ buf.size then 0
+  else requiredSizeFrom prot s buf buf.size 0
+
+/-- The datagram-level half: §14, line 5695's "MUST NOT close" with line 5697's
+    MAY-discard, for a datagram that fails a size constraint — `requiredSize`
+    is the constraint its frames put on it.  §14.1's rule for Initial packets
+    is *not* decided here — a datagram's first header says nothing about the
+    packets coalesced behind it — but per packet, in `recvOne`. -/
+def dszGate (prot : Protection) (buf : ByteArray) (k : State → List Out) (s : State) :
+    List Out :=
+  bindAll (stepDsz s (.recvDatagram buf.size (requiredSize prot s buf))) k
+
+theorem dszGate_ne {k : State → List Out} (hk : ∀ s, k s ≠ []) (prot : Protection)
+    (buf : ByteArray) (s : State) : dszGate prot buf k s ≠ [] := by
   exact bindAll_ne (stepDsz_ne _ _) hk
 
 theorem dszGate_inv {s : State} (hs : Inv s) {k : State → List Out}
-    (hk : ∀ s, Inv s → InvOk (k s)) (buf : ByteArray) : InvOk (dszGate buf k s) := by
+    (hk : ∀ s, Inv s → InvOk (k s)) (prot : Protection) (buf : ByteArray) :
+    InvOk (dszGate prot buf k s) := by
   exact invOk_bindAll (stepDsz_inv hs _) hk
 
 /-! ## 2j. The whole datagram -/
@@ -998,16 +1070,16 @@ theorem routeVersion_inv {s : State} (hs : Inv s) (prot : Protection) (now : Tim
 /-- Parts 3–5 of the pipeline, for the `active` phase. -/
 def routeDatagram (prot : Protection) (now : Time) (src : Addr) (mp : Migration.Path)
     (buf : ByteArray) (s : State) : List Out :=
-  dszGate buf (routeVersion prot now mp (addrValidated s src) buf) s
+  dszGate prot buf (routeVersion prot now mp (addrValidated s src) buf) s
 
 theorem routeDatagram_ne (prot : Protection) (now : Time) (src : Addr) (mp : Migration.Path)
     (buf : ByteArray) (s : State) : routeDatagram prot now src mp buf s ≠ [] :=
-  dszGate_ne (fun _ => routeVersion_ne _ _ _ _ _ _) buf s
+  dszGate_ne (fun _ => routeVersion_ne _ _ _ _ _ _) prot buf s
 
 theorem routeDatagram_inv {s : State} (hs : Inv s) (prot : Protection) (now : Time)
     (src : Addr) (mp : Migration.Path) (buf : ByteArray) :
     InvOk (routeDatagram prot now src mp buf s) :=
-  dszGate_inv hs (fun _ h => routeVersion_inv h _ _ _ _ _) buf
+  dszGate_inv hs (fun _ h => routeVersion_inv h _ _ _ _ _) prot buf
 
 /-- §10.1, line 3841: "An endpoint restarts its idle timer when a packet from its
     peer is received and processed successfully." -/

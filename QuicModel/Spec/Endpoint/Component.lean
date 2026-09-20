@@ -137,6 +137,7 @@ structure ConfigOk (cfg : Config) : Prop where
   /-- §7.5, line 2703: "Implementations MUST support buffering at least 4096
       bytes of data received in out-of-order CRYPTO frames." -/
   bufLimit : 4096 ≤ cfg.bufLimit
+  bufSpan : 4096 ≤ cfg.bufSpan
   /-- §15, line 5924 and line 5953. -/
   vnNotSupported : VersionNeg.versionNegotiationVersion ∉ cfg.supported
   noReserved : ∀ v ∈ cfg.supported, VersionNeg.isReservedVersion v = false
@@ -168,7 +169,8 @@ theorem init_inv {cfg : Config} (h : ConfigOk cfg) : Inv (init cfg) := by
       cases hr : cfg.role <;>
         simp [init, initHandshake, hr, Handshake.initClient, Handshake.initServer] at hc
     · cases hr : cfg.role <;> simpa [init, initHandshake, hr, Handshake.initClient,
-        Handshake.initServer] using h.bufLimit
+        Handshake.initServer, Handshake.BufferPolicy.Admissible,
+        Handshake.minCryptoBuffer] using ⟨h.bufLimit, h.bufSpan⟩
     · intro l
       cases hr : cfg.role <;> cases l <;>
         simp [init, initHandshake, hr, Handshake.initClient, Handshake.initServer,

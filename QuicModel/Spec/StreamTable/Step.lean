@@ -45,7 +45,7 @@ inductive Step : State → Event → Out → Prop
       (h : Stream.Step (s.get id) e (.ok st' fx))
       (hfc : connRecvViolation s (s.get id) st' = false) :
       Step s (.stream id e)
-        (.ok (afterStep s id (s.get id) st') (fx.map (Effect.stream id)))
+        (.ok (afterStep s id (s.get id) st') (firstUse s id e ++ fx.map (Effect.stream id)))
   /-- The stream ignores the event entirely; nothing is charged. -/
   | existDrop {s id e} (hx : s.has id = true)
       (hb : connSendBlocked s (s.get id) e = false)
@@ -189,14 +189,15 @@ inductive Step : State → Event → Out → Prop
 def streamOutcomes (s : State) (id : StreamId) (e : Stream.Event) : List Out :=
   if s.has id then
     if connSendBlocked s (s.get id) e then [.drop]
-    else delegate s id (s.get id) [] e
+    else delegate s id (s.get id) (firstUse s id e) e
   else if peerFrame e then
     if id.initiator = s.role then
       if localNotCreatedMandatory id e then [.error .streamStateError]
       else [.error .streamStateError, .ok s []]
     else if s.maxStreamsLocal.get id.dir ≤ id.index then
+      -- an error outcome carries no effects (`lift`), so none are built for it
       .error .streamLimitError ::
-        (delegate (s.openThrough id) id (s.freshStream id) (openedEffects s id) e).filter isErr
+        (delegate (s.openThrough id) id (s.freshStream id) [] e).filter isErr
     else delegate (s.openThrough id) id (s.freshStream id) (openedEffects s id) e
   else [.drop]
 

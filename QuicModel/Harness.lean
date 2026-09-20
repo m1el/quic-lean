@@ -94,6 +94,10 @@ ngtcp2: `conn_trace.c` installs the Handshake and 1-RTT keys by hand and sets
 def tlsKeys (isWrite level : UInt8) : TlsEvent :=
   .tlsKeys (if isWrite == 0 then .read else .write) (levelOf level)
 
+/-- RFC 9001 §4.9: TLS says the keys of this level are gone. -/
+@[export quic_h_tls_discard_keys]
+def tlsDiscardKeys (level : UInt8) : TlsEvent := .tlsDiscardKeys (levelOf level)
+
 @[export quic_h_tls_complete]
 def tlsComplete (_dummy : UInt8) : TlsEvent := .tlsComplete
 
@@ -301,15 +305,13 @@ def statesLength (ss : List State) : UInt64 := ss.length.toUInt64
 
 /-! ## A tractability guard for the harness
 
-`StreamTable.openedEffects` (§2.1, line 718: one `streamOpened` per stream that
-opening this one creates) is `List.range'` over the stream *index*, so the
-executable `outcomes` allocates in proportion to the stream ID a frame names —
-even on the branch that answers STREAM_LIMIT_ERROR, because that branch still
-evaluates the delegated outcomes to filter the errors out of them.  A frame
-naming stream 2^60 therefore makes `outcomes` unevaluable, while ngtcp2 answers
-STREAM_LIMIT in constant time.  The harness looks at the frames first and skips
-the comparison rather than running out of memory; the skip is counted and
-reported, and the case is in TRIAGE.md. -/
+`StreamTable.openedEffects` used to be `List.range'` over the stream *index* —
+one `streamOpened` per stream §2.1 line 718 opens — so `outcomes` allocated in
+proportion to the stream ID a frame named, and the harness skipped such steps.
+Since the audit of 2026-09-19 (B4) the implicitly opened streams are one
+`streamsOpenedBelow` range effect and a step costs the same whatever stream it
+names, so the harness no longer skips by default; `DIFF_MAX_STREAM_INDEX`
+restores the guard this export serves. -/
 
 @[export quic_h_frames_max_stream_index]
 def framesMaxStreamIndex (fs : List Frame) : UInt64 :=

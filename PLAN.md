@@ -413,6 +413,27 @@ packet numbers, which mean different packets to the two engines.  (4) quiche's
 randomness is not reproducible: BoringSSL's `RAND_reset_for_fuzzing` is not in
 the vendored build.  (5) No fuzzing campaign with quiche_diff yet.
 
+## 4k. Disposition of TRANSPORT_AUDIT_2026-09-19_1.md
+
+All four recommended changes and the §6 harness items, in the audit's order.
+`DIFFERENCES.md` has the per-finding detail and the before/after replay.
+
+| Audit item | Status |
+|---|---|
+| 1. B3 datagram discard | fixed: `DatagramSize.Event.recvDatagram size required`, `FailsSizeConstraint`, `Pipeline.requiredSize`; `datagram_drop_iff`. §12.3 line 4717's minimum packet number, which the blanket discard had been standing in for, is `Pipeline.minimumRaised` |
+| 2. B1 CRYPTO resource policy | fixed: `Handshake.BufferPolicy` (payload bytes and reordering span), `Admissible` = the 4096 floor under both; no absolute offset cutoff admitted |
+| 3. B4 implicit stream opening | fixed: `Effect.streamsOpenedBelow` (one range), `Effect.streamFirstUsed` for the API moment, `no_reuse` over `Effect.opens`; harness skip off by default |
+| 4. B6 completion mapping | fixed in `Exports.Effect.cbNames` only; model effects unchanged |
+| 5. B2, A4, B5, B7, B8 | deferred, as the audit asks |
+| 6. harness | `tlsDiscardKeys` priming; one `step_drain` before an overdue ACK is reported, none after the engine closed; reports and summary distinguish exhaustive rejection from rejection after candidate loss; `DIFF_ALL` |
+
+Corpus replay, 2 458 inputs: ngtcp2 44 signatures / 649 steps → 27 / 138;
+quiche 26 / 571 → 24 / 323.  New implementation finding: quiche ignores
+STREAM_DATA_BLOCKED (`DIFFERENCES.md` A6); ngtcp2's A2 is now a pairwise
+mismatch.  Open next: the quiche `bfd34bc6…` residue (201 steps), the candidate
+cap (233 of quiche's 323 steps are after candidate loss), the digest join has
+not been re-run.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
