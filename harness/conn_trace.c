@@ -64,6 +64,11 @@
  *                             makes of <hex> (re-encoded by ngtcp2's encoder,
  *                             exactly as pkt_diff.c's roundtrip mode does).
  *                             An empty payload becomes a single PING.
+ *                             Packet numbers inside an ACK frame are ordinals:
+ *                             k is the k-th packet the endpoint has sent in
+ *                             <space>, from 0 (conn_driver.h, "engine-neutral
+ *                             references"); under ngtcp2, which numbers from 0
+ *                             without gaps, that is the number itself.
  *                             The packet is fed to ngtcp2_conn_read_pkt.
  *                             An Initial is padded to 1200 bytes.
  *   time <us>                 advance the clock by <us> microseconds and call

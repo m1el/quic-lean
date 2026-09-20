@@ -904,6 +904,69 @@ fail:
 
 #endif /* !DRIVER_QUICHE */
 
+/* ------------------------------------------- engine-neutral references */
+
+/* An endpoint chooses its packet numbers (ngtcp2 and Cloudflare quiche start
+   at 0, Google QUICHE at 1, a real handshake uses some up), so an absolute
+   number in an input means different packets to different engines, and mostly
+   "a packet never sent" to all but the one the corpus grew under (PLAN 4m,
+   4o B2).  Packet numbers in the ACK frames of a `recv` step are therefore
+   *ordinals*: k names the k-th packet the endpoint under test has sent in that
+   space, counted from 0; an ordinal past the last packet sent names a number
+   that far past the largest one sent (an acknowledgment of an unsent packet
+   stays one), and a negative one stays negative (a malformed ACK stays
+   malformed).  Both the engine and the model see the resolved frame.  Under
+   an engine that numbers from 0 without gaps this is the identity. */
+#define SENT_CAP 1024
+static int64_t g_sent_pn[3][SENT_CAP];
+static size_t g_nsent[3];
+#define VARINT_MAX ((int64_t)((1ULL << 62) - 1))
+
+static void sent_reset(void) { g_nsent[0] = g_nsent[1] = g_nsent[2] = 0; }
+
+static void sent_record(int space, int64_t pn) {
+  if (g_nsent[space] < SENT_CAP) g_sent_pn[space][g_nsent[space]++] = pn;
+}
+
+/* Ordinal to packet number; monotone, so ranges keep their order. */
+static int64_t sent_at(int space, int64_t idx) {
+  size_t n = g_nsent[space];
+  int64_t base, v;
+  if (idx < 0) return idx;
+  if ((uint64_t)idx < n) return g_sent_pn[space][idx];
+  base = n ? g_sent_pn[space][n - 1] + 1 : 0;
+  v = base + (idx - (int64_t)n);
+  return v > VARINT_MAX || v < 0 ? VARINT_MAX : v;
+}
+
+static uint64_t varint_clamp(int64_t v) {
+  return v < 0 ? 0 : v > VARINT_MAX ? (uint64_t)VARINT_MAX : (uint64_t)v;
+}
+
+static void resolve_ack(int space, ngtcp2_ack *a) {
+  int64_t li = a->largest_ack, si, lpn, spn;
+  size_t i;
+  if (li < 0 || li > VARINT_MAX || a->first_ack_range > (uint64_t)VARINT_MAX) return;
+  si = li - (int64_t)a->first_ack_range;
+  lpn = sent_at(space, li);
+  spn = sent_at(space, si);
+  a->largest_ack = lpn;
+  a->first_ack_range = varint_clamp(lpn - spn);
+  /* Below ordinal 0 the mapping is the identity, and so are gap and length. */
+  for (i = 0; i < a->rangecnt && si >= 0; ++i) {
+    ngtcp2_ack_range *r = &a->ranges[i];
+    int64_t nli, nsi, nlpn;
+    if (r->gap > (uint64_t)VARINT_MAX || r->len > (uint64_t)VARINT_MAX) return;
+    nli = si - (int64_t)r->gap - 2;
+    nsi = nli - (int64_t)r->len;
+    nlpn = sent_at(space, nli);
+    r->gap = varint_clamp(spn - nlpn - 2);
+    r->len = varint_clamp(nlpn - sent_at(space, nsi));
+    si = nsi;
+    spn = sent_at(space, nsi);
+  }
+}
+
 /* ------------------------------------------------------- packet building */
 
 /* Builds a protected packet in |space| with packet number |pn| carrying the
@@ -965,6 +1028,8 @@ static ngtcp2_ssize build_peer_pkt(int space, int64_t pn, const uint8_t *fb,
     if (n <= 0 || (size_t)n > fblen) break;
     fb += n;
     fblen -= (size_t)n;
+    if (fr.hd.type == NGTCP2_FRAME_ACK || fr.hd.type == NGTCP2_FRAME_ACK_ECN)
+      resolve_ack(space, &fr.ack);
     /* The encoder asserts a non-empty token. */
     if (fr.hd.type == NGTCP2_FRAME_NEW_TOKEN && fr.new_token.tokenlen == 0)
       continue;
@@ -1065,6 +1130,7 @@ static void dump_out_datagram(harness *h, const uint8_t *pkt, size_t pktlen) {
     pn = ngtcp2_pkt_adjust_pkt_num(h->out_max_pn[space],
                                    (int64_t)get_be(pnbuf, pnlen), pnlen);
     if (pn > h->out_max_pn[space]) h->out_max_pn[space] = pn;
+    sent_record(space, pn);
 
     if (pktend < pnoff + pnlen + TAGLEN) {
       TR(h, "OUT parse=short_payload\n");
@@ -1330,6 +1396,7 @@ static void harness_start(harness *h, int server) {
   h->last_stream = -1;
   h->out_max_pn[0] = h->out_max_pn[1] = h->out_max_pn[2] = -1;
   g_rand_state = 0x12345678u;
+  sent_reset();
   init_write_data();
   sb_reserve(&h->tr, 4096);
   h->tr.p[0] = 0;
