@@ -651,6 +651,115 @@ What it shows.
 5. 100 *no-code* rows are requirements with a proof and no run-time check;
    whether each *should* have one is a review, not a measurement.
 
+## 4o. Plan: check packet numbers; raise what a harness run covers (2026-09-20)
+
+Yardstick as in §4m: conformance and correctness of the model.  The measure is
+§4n's requirement table (`harness/scripts/spec_coverage.py`), re-run after each
+step; a step is done when its rows move from "NOT exercised" to "exercised
+(direct|guard)" on at least two engines and the corpus replay's signature list
+has been compared before/after.
+
+### A. §12.3 packet numbers (small, first)
+
+Today: `Ack.maySendPacketNumber` exists with its theorems and is called by
+nothing; `OutPacket` has no number; `Ack.Step.sent` takes any number
+(`bumpSent` is a max).  An engine that reused or lowered a number passes.
+
+A1. *Model.*  `Endpoint.MaySendDatagram` gets the numbers: either a `pn : Nat`
+    field on `OutPacket` (touches every constructor site: Examples, Harness,
+    FrameRules) or — smaller, preferred — a parallel predicate
+    `Endpoint.maySendNumbers : State → List (PnSpace × Nat) → Bool`
+    = per space, strictly increasing along the list *and* each
+    `Ack.maySendPacketNumber`.  "Along the list" matters: two packets coalesced
+    in one datagram share the pre-state, so the per-packet predicate alone
+    would accept a repeat inside a datagram.  Theorem: accepted numbers keep
+    `largestSent` strictly increasing over a run
+    (`largestSent_strictMono_of_maySendNumbers`).
+A2. *Export + harness.*  `quic_endpoint_may_send_numbers`; `md_out` builds the
+    list from `ps[i].space / ps[i].pn` (already recovered by `parse_out`) and
+    reports kind `maysend`, conjunct `pnOk`, in `..._why`.
+A3. *The recovery is circular.*  `parse_out` decodes the truncated number with
+    `ngtcp2_pkt_adjust_pkt_num(out_max_pn, …)`, i.e. *assuming* monotonicity: a
+    reused number decodes as itself only when it is within half the window
+    below the maximum, and a wrapped one decodes upward.  Keep that decoder
+    (it is the receiver's, §A.3) but also pass the raw truncated value and
+    length, and have the model check §17.1, line 6028: "the sender MUST use a
+    packet number size able to represent more than twice as large a range than
+    the difference between the largest acknowledged packet and packet number
+    being sent" (not modelled today) — then the
+    decode is *justified* rather than assumed.  Gives Ack rows §12.3 4685/4692
+    and the §17.1 row.
+A4. *Negative test.*  A script cannot make an engine misnumber.  Add
+    `QuicModel/Spec/Endpoint/Examples.lean` guards (repeat, decrease, repeat
+    inside one datagram, `maxPn`), and a `DIFF_SELFTEST=pn` mode in
+    `endpoint_diff.c` that replays the last datagram into `md_out` twice and
+    expects a `pnOk` mismatch — a harness check that the wire is connected,
+    in the spirit of §4k's "acceptance must be evidence".
+A5. Replay all three engines; expected: no new signature (QUICHE from 1,
+    ngtcp2/quiche from 0, all strictly increasing).  Exhaustion (`pnExhausted`)
+    stays unreachable; leave it to the Examples.
+
+### B. Coverage of the specification by harness runs
+
+Ordered by rows gained per unit of work; numbers are §4n's "NOT exercised" and
+unreachable rows.  B1–B3 need no new model code — they are driver and corpus.
+
+B1. *Make the measurement routine.*  `build_cov.sh` (the three `*_diff_cov`
+    binaries + init profile) and `spec_coverage.py --diff old.tsv new.tsv`.
+    Add branch-level evidence for `Step` guards where function level is blind
+    (`failCase` ran vs answered `.revert`): llvm-cov region counts per C
+    function are already in the export.  Then settle §4n item 4's open
+    question (is §3.5 line 1254 a mapping miss?).
+B2. *Inputs that mean the same to every engine* (§4m (1)): symbolic
+    `ack sent[i..j]`, `retire issued[k]`, `path_response echo[k]`.  Without it
+    most ACK-bearing inputs close QUICHE at once and Cloudflare quiche sees
+    shifted numbers, so everything downstream of a *valid* ACK is thin:
+    `Ack.recvAck`, `Ecn` validation, `Retransmission.acked`,
+    `Stream.Send.allDataAcked` (TRIAGE WP13-6).
+B3. *Keep stepping after the close.*  Drivers set `h->fatal` and stop.  Let
+    `recv`/`time` continue in closing/draining, and show the closing datagram
+    to the model on all three engines (today opt-in under QUICHE only).
+    Reaches Termination §10.2.1–10.2.3, §11.1 line 4457
+    `Step.recvClosingRespond`, the draining timer: ~6 rows.  Prerequisite:
+    resolve `ackPacketOk` (§4j (2)) — it refuses every closing datagram that
+    bundles an ACK, under all three engines.
+B4. *Evaluate the SHOULDs.*  `Recommended*` predicates are never called
+    (§13.2.2 two ack-eliciting packets, §19.13 *_BLOCKED, §3.5 line 1243,
+    §13.3 line 5393, §8.2.1 line 3142).  Export `quic_endpoint_recommended_why`
+    and count violations as a separate **advisory** class — never a mismatch,
+    never narrows the candidate set.  ~10 rows, and the first data on how the
+    engines treat SHOULD.
+B5. *A loss step.*  Nothing ever declares a packet lost, so Retransmission is
+    at 1 %.  New engine-neutral step `lose sent[i]`: the model gets
+    `Event.lost`; the engines get there by time (PTO) plus an ACK that skips
+    `sent[i]` by the reordering threshold — needs B2.  Send-side rules then
+    checkable: RESET_STREAM content unchanged, no STREAM after reset,
+    PATH_RESPONSE not retransmitted, blocked frames carry the current limit.
+B6. *ECN.*  `recv` gains an ECN codepoint (ngtcp2 `pi.ecn`, quiche
+    `recv_info`, QUICHE `QuicReceivedPacket` ecn argument) and forged ACKs
+    gain counts.  Ecn 7 % → the §13.4.1 feedback rows and §13.4.2.1 validation.
+B7. *A second path.*  `recv` from another 4-tuple; PATH_CHALLENGE/RESPONSE on
+    it; NAT rebinding vs migration.  Opens Migration (15 guard rows),
+    PathValidation's remaining 3, ConnIds' use-a-new-CID-on-a-new-path,
+    AddressValidation's per-path amplification.  The largest single gain and
+    the largest driver change (three engines' path APIs differ); do after B2–B6.
+B8. *The handshake, scripted rather than forced.*  TransportParams 0/19,
+    Handshake, VersionNegotiation, Retry/token rows are unreachable while setup
+    forces the post-handshake state.  Two stages: (a) a pre-handshake *client*
+    against forged server flights with the stub cipher at every level — ngtcp2
+    and QUICHE allow it, Cloudflare quiche does not (real TLS), so this is a
+    two-engine check; forged transport parameters become a fuzzable blob and
+    the 19 TransportParams rows become reachable; (b) Version Negotiation and
+    Retry packets as `recv` kinds.
+B9. *Corpus.*  After each driver step, a fuzzing campaign per engine seeded
+    from the shared corpus, merged with `-merge=1` into `corpus/conn_trace`
+    only when `spec_coverage.py` shows new requirement rows — coverage of the
+    *model*, not of the engines, is the criterion for keeping an input.
+
+Not planned: more engines (§4n item 1: they add no coverage); the 100 *no-code*
+rows — deciding which of them deserve a run-time check is a review of the
+coverage tables, to be scheduled separately.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
