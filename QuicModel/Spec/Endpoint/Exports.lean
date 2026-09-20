@@ -359,6 +359,15 @@ def maySendDatagramWhyC (s : State) (src dest : UInt64) (size : UInt64) (isPmtuP
       isEcnMarked := isEcnMarked != 0, src := ⟨src.toNat⟩, dcid := some dcid.toList,
       scid := some scid.toList })
 
+/-- The advice a sent packet's frames ignore (`recommendedWhy`), as
+    `rule:FRAME_KIND` entries, comma-separated; empty if none.  Advisory only:
+    never a mismatch (PLAN §4o B4). -/
+@[export quic_endpoint_recommended_why]
+def recommendedWhyC (s : State) (space : UInt8) (fs : List Frame) : String :=
+  let sp : PnSpace := if space == 0 then .initial else if space == 1 then .handshake else .appData
+  ",".intercalate (fs.flatMap (fun f =>
+    (recommendedWhy s sp f).map (fun r => r ++ ":" ++ ((f.dump.splitOn " ").headD ""))))
+
 @[export quic_endpoint_may_send_packet]
 def maySendPacketC (s : State) (p : OutPacket) : UInt8 := if maySendPacket s p then 1 else 0
 

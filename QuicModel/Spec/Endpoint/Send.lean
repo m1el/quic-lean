@@ -646,4 +646,49 @@ theorem retire_ne_dcid_of_maySendDatagram {s : State} {d : OutDatagram}
 theorem maySendPacket_frames_ne_nil {s : State} {p : OutPacket} (h : MaySendPacket s p) :
     p.frames ≠ [] := h.1.1
 
+/-! ## 6.4 Advice (PLAN §4o B4)
+
+The SHOULDs about a frame being sent.  None of them is part of `MaySend`: "a
+conforming implementation is never rejected for ignoring advice" (PLAN §1).
+The harness counts what `recommendedWhy` names as an *advisory* class of its
+own, which is never a mismatch and never narrows the candidate set. -/
+
+/-- The advice a frame sent in space `sp` ignores, by rule; `[]` if none.
+
+* `stream`: §3.5 line 1263 (RESET_STREAM carries the code asked for), §4.1 line
+  1376 / §19.13 line 7859 (STREAM_DATA_BLOCKED when blocked), §3.3 line 1156 and
+  §13.3 line 5393 (MAX_STREAM_DATA only in "Recv"), §3.5 line 1269
+  (`Stream.RecommendedSend`);
+* `streamTable`: §4.1 line 1375, §4.6 line 1561 (DATA_BLOCKED / STREAMS_BLOCKED
+  when at the limit) (`StreamTable.Recommended`);
+* `retransmitAcked`: §13.3 line 5461, "A sender SHOULD avoid retransmitting
+  information from packets once they are acknowledged"
+  (`Retransmission.Recommended.notAlreadyAcked`). -/
+def recommendedWhy (s : State) (sp : PnSpace) (f : Frame) : List String :=
+  (if s.st.streams.all (fun kv => Stream.recommendedSend kv.2 f) then [] else ["stream"]) ++
+  (match f with
+   | .dataBlocked _ =>
+     if s.st.sentTotal = s.st.maxDataPeer then [] else ["streamTable"]
+   | .streamsBlocked dir _ =>
+     if s.st.opened.get s.st.role dir = s.st.maxStreamsPeer.get dir then [] else ["streamTable"]
+   | _ => []) ++
+  (if (Retransmission.Info.of sp f).isVerbatim &&
+      Retransmission.has s.rtx.ackedInfo (Retransmission.Info.of sp f)
+   then ["retransmitAcked"] else [])
+
+theorem recommendedWhy_stream {s : State} {sp : PnSpace} {f : Frame}
+    (h : "stream" ∉ recommendedWhy s sp f) :
+    ∀ kv ∈ s.st.streams, Stream.RecommendedSend kv.2 f := by
+  intro kv hkv
+  by_cases hall : s.st.streams.all (fun kv => Stream.recommendedSend kv.2 f) = true
+  · exact (Stream.recommendedSend_iff _ _).mp (List.all_eq_true.mp hall kv hkv)
+  · exact absurd (by simp [recommendedWhy, hall]) h
+
+theorem recommendedWhy_streamTable {s : State} {sp : PnSpace} {f : Frame}
+    (h : "streamTable" ∉ recommendedWhy s sp f) : StreamTable.Recommended s.st f := by
+  cases f <;> simp only [StreamTable.Recommended] <;> try trivial
+  all_goals
+    refine Decidable.byContradiction (fun hne => h ?_)
+    simp [recommendedWhy, hne]
+
 end Quic.Spec.Endpoint

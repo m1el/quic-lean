@@ -155,6 +155,8 @@ extern lean_object *quic_endpoint_track_trace(lean_object *ss, lean_object *e,
 extern lean_object *quic_endpoint_send_number(uint8_t space, uint64_t pn, uint8_t len);
 extern uint8_t quic_endpoint_may_send_numbers(lean_object *s, lean_object *numbers);
 extern uint8_t quic_endpoint_may_send_number_sizes(lean_object *s, lean_object *numbers);
+extern lean_object *quic_endpoint_recommended_why(lean_object *s, uint8_t space,
+                                                 lean_object *fs);
 extern uint8_t quic_endpoint_may_send_datagram(lean_object *s, uint64_t src,
                                                uint64_t dest, uint64_t size,
                                                uint8_t is_pmtu_probe,
@@ -308,6 +310,10 @@ typedef struct {
 } soft_entry;
 static soft_entry g_soft[128];
 static int g_nsoft;
+/* advisory class, see advice_seen */
+static soft_entry g_advice[64];
+static int g_nadvice;
+static unsigned long g_advice_checks;
 static int g_nmm;
 static unsigned long g_mm_after_loss; /* mismatches in runs where the cap had cut */
 static unsigned long g_mm_total;
@@ -356,6 +362,10 @@ static void mm_summary(void) {
           g_mm_after_loss);
   for (i = 0; i < g_nmm; ++i)
     fprintf(stderr, "  sig=%016" PRIx64 " x%lu\n", g_mm[i].sig, g_mm[i].count);
+  fprintf(stderr, "advisory (a SHOULD about a sent frame not followed; %lu packets asked): %d kinds\n",
+          g_advice_checks, g_nadvice);
+  for (i = 0; i < g_nadvice; ++i)
+    fprintf(stderr, "  x%-6lu %s\n", g_advice[i].count, g_advice[i].key);
   if (g_nsoft) {
     fprintf(stderr,
             "soft (ngtcp2 reported a subsequence of the model's effects): "
@@ -363,6 +373,27 @@ static void mm_summary(void) {
             g_nsoft, g_steps_subseq);
     for (i = 0; i < g_nsoft; ++i)
       fprintf(stderr, "  x%-6lu %s\n", g_soft[i].count, g_soft[i].key);
+  }
+}
+
+/* Advisory: a SHOULD about a sent frame that the engine did not follow, under
+   the candidate that permitted the datagram (PLAN 4o B4).  Never a mismatch,
+   never touches the candidate set; one line per rule:FRAME in the summary. */
+
+static void advice_seen(const char *key) {
+  uint64_t sig = fnv(key);
+  int i;
+  for (i = 0; i < g_nadvice; ++i) {
+    if (g_advice[i].sig == sig) {
+      ++g_advice[i].count;
+      return;
+    }
+  }
+  if (g_nadvice < (int)(sizeof(g_advice) / sizeof(g_advice[0]))) {
+    g_advice[g_nadvice].sig = sig;
+    g_advice[g_nadvice].count = 1;
+    snprintf(g_advice[g_nadvice].key, sizeof(g_advice[g_nadvice].key), "%s", key);
+    ++g_nadvice;
   }
 }
 
@@ -1501,6 +1532,26 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     any_size_ok |= size_ok;
     if (pn_ok && size_ok && datagram_ok) {
       allowed = 1;
+      if (!g_pn_selftest_active) {
+        /* advice, asked of the candidate that permits the datagram */
+        for (i = 0; i < np; ++i) {
+          lean_object *why;
+          const char *w;
+          lean_inc(s);
+          lean_inc(ps[i].frames);
+          why = quic_endpoint_recommended_why(s, (uint8_t)ps[i].space, ps[i].frames);
+          ++g_advice_checks;
+          for (w = lean_string_cstr(why); *w;) {
+            char key[96];
+            size_t n = strcspn(w, ",");
+            snprintf(key, sizeof(key), "%.*s", (int)(n < 95 ? n : 95), w);
+            advice_seen(key);
+            w += n;
+            if (*w == ',') ++w;
+          }
+          lean_dec(why);
+        }
+      }
       break;
     }
     p = l_tail(p);
