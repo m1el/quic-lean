@@ -54,7 +54,10 @@ def main():
         functions = {}
         for unit in exported['data']:
             for fn in unit['functions']:
-                functions[fn['name']] = [fn['count'], fn['filenames'][0]]
+                # third element: the count of each code region (kind 0), in
+                # source order -- branch-level evidence for spec_coverage.py
+                regions = [r[4] for r in fn['regions'] if r[7] == 0]
+                functions[fn['name']] = [fn['count'], fn['filenames'][0], regions]
         (args.output / (name + '.json')).write_text(json.dumps(functions))
         print(f'{name}: {len(inputs)} existing inputs profiled', flush=True)
 

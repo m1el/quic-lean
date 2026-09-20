@@ -34,6 +34,14 @@ Known blind spot: a definition the Lean compiler inlined everywhere has a C
 function nobody calls, and reads as not exercised.  All forms of a name are
 therefore pooled (the definition, its Bool twin, its `instDec*` instance).
 
+Two refinements of that.  A guard is usually written as a projection chain
+(`s.phase.mayCarryData`); the chain's last name is looked up among the
+component's own definitions (`Phase.mayCarryData`).  And when the JSON carries
+region counts (measure_spec_coverage.py writes them), the last TSV column is
+`hit/total` code regions of the row's functions, a region being hit when the
+replay ran it more often than initialisation: `failCase` with 3/9 says most of
+its answers were never given.
+
 A row is
     executable   at least one identifier resolved to code
     exercised    at least one of those was run by the replay
@@ -56,8 +64,13 @@ def mangle(name):
     return '_'.join(c.replace('_', '__') for c in name.split('.'))
 
 
+REGIONS = {}
+
+
 def load(path):
-    return {k: v[0] for k, v in json.load(open(path)).items()}
+    data = json.load(open(path))
+    REGIONS[path] = {k: v[2] for k, v in data.items() if len(v) > 2}
+    return {k: v[0] for k, v in data.items()}
 
 
 class Index:
@@ -85,6 +98,16 @@ class Index:
 
     def funcs(self, lean_name):
         return self.by_owner.get(mangle(lean_name), [])
+
+    def methods(self, last, namespaces):
+        """Definitions named `last` anywhere under one of the namespaces: what
+        `x.y.last` in a hypothesis can stand for."""
+        out = []
+        tail = '_' + mangle(last)
+        for owner, fns in self.by_owner.items():
+            if owner.endswith(tail) and any(owner.startswith(mangle(ns) + '_') for ns in namespaces):
+                out += fns
+        return out
 
 
 def candidates(ident, namespaces):
@@ -173,9 +196,9 @@ def diff_rows(old_path, new_path):
         with open(path) as f:
             for line in f:
                 fields = line.rstrip('\n').split('\t')
-                if len(fields) != 7:
-                    raise ValueError(f'{path}: expected seven TSV fields')
-                component, source, _, ref, state, sentence, _ = fields
+                if len(fields) not in (7, 8):
+                    raise ValueError(f'{path}: expected seven or eight TSV fields')
+                component, source, _, ref, state, sentence = fields[:6]
                 key = (component, source, ref, sentence)
                 if key in result:
                     raise ValueError(f'{path}: duplicate requirement identity: {key}')
@@ -198,10 +221,26 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     init = load(sys.argv[1])
+    init_regions = REGIONS[sys.argv[1]]
     engines = collections.OrderedDict()
+    engine_regions = []
     for a in sys.argv[2:]:
         k, _, p = a.partition('=')
         engines[k] = load(p)
+        engine_regions.append(REGIONS[p])
+
+    def region_evidence(fns):
+        """(hit, total) code regions over the functions of a row, any engine."""
+        hit = total = 0
+        for fn in set(fns):
+            base = init_regions.get(fn)
+            if base is None:
+                continue
+            total += len(base)
+            for i, b in enumerate(base):
+                if any(i < len(er.get(fn, ())) and er[fn][i] > b for er in engine_regions):
+                    hit += 1
+        return hit, total
     idx = Index(init.keys())
 
     def ran(fn, prof):
@@ -254,13 +293,17 @@ def main():
                         for tok in ctors[m.group(1)]:
                             if tok in ('s', 'Step', 'State', 'Event', 'Out', m.group(1)):
                                 continue
-                            g += resolve(tok, here)
+                            r = resolve(tok, here)
+                            if not r and '.' in tok and tok[:1].islower():
+                                r = idx.methods(tok.rpartition('.')[2], nss)
+                            g += r
                         if g:
                             guards += g
                         else:
                             via_out += resolve('outcomes', here)
                 fns = direct or guards or via_out
                 kind = 'direct' if direct else 'guard' if guards else 'outcomes' if via_out else ''
+                evidence = ''
                 if not idents:
                     c['unnamed'] += 1
                     state = 'unnamed'
@@ -276,8 +319,11 @@ def main():
                     anyhit = any(hit.values())
                     c['hit_any'] += anyhit
                     state = ('exercised' if anyhit else 'NOT exercised') + ' (' + kind + ')'
+                    if kind != 'outcomes':
+                        h, t = region_evidence(fns)
+                        evidence = '%d/%d' % (h, t) if t else ''
                 detail.append((component, path, ln, ref, state, sentence.strip()[:110],
-                               ', '.join(idents)[:80]))
+                               ', '.join(idents)[:80], evidence))
 
     eng = list(engines)
     hdr = ['component', 'norm.rows', 'unnamed', 'no-code', 'executable', 'direct/guard/outcomes'] + eng + ['any']
