@@ -560,6 +560,97 @@ and says nothing about what was sent, so the "latitude" class (276 in the first
 join) is mostly uncleaned.  (3) The byte-range and acknowledged-set
 projections.  Stop there until the join says otherwise.
 
+## 4n. Measured: which specification requirements the harness exercises (2026-09-20)
+
+Method.  The C that Lean emits is built with `-fprofile-instr-generate
+-fcoverage-mapping` (`out/obj-cov`, binaries `out/*_diff_cov`);
+`corpus/conn_trace` is replayed under each engine (`-runs=0`; Google QUICHE
+also over `out/corpus-gq`); `llvm-cov export` gives a count per C function;
+`harness/scripts/spec_coverage.py` maps the back-quoted identifiers of every
+coverage-table row in `QuicModel/Spec/**` to those functions.  Per-row result:
+`out/spec_coverage_rows.tsv`.
+
+**Initialisation must be subtracted.**  A run with no input executes 2 940
+model functions: Lean evaluates closed terms (the Examples) at module
+initialisation.  A first version of this section reported 28 % region coverage
+that was almost entirely that.  A function counts only if the replay ran it
+more often than initialisation did.
+
+**By function** (definitions in `QuicModel/Spec`, without derived instances,
+match splitters and `_boxed` wrappers): 1 811 functions, **504 exercised
+(28 %)** — ngtcp2 501, Cloudflare quiche 491, Google QUICHE 496.  StreamTable
+and Ack 54 %, FrameRules 41 %, Stream 37 %, Endpoint 34 %, Termination 33 %,
+Handshake 31 %, ConnIds and AddressValidation 30 %, Migration and
+PathValidation 24 %, VersionNegotiation and Core 19 %, DatagramSize 15 %,
+Ecn 7 %, Retransmission 1 %, TransportParams 0 %.
+
+**By requirement** (coverage-table rows whose sentence has a normative
+keyword; `cq` = Cloudflare quiche, `gq` = Google QUICHE):
+
+| component | norm.rows | unnamed | no-code | executable | direct/guard/outcomes | ngtcp2 | cq | gq | any |
+|---|---|---|---|---|---|---|---|---|---|
+| AddressValidation | 50 | 21 | 14 | 15 | 7/1/7 | 10 | 10 | 10 | 10 |
+| Migration | 49 | 11 | 7 | 31 | 16/15/0 | 16 | 16 | 16 | 16 |
+| Termination | 47 | 13 | 8 | 26 | 12/2/12 | 22 | 21 | 21 | 22 |
+| Stream | 44 | 7 | 7 | 30 | 19/4/7 | 25 | 25 | 25 | 25 |
+| Ack | 34 | 5 | 15 | 14 | 13/1/0 | 11 | 11 | 11 | 11 |
+| Handshake | 28 | 3 | 17 | 8 | 7/0/1 | 5 | 5 | 5 | 5 |
+| VersionNegotiation | 27 | 2 | 7 | 18 | 5/5/8 | 13 | 13 | 13 | 13 |
+| DatagramSize | 26 | 5 | 5 | 16 | 7/1/8 | 16 | 16 | 16 | 16 |
+| TransportParams | 24 | 5 | 0 | 19 | 18/1/0 | 0 | 0 | 0 | 0 |
+| StreamTable | 21 | 1 | 3 | 17 | 10/2/5 | 16 | 16 | 16 | 16 |
+| ConnIds | 20 | 4 | 4 | 12 | 10/2/0 | 12 | 8 | 12 | 12 |
+| FrameRules | 20 | 2 | 8 | 10 | 8/1/1 | 6 | 6 | 6 | 6 |
+| PathValidation | 20 | 3 | 1 | 16 | 10/1/5 | 13 | 13 | 13 | 13 |
+| Ecn | 8 | 0 | 3 | 5 | 3/2/0 | 1 | 1 | 1 | 1 |
+| Retransmission | 7 | 1 | 1 | 5 | 4/0/1 | 1 | 1 | 1 | 1 |
+| Template | 3 | 1 | 0 | 2 | 0/0/2 | 0 | 0 | 0 | 0 |
+| **total** | 428 | 84 | 100 | 244 | 149/38/57 | 167 | 162 | 166 | 167 |
+
+Reading the columns.  *unnamed*: the row names no definition (out of scope,
+informative, prose).  *no-code*: it names only theorems, types or `Prop`s with
+no decision procedure in the binary — proved about, never checked at run time.
+*executable*: resolved to code, split by how: *direct* (the named definition,
+its Bool twin or `instDec*` instance), *guard* (`Step.foo` is a constructor of
+a `Prop`; the definitions its hypotheses name stand in for it), *outcomes*
+(nothing better than "the component's `outcomes` ran").  So of 428 normative
+rows, 244 can be exercised at all and 167 were; of those 167 only 113 are
+direct-or-guard evidence, 54 say no more than that the component was stepped.
+Function granularity: `failCase` ran, not "`failCase` answered `.revert`".
+Blind spot: a definition inlined everywhere reads as not exercised.
+
+What it shows.
+
+1. **Engines do not buy coverage.**  167 / 162 / 166, union 167.  The driver
+   and the corpus decide what is reached.  (Cloudflare quiche is lower on
+   ConnIds: `Local.canIssue` / `applyIssue` / `isReNewCid` never run, i.e. no
+   `LocalAction.issueCid` is replayed under that driver.)
+2. **A requirement that is modelled and never checked: §12.3.**
+   `Ack.maySendPacketNumber` ("MUST increase the packet number by at least
+   one", "MUST NOT reuse a packet number", the 2^62-1 bound) is referenced by
+   nothing outside `Spec/Ack` — it is not a conjunct of
+   `Endpoint.maySendPacket`.  An engine that reused or decreased a packet
+   number would pass.  This came up only because QUICHE numbers from 1 and the
+   question "is that valid" was asked; §4m's first draft wrongly assumed the
+   rule was enforced.  Cheap to wire in: `parse_out` already recovers the
+   number.
+3. **Unreachable by construction** (endpoint_diff.md §10): TransportParams
+   0/19, Migration's 15 unexercised rows, Handshake, VersionNegotiation,
+   AddressValidation's token rows, Retransmission (no loss event is ever
+   synthesised), Ecn (the peer's packets carry no ECN marks and its ACKs mostly
+   no counts).
+4. **Reachable in principle, not reached** — corpus or driver work, not model
+   work: §3.5 line 1254 "STOP_SENDING MUST be answered with RESET_STREAM"
+   (`Step.stopSending`'s guards — worth a look, the frame is common in the
+   corpus, so this may be a mapping miss); §3.5 line 1243 and §19.13
+   `RecommendedSend` (the harness does not evaluate the SHOULD predicates of
+   Stream at all); §13.2.2 `Recommended.twoAckEliciting`; §11.1 line 4457
+   `Step.recvClosingRespond` (every driver stops stepping once the engine has
+   closed); §10.3 stateless reset sizes; §10.2.3 `convertCloseForHandshake`.
+   `grep -P "NOT exercised" out/spec_coverage_rows.tsv`.
+5. 100 *no-code* rows are requirements with a proof and no run-time check;
+   whether each *should* have one is a review, not a measurement.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
