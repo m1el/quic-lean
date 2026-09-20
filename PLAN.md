@@ -490,6 +490,76 @@ Open: triage 4–7; `DIFF_DIGEST` three-way join; `extend_max_*` callbacks
 (`OnCanCreateNewOutgoingStream`, `OnCanWrite`) are not surfaced yet; QUICHE's
 dependencies are built without coverage and the library without ASan.
 
+## 4m. Consideration: raw and clean traces (2026-09-20; written down, not scheduled)
+
+The yardstick for anything below is whether it improves the two checks this
+project exists for — **conformance** (does the implementation do what the
+specification permits: engine vs model, `may_send_datagram`, `track_trace`) and
+**correctness of the specification as modelled** (is the model too strict or
+too lax: "both engines MISMATCH" and "latitude" in `digest_diff.py`).  It is
+not a goal in itself to make traces of different engines look alike.
+
+The idea: keep two forms of every trace.  *Raw* is what is on the wire and is
+what the model checks.  *Clean* replaces values an endpoint was free to choose
+with a canonical name, and is what an engine-vs-engine diff triggers on.  It
+came up because QUICHE numbers its packets from 1 (valid: §12.3's "start at
+packet number 0" carries no MUST, §21.4 permits skipping, and no receiver can
+tell), so a corpus input's `ACK largest=0` acknowledges ngtcp2's first packet
+and a packet QUICHE never sent — `bebccbdd…`, 281 of 406 replay mismatches, and
+§4j (3).
+
+**How wide it goes.**  Exactly the values that are (i) chosen freely by the
+endpoint and (ii) referred to later.  That is a short list: sent packet numbers
+(order and gaps matter), issued connection-ID bytes, stateless reset tokens,
+PATH_CHALLENGE data, NEW_TOKEN/Retry tokens (only equality matters), and — for
+Cloudflare quiche only — the base of the forged peer's 1-RTT numbers.  Stream
+IDs are *not* on it: §2.1 fixes them completely (initiator, direction, index),
+all three engines produce the same ones, and a jump in index is an implicit
+open, which the model already handles.
+
+**Shape of a clean name.**  For ordered values `.nth k` (the k-th value the
+binder introduced in that space) or `.unsent (after k)` (a reference to a value
+never introduced, placed relative to those that were — an ACK of a skipped
+number is an ACK of an unsent packet).  For equality-only values
+`.fresh k | .unbound`.  A *decrease* in sent packet numbers is not a naming
+matter: it is a MUST violation and belongs to the raw check — which at present
+does **not** make it (`Ack.maySendPacketNumber` is not wired into `Endpoint`,
+§4n item 2).
+
+**It has to cover inputs, not only outputs.**  The immediate problem is on the
+input side: an absolute reference in a step means different things to
+different engines.  Symbolic references in the step grammar (`ack sent[0..2]`,
+`retire issued[1]`, `path_response echo[0]`), resolved per engine by the
+driver, fix that; the binary corpus can be reread with its small integers as
+indices.  This would also retire `q_peer_pn_base` and the handshake-replay
+special case of quiche_driver.h.
+
+**What must stay raw, for conformance.**  The specification distinguishes raw
+values in places a clean form erases: the packet-number encoding length
+relative to the largest acknowledged (§17.1), gap sizes, exhaustion.  So the
+model keeps checking raw; clean is for the cross-engine join only.
+
+**What is not renaming, and costs findings if normalised.**  Packetisation
+(→ byte ranges sent per stream per step), ACK timing (→ set of acknowledged
+ordinals at step end, delay bucketed against `max_ack_delay`), MAX_* values
+(→ the running limit), callback granularity (→ delivered offset + fin at step
+end) are genuine latitude, not names.  Collapsing them makes the join quieter
+and hides rules about exactly those things: three items of this session —
+PATH_RESPONSE without the 1200-byte expansion, ACK bundled with
+CONNECTION_CLOSE, a retired DCID used in the same pass — are packetisation and
+ordering facts.  Padding length, frame order within a packet and the choice of
+error code should stay raw.  Add such a projection only where `digest_diff.py`
+shows the noise is drowning something.
+
+**Where it would pay, in order.**  (1) Symbolic references in inputs: restores
+conformance checking of ACK processing under QUICHE (at present most
+ACK-bearing inputs close the connection at once, so the ACK rules are barely
+exercised there) and removes the largest signature.  (2) A send-side digest
+with `.nth` names — today's digest line is event, ok/err and two callback names
+and says nothing about what was sent, so the "latitude" class (276 in the first
+join) is mostly uncleaned.  (3) The byte-range and acknowledged-set
+projections.  Stop there until the join says otherwise.
+
 ## 5. Risks
 
 - **`accepts_iff` for relations with existentials** (e.g. "some token the server
