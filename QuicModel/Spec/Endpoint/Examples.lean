@@ -1029,4 +1029,16 @@ private def srvEcnFailed : State :=
    `Basic.lean` cited carried a sentence that is not in the draft at all.
 -/
 
+-- §12.3 send-number validation, independent spaces and datagram boundaries.
+private def numberState : State :=
+  { fig5_5 with ackAppData := { fig5_5.ackAppData with largestSent := some 7 } }
+#guard maySendNumbers numberState [(.appData, 8), (.appData, 10)]
+#guard !maySendNumbers numberState [(.appData, 7)]
+#guard !maySendNumbers numberState [(.appData, 6)]
+#guard !maySendNumbers numberState [(.appData, 8), (.appData, 8)]
+#guard !maySendNumbers numberState [(.appData, 9), (.appData, 8)]
+#guard maySendNumbers numberState [(.appData, 8), (.handshake, 1), (.appData, 9)]
+#guard !maySendNumbers numberState [(.appData, Ack.maxPn)]
+#guard maySendNumbers numberState [(.appData, Ack.maxPn - 1)]
+
 end Quic.Spec.Endpoint.Examples

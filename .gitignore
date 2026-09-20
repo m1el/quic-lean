@@ -4,3 +4,5 @@ build-c-ndebug/
 out/
 *.log
 harness/gquiche/bazel-*
+*.profraw
+/crash-*

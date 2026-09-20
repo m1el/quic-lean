@@ -84,8 +84,12 @@
  *   DIFF_SHOW=1 ./out/endpoint_diff some_input     # print the trace as well
  *   DIFF_ACK_TOLERANCE=<us>                        # obligation slack, default 25000
  *   DIFF_MAX_CANDS=<n>                             # candidate cap, default 12
+ *   DIFF_SELFTEST=pn                               # show every sent datagram to the
+ *                                                  # model twice; the repeat must be
+ *                                                  # refused by pnOk (PLAN 4o A4)
  */
 #include "diff_common.h"
+#include <unistd.h>
 
 /* --------------------------------------------------- forward declarations */
 
@@ -148,6 +152,8 @@ extern lean_object *quic_endpoint_outcome_cbs(lean_object *o);
 extern lean_object *quic_endpoint_track_trace(lean_object *ss, lean_object *e,
                                               uint8_t is_error, uint64_t code,
                                               lean_object *cbs);
+extern lean_object *quic_endpoint_send_number(uint8_t space, uint64_t pn);
+extern uint8_t quic_endpoint_may_send_numbers(lean_object *s, lean_object *numbers);
 extern uint8_t quic_endpoint_may_send_datagram(lean_object *s, uint64_t src,
                                                uint64_t dest, uint64_t size,
                                                uint8_t is_pmtu_probe,
@@ -308,6 +314,13 @@ static unsigned long g_runs;
 static const uint8_t *g_input;
 static size_t g_inputlen;
 static int g_summary_registered;
+static int g_pn_selftest_active;
+static unsigned long g_pn_selftest_checks;
+
+static int pn_selftest_enabled(void) {
+  const char *mode = getenv("DIFF_SELFTEST");
+  return mode && strcmp(mode, "pn") == 0;
+}
 
 static uint64_t fnv(const char *s) {
   uint64_t v = 1469598103934665603ULL;
@@ -319,6 +332,14 @@ static void mm_summary(void) {
   int i;
   if (g_summary_done) return;
   g_summary_done = 1;
+  if (pn_selftest_enabled()) {
+    fprintf(stderr, "DIFF_SELFTEST=pn: %lu duplicate datagrams rejected by pnOk\n",
+            g_pn_selftest_checks);
+    if (!g_pn_selftest_checks) {
+      fprintf(stderr, "DIFF_SELFTEST=pn failed: no duplicate send was checked\n");
+      _exit(1); /* not abort(): libFuzzer would save the last input as a crash */
+    }
+  }
   fprintf(stderr,
           "\n=== endpoint_diff summary ===\n"
           "runs=%lu  steps compared=%lu (exact; %lu needed the "
@@ -1373,7 +1394,7 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   mstate *m = M(h);
   outpkt ps[8];
   int np, i, allowed = 0;
-  lean_object *packets = l_nil();
+  lean_object *packets = l_nil(), *numbers = l_nil();
   lean_object *p;
 
   if (!m || !m->alive) return;
@@ -1403,12 +1424,14 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     lean_object *fs = ps[i].frames;
     lean_inc(fs);
     packets = l_cons(quic_h_out_packet((uint8_t)ps[i].ptype, fs), packets);
+    numbers = l_cons(quic_endpoint_send_number((uint8_t)ps[i].space,
+                                              (uint64_t)ps[i].pn), numbers);
   }
 
   /* TLS handing bytes to the transport is invisible here; it is read back off
      the wire (Harness.lean, `cryptoEnd`).  Space 0/1/2 is CryptoLevel
      initial/handshake/oneRtt. */
-  for (i = 0; i < np; ++i) {
+  for (i = 0; !g_pn_selftest_active && i < np; ++i) {
     uint64_t end;
     lean_inc(ps[i].frames);
     end = quic_h_crypto_end(ps[i].frames);
@@ -1428,7 +1451,7 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
      writer, so the decision is only visible as the frame announcing it.  It has
      to reach `ConnIds` before the frame may be sent, or every NEW_CONNECTION_ID
      would look like one the endpoint never issued. */
-  for (i = 0; i < np; ++i) {
+  for (i = 0; !g_pn_selftest_active && i < np; ++i) {
     lean_object *acts;
     uint64_t na, k;
     lean_inc(ps[i].frames);
@@ -1452,16 +1475,34 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   p = m->cands;
   while (!lean_is_scalar(p)) {
     lean_object *s = l_head(p);
+    int pn_ok, datagram_ok;
+    lean_inc(s);
+    lean_inc(numbers);
+    pn_ok = quic_endpoint_may_send_numbers(s, numbers);
     lean_inc(s);
     lean_inc(packets);
-    if (quic_endpoint_may_send_datagram(
+    datagram_ok = quic_endpoint_may_send_datagram(
             s, ADDR_SELF, ADDR_PEER, len, 0, 0,
             model_bytes(ps[0].dcid, ps[0].dcidlen),
-            model_bytes(ps[0].scid, ps[0].scidlen), packets)) {
+            model_bytes(ps[0].scid, ps[0].scidlen), packets);
+    if (g_pn_selftest_active && pn_ok) {
+      fprintf(stderr, "DIFF_SELFTEST=pn failed: pnOk accepted a repeated datagram\n");
+      abort();
+    }
+    if (pn_ok && datagram_ok) {
       allowed = 1;
       break;
     }
     p = l_tail(p);
+  }
+
+  if (g_pn_selftest_active) {
+    if (allowed || lean_is_scalar(m->cands)) abort();
+    ++g_pn_selftest_checks;
+    lean_dec(numbers);
+    lean_dec(packets);
+    for (i = 0; i < np; ++i) lean_dec(ps[i].frames);
+    return; /* injected send: do not change model bookkeeping or signatures */
   }
 
   if (!allowed) {
@@ -1498,13 +1539,19 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
         why = quic_endpoint_may_send_datagram_why(
             s, ADDR_SELF, ADDR_PEER, len, 0, 0, model_bytes(ps[0].dcid, ps[0].dcidlen),
             model_bytes(ps[0].scid, ps[0].scidlen), packets);
-        fprintf(stderr, "  candidate %d refused by: %s\n", ci, lean_string_cstr(why));
+        lean_inc(s);
+        lean_inc(numbers);
+        int pn_ok = quic_endpoint_may_send_numbers(s, numbers);
+        fprintf(stderr, "  candidate %d refused by: %s%s%s\n", ci,
+                pn_ok ? "" : "pnOk", !pn_ok && lean_string_cstr(why)[0] ? "," : "",
+                lean_string_cstr(why));
         lean_dec(why);
       }
     }
     report(h, m, "maysend", sigkey, detail, NULL);
   }
   lean_dec(packets);
+  lean_dec(numbers);
 
   /* The bookkeeping the components need once a frame really travelled. */
   for (i = 0; i < np; ++i) {
@@ -1543,6 +1590,12 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   }
 
   for (i = 0; i < np; ++i) lean_dec(ps[i].frames);
+  if (pn_selftest_enabled() && !g_pn_selftest_active && m->alive &&
+      !lean_is_scalar(m->cands)) {
+    g_pn_selftest_active = 1;
+    md_out(h, buf, len);
+    g_pn_selftest_active = 0;
+  }
 }
 
 /* ------------------------------------------------------- the obligations */
@@ -1630,6 +1683,10 @@ static void md_tick(harness *h) {
 int LLVMFuzzerInitialize(int *argc, char ***argv) {
   int i;
   model_ready();
+  if (!g_summary_registered) {
+    g_summary_registered = 1;
+    atexit(mm_summary);
+  }
   for (i = 1; i < *argc; ++i) {
     if (strcmp((*argv)[i], "--script") == 0) {
       int rc;

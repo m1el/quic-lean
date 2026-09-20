@@ -40,6 +40,62 @@ namespace Quic.Spec.Endpoint
 
 open Quic.Spec
 
+/-- Bookkeeping for one number, identical to `Ack.Step.sent`.  Send checks
+    use a temporary state so coalesced packets cannot reuse a number. -/
+def afterSendNumber (s : State) (sp : PnSpace) (pn : Nat) : State :=
+  s.setAck sp { s.ack sp with largestSent := Ack.bumpSent (s.ack sp).largestSent pn }
+
+/-- §12.3, lines 4685/4692: "Subsequent packets sent in the same packet
+    number space MUST increase the packet number by at least one"; "MUST NOT
+    reuse a packet number".  The list is in wire order, across all spaces. -/
+def maySendNumbers (s : State) : List (PnSpace × Nat) → Bool
+  | [] => true
+  | (sp, pn) :: rest =>
+    Ack.maySendPacketNumber (s.ack sp) pn &&
+      maySendNumbers (afterSendNumber s sp pn) rest
+
+/-- Relational counterpart: each number is below exhaustion and greater than
+    the previous number in its own space, including earlier packets in this
+    datagram. -/
+def MaySendNumbers (s : State) : List (PnSpace × Nat) → Prop
+  | [] => True
+  | (sp, pn) :: rest =>
+    ((∀ old ∈ (s.ack sp).largestSent, old < pn) ∧ pn < Ack.maxPn) ∧
+      MaySendNumbers (afterSendNumber s sp pn) rest
+
+theorem maySendNumbers_iff (s : State) (ns : List (PnSpace × Nat)) :
+    maySendNumbers s ns = true ↔ MaySendNumbers s ns := by
+  induction ns generalizing s with
+  | nil => simp [maySendNumbers, MaySendNumbers]
+  | cons n ns ih =>
+    rcases n with ⟨sp, pn⟩
+    simp only [maySendNumbers, MaySendNumbers, Bool.and_eq_true, ih,
+      Ack.maySendPacketNumber]
+    cases (s.ack sp).largestSent <;> simp
+
+/-- Each accepted send strictly advances its space's largest sent number.
+    Applying this at successive tails of `maySendNumbers` gives strict
+    monotonicity throughout a datagram or a concatenated run. -/
+theorem largestSent_strictMono_of_maySendNumbers {s : State} {sp : PnSpace}
+    {pn old : Nat} {rest : List (PnSpace × Nat)}
+    (h : maySendNumbers s ((sp, pn) :: rest) = true)
+    (ho : (s.ack sp).largestSent = some old) :
+    old < pn ∧ ((afterSendNumber s sp pn).ack sp).largestSent = some pn := by
+  have hp := ((maySendNumbers_iff s _).mp h).1.1 old (by simp [ho])
+  refine ⟨hp, ?_⟩
+  simp [afterSendNumber, Ack.bumpSent, ho, Nat.max_eq_right (Nat.le_of_lt hp)]
+
+/-- Checks can be split at datagram boundaries without losing history. -/
+theorem maySendNumbers_append (s : State) (xs ys : List (PnSpace × Nat)) :
+    maySendNumbers s (xs ++ ys) =
+      (maySendNumbers s xs &&
+        maySendNumbers (xs.foldl (fun st n => afterSendNumber st n.1 n.2) s) ys) := by
+  induction xs generalizing s with
+  | nil => simp [maySendNumbers]
+  | cons n xs ih =>
+    rcases n with ⟨sp, pn⟩
+    simp [maySendNumbers, ih, Bool.and_assoc]
+
 /-! ## 6.1 Frame level -/
 
 /-- Six of the thirteen components govern a frame on its own; the other seven
