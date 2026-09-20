@@ -1032,13 +1032,29 @@ private def srvEcnFailed : State :=
 -- §12.3 send-number validation, independent spaces and datagram boundaries.
 private def numberState : State :=
   { fig5_5 with ackAppData := { fig5_5.ackAppData with largestSent := some 7 } }
-#guard maySendNumbers numberState [(.appData, 8), (.appData, 10)]
-#guard !maySendNumbers numberState [(.appData, 7)]
-#guard !maySendNumbers numberState [(.appData, 6)]
-#guard !maySendNumbers numberState [(.appData, 8), (.appData, 8)]
-#guard !maySendNumbers numberState [(.appData, 9), (.appData, 8)]
-#guard maySendNumbers numberState [(.appData, 8), (.handshake, 1), (.appData, 9)]
-#guard !maySendNumbers numberState [(.appData, Ack.maxPn)]
-#guard maySendNumbers numberState [(.appData, Ack.maxPn - 1)]
+#guard maySendNumbers numberState [(.appData, 8, 1), (.appData, 10, 1)]
+#guard !maySendNumbers numberState [(.appData, 7, 1)]
+#guard !maySendNumbers numberState [(.appData, 6, 1)]
+#guard !maySendNumbers numberState [(.appData, 8, 1), (.appData, 8, 1)]
+#guard !maySendNumbers numberState [(.appData, 9, 1), (.appData, 8, 1)]
+#guard maySendNumbers numberState [(.appData, 8, 1), (.handshake, 1, 1), (.appData, 9, 1)]
+#guard !maySendNumbers numberState [(.appData, Ack.maxPn, 4)]
+#guard maySendNumbers numberState [(.appData, Ack.maxPn - 1, 4)]
+
+-- §17.1, line 6023: nothing acknowledged, the number goes out whole.
+#guard maySendNumberSizes numberState [(.appData, 255, 1), (.appData, 256, 2)]
+#guard !maySendNumberSizes numberState [(.appData, 256, 1)]
+-- §17.1, line 6027: the peer acknowledges 5 (an ACK frame in a 1-RTT packet);
+-- one byte then reaches 5 + 127 and no further.
+private def numberAcked : State :=
+  { numberState with ackAppData := numberState.ackAppData.afterAckRecv 5 }
+#guard numberAcked.ackAppData.largestAcked = some 5
+#guard maySendNumberSizes numberAcked [(.appData, 132, 1)]
+#guard !maySendNumberSizes numberAcked [(.appData, 133, 1)]
+#guard maySendNumberSizes numberAcked [(.appData, 133, 2)]
+#guard !maySendNumberSizes numberAcked [(.appData, 8, 0)]
+#guard !maySendNumberSizes numberAcked [(.appData, 8, 5)]
+-- An acknowledgment of a number never sent (tolerated, §13.1) is not counted.
+#guard (numberState.ackAppData.afterAckRecv 9).largestAcked = none
 
 end Quic.Spec.Endpoint.Examples

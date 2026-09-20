@@ -40,6 +40,22 @@ namespace Quic.Spec.Endpoint
 
 open Quic.Spec
 
+/-! ## 6.0 Packet numbers (§12.3, §17.1)
+
+`OutPacket` carries no number, so the numbers of a datagram's packets are
+checked by a predicate of their own, over `(space, number, size in bytes)` in
+wire order.  The harness recovers a number from its truncation with the
+*receiver's* decoder, which assumes the sender kept both rules below;
+`decode_of_maySendNumber` is what makes that sound: a number these rules accept
+is the number the decoder returns, so the decode of a conforming sender is
+exact, and a sender that reused or lowered a number produces bytes that either
+fail here or are indistinguishable, to any receiver, from a conforming
+packet. -/
+
+/-- One packet's number on the wire: its space, the number, and the size of
+    its encoding in bytes. -/
+abbrev SentNumber := PnSpace × Nat × Nat
+
 /-- Bookkeeping for one number, identical to `Ack.Step.sent`.  Send checks
     use a temporary state so coalesced packets cannot reuse a number. -/
 def afterSendNumber (s : State) (sp : PnSpace) (pn : Nat) : State :=
@@ -48,27 +64,33 @@ def afterSendNumber (s : State) (sp : PnSpace) (pn : Nat) : State :=
 /-- §12.3, lines 4685/4692: "Subsequent packets sent in the same packet
     number space MUST increase the packet number by at least one"; "MUST NOT
     reuse a packet number".  The list is in wire order, across all spaces. -/
-def maySendNumbers (s : State) : List (PnSpace × Nat) → Bool
+def maySendNumbers (s : State) : List SentNumber → Bool
   | [] => true
-  | (sp, pn) :: rest =>
+  | (sp, pn, _) :: rest =>
     Ack.maySendPacketNumber (s.ack sp) pn &&
       maySendNumbers (afterSendNumber s sp pn) rest
+
+/-- §17.1, lines 6023/6027: every number is encoded in a size its space's
+    largest acknowledged number allows (`Ack.maySendPacketNumberSize`).  Kept
+    apart from `maySendNumbers` so that a refusal names its rule. -/
+def maySendNumberSizes (s : State) (ns : List SentNumber) : Bool :=
+  ns.all (fun n => Ack.maySendPacketNumberSize (s.ack n.1) n.2.1 n.2.2)
 
 /-- Relational counterpart: each number is below exhaustion and greater than
     the previous number in its own space, including earlier packets in this
     datagram. -/
-def MaySendNumbers (s : State) : List (PnSpace × Nat) → Prop
+def MaySendNumbers (s : State) : List SentNumber → Prop
   | [] => True
-  | (sp, pn) :: rest =>
+  | (sp, pn, _) :: rest =>
     ((∀ old ∈ (s.ack sp).largestSent, old < pn) ∧ pn < Ack.maxPn) ∧
       MaySendNumbers (afterSendNumber s sp pn) rest
 
-theorem maySendNumbers_iff (s : State) (ns : List (PnSpace × Nat)) :
+theorem maySendNumbers_iff (s : State) (ns : List SentNumber) :
     maySendNumbers s ns = true ↔ MaySendNumbers s ns := by
   induction ns generalizing s with
   | nil => simp [maySendNumbers, MaySendNumbers]
   | cons n ns ih =>
-    rcases n with ⟨sp, pn⟩
+    rcases n with ⟨sp, pn, len⟩
     simp only [maySendNumbers, MaySendNumbers, Bool.and_eq_true, ih,
       Ack.maySendPacketNumber]
     cases (s.ack sp).largestSent <;> simp
@@ -77,8 +99,8 @@ theorem maySendNumbers_iff (s : State) (ns : List (PnSpace × Nat)) :
     Applying this at successive tails of `maySendNumbers` gives strict
     monotonicity throughout a datagram or a concatenated run. -/
 theorem largestSent_strictMono_of_maySendNumbers {s : State} {sp : PnSpace}
-    {pn old : Nat} {rest : List (PnSpace × Nat)}
-    (h : maySendNumbers s ((sp, pn) :: rest) = true)
+    {pn len old : Nat} {rest : List SentNumber}
+    (h : maySendNumbers s ((sp, pn, len) :: rest) = true)
     (ho : (s.ack sp).largestSent = some old) :
     old < pn ∧ ((afterSendNumber s sp pn).ack sp).largestSent = some pn := by
   have hp := ((maySendNumbers_iff s _).mp h).1.1 old (by simp [ho])
@@ -86,15 +108,70 @@ theorem largestSent_strictMono_of_maySendNumbers {s : State} {sp : PnSpace}
   simp [afterSendNumber, Ack.bumpSent, ho, Nat.max_eq_right (Nat.le_of_lt hp)]
 
 /-- Checks can be split at datagram boundaries without losing history. -/
-theorem maySendNumbers_append (s : State) (xs ys : List (PnSpace × Nat)) :
+theorem maySendNumbers_append (s : State) (xs ys : List SentNumber) :
     maySendNumbers s (xs ++ ys) =
       (maySendNumbers s xs &&
-        maySendNumbers (xs.foldl (fun st n => afterSendNumber st n.1 n.2) s) ys) := by
+        maySendNumbers (xs.foldl (fun st n => afterSendNumber st n.1 n.2.1) s) ys) := by
   induction xs generalizing s with
   | nil => simp [maySendNumbers]
   | cons n xs ih =>
-    rcases n with ⟨sp, pn⟩
+    rcases n with ⟨sp, pn, len⟩
     simp [maySendNumbers, ih, Bool.and_assoc]
+
+/-- What a receiver expects next when the largest number it can have seen is
+    `largestSent` (Appendix A.3). -/
+def expectedPn : Option Nat → Nat
+  | none => 0
+  | some m => m + 1
+
+/-- Appendix A.3's decoder is exact for a number at or above the expected one
+    that is either whole or less than half a window ahead.  The decoder never
+    answers 2^62 or more, hence `hmax` (§12.3's bound on the sender). -/
+theorem decodePacketNumber_exact {e pn len : Nat} (hl : 1 ≤ len ∧ len ≤ 4) (he : e ≤ pn)
+    (hmax : pn < 2 ^ 62)
+    (hw : pn < 2 ^ (8 * len) ∨ 2 * (pn - e) < 2 ^ (8 * len)) :
+    decodePacketNumber e (pn % 2 ^ (8 * len)) len = pn := by
+  have hlen : len = 1 ∨ len = 2 ∨ len = 3 ∨ len = 4 := by omega
+  unfold decodePacketNumber
+  rcases hlen with h | h | h | h <;> subst h <;>
+    simp only [Nat.reduceMul, Nat.reducePow, Nat.reduceDiv] at hw hmax ⊢ <;>
+    (split <;> (try split) <;> omega)
+
+/-- The decode the harness relies on is justified, not assumed: a number that
+    §12.3 and §17.1 accept — larger than every number sent, in a size chosen
+    against a largest acknowledged number that was itself sent — is exactly
+    what Appendix A.3's decoder recovers from the truncated bytes. -/
+theorem decode_of_maySendNumber {a : Ack.State} {pn len : Nat}
+    (hn : Ack.maySendPacketNumber a pn = true)
+    (hz : Ack.maySendPacketNumberSize a pn len = true)
+    (ha : Ack.AckedWasSent a) :
+    decodePacketNumber (expectedPn a.largestSent) (pn % 2 ^ (8 * len)) len = pn := by
+  simp only [Ack.maySendPacketNumber, Ack.maySendPacketNumberSize,
+    Bool.and_eq_true, decide_eq_true_eq] at hn hz
+  obtain ⟨hmono, hmax⟩ := hn
+  have hmax : pn < 2 ^ 62 := by simp only [Ack.maxPn] at hmax; omega
+  obtain ⟨hl, hsz⟩ := hz
+  cases hs : a.largestSent with
+  | none =>
+    cases hk : a.largestAcked with
+    | some k =>
+      obtain ⟨m, hm, -⟩ := ha k (by simp [hk])
+      simp [hs] at hm
+    | none =>
+      simp only [hk, decide_eq_true_eq] at hsz
+      exact decodePacketNumber_exact hl (Nat.zero_le _) hmax (.inl hsz)
+  | some m =>
+    simp only [hs, decide_eq_true_eq] at hmono
+    cases hk : a.largestAcked with
+    | none =>
+      simp only [hk, decide_eq_true_eq] at hsz
+      exact decodePacketNumber_exact hl hmono hmax (.inl hsz)
+    | some k =>
+      have hkm : k ≤ m := by
+        obtain ⟨m', hm', h⟩ := ha k (by simp [hk])
+        rw [hs] at hm'; cases hm'; exact h
+      simp only [hk, decide_eq_true_eq] at hsz
+      exact decodePacketNumber_exact hl hmono hmax (.inr (by simp only [expectedPn]; omega))
 
 /-! ## 6.1 Frame level -/
 

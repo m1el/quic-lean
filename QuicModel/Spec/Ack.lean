@@ -391,6 +391,11 @@ structure State where
   largestSent : Option Nat
   /-- §18.2: the max_ack_delay we advertised, in microseconds. -/
   maxAckDelay : Time
+  /-- §17.1, line 6023: the largest of *our* packet numbers the peer has
+      acknowledged in this space; `none` "prior to receiving an
+      acknowledgment".  Only the size of a packet number encoding depends on
+      it (`maySendPacketNumberSize`). -/
+  largestAcked : Option Nat := none
   deriving DecidableEq, Repr
 
 /-- §13.2, line 5048: "only ack-eliciting packets cause an ACK frame to be sent
@@ -583,6 +588,15 @@ def acksUnsent (s : State) (largest : Nat) : Bool :=
   | none => true
   | some m => decide (m < largest)
 
+/-- §17.1, line 6027: "After an acknowledgment is received for a packet number
+    space".  An acknowledgment of a packet we did not send, which §13.1 lets an
+    endpoint tolerate (`Step.ackOk`), acknowledges nothing we sent and is not
+    counted — an endpoint that counted it would size its packet numbers
+    against a number it never used. -/
+def State.afterAckRecv (s : State) (largest : Nat) : State :=
+  { s with largestAcked :=
+      if acksUnsent s largest then s.largestAcked else bumpSent s.largestAcked largest }
+
 inductive Event where
   /-- A packet numbered `pn` arrived at time `t`, protection was removed, and
       (if it is not a duplicate) its frames are processed. -/
@@ -644,7 +658,7 @@ inductive Step : State → Event → Out → Prop
       and a well-formed ACK for packets we did send is simply processed (loss
       detection is [QUIC-RECOVERY], out of scope). -/
   | ackOk {s largest first rs} (h : acked largest first rs ≠ none) :
-      Step s (.recvAck largest first rs) (.ok s [])
+      Step s (.recvAck largest first rs) (.ok (s.afterAckRecv largest) [])
   /-- Bookkeeping for §13.1's "a packet it did not send". -/
   | sent {s pn} :
       Step s (.sentPacket pn) (.ok { s with largestSent := bumpSent s.largestSent pn } [])
@@ -668,7 +682,8 @@ def outcomes (s : State) : Event → List Out
     match acked largest first rs with
     | none => [.error .frameEncodingError]
     | some _ =>
-      if acksUnsent s largest then [.error .protocolViolation, .ok s []] else [.ok s []]
+      if acksUnsent s largest then [.error .protocolViolation, .ok (s.afterAckRecv largest) []]
+      else [.ok (s.afterAckRecv largest) []]
   | .sentPacket pn => [.ok { s with largestSent := bumpSent s.largestSent pn } []]
   | .sentAck largest first rs => [.ok (s.afterAckSent largest first rs) []]
   | .raiseMinimum m => [.ok { s with minPn := max s.minPn m } []]
@@ -880,6 +895,19 @@ theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f
 def maySendPacketNumber (s : State) (pn : Nat) : Bool :=
   (match s.largestSent with | none => true | some m => decide (m < pn)) && decide (pn < maxPn)
 
+/-- §17.1, line 6023: "Prior to receiving an acknowledgment for a packet number
+    space, the full packet number MUST be included; it is not to be truncated
+    as described below."; line 6027: "After an acknowledgment is received for a
+    packet number space, the sender MUST use a packet number size able to
+    represent more than twice as large a range than the difference between the
+    largest acknowledged packet and packet number being sent."  `len` is the
+    size in bytes, 1 to 4 (line 6015). -/
+def maySendPacketNumberSize (s : State) (pn len : Nat) : Bool :=
+  decide (1 ≤ len ∧ len ≤ 4) &&
+    match s.largestAcked with
+    | none => decide (pn < 2 ^ (8 * len))
+    | some a => decide (2 * (pn - a) < 2 ^ (8 * len))
+
 /-- §12.3, line 4693: the packet number for sending has reached 2^62 - 1, so
     this space is spent and the connection must close silently.  Exported for
     WP6 (the close) and WP12 (the composition). -/
@@ -1006,6 +1034,52 @@ theorem minPn_mono {s s' : State} {e : Event} {fx : List Effect}
     show s.minPn ≤ (s.afterAckSent _ _ _).minPn
     unfold State.afterAckSent; split <;> exact Nat.le_refl _
   | @raiseMin m => exact Nat.le_max_left _ _
+
+/-- §17.1's "largest acknowledged packet" is a packet that was sent: what the
+    size rule is measured against never runs ahead of `largestSent`.  Not part
+    of `Inv` (nothing in this component needs it); `Endpoint`'s
+    `decode_of_maySendNumber` does. -/
+def AckedWasSent (s : State) : Prop :=
+  ∀ k ∈ s.largestAcked, ∃ m, s.largestSent = some m ∧ k ≤ m
+
+theorem ackedWasSent_step {s s' : State} {e : Event} {fx : List Effect}
+    (hi : AckedWasSent s) (h : Step s e (.ok s' fx)) : AckedWasSent s' := by
+  cases h with
+  | process => exact hi
+  | @ackOk largest first rs _ =>
+    intro k hk
+    simp only [State.afterAckRecv] at hk ⊢
+    cases hu : acksUnsent s largest with
+    | true => rw [hu] at hk; exact hi k hk
+    | false =>
+      rw [hu] at hk
+      simp only [Bool.false_eq_true, ↓reduceIte] at hk
+      cases hs : s.largestSent with
+      | none => simp [acksUnsent, hs] at hu
+      | some m =>
+        have hlm : largest ≤ m := by simpa [acksUnsent, hs] using hu
+        refine ⟨m, rfl, ?_⟩
+        cases ha : s.largestAcked with
+        | none =>
+          simp only [ha, bumpSent, Option.mem_def, Option.some.injEq] at hk
+          omega
+        | some a =>
+          obtain ⟨m', hm', ham⟩ := hi a (by simp [ha])
+          have : m' = m := by rw [hs] at hm'; exact (Option.some.inj hm').symm
+          simp only [ha, bumpSent, Option.mem_def, Option.some.injEq] at hk
+          omega
+  | @sent pn =>
+    intro k hk
+    obtain ⟨m, hm, hkm⟩ := hi k hk
+    exact ⟨max m pn, by simp [hm, bumpSent], Nat.le_trans hkm (Nat.le_max_left _ _)⟩
+  | @ackSent largest first rs =>
+    intro k hk
+    have hA : (s.afterAckSent largest first rs).largestAcked = s.largestAcked := by
+      unfold State.afterAckSent; split <;> rfl
+    rw [hA] at hk
+    rw [State.afterAckSent_largestSent]
+    exact hi k hk
+  | raiseMin => exact hi
 
 /-- A packet number is only ever added by processing a packet — §13.1: it is
     the processing of the packet that makes it acknowledgeable. -/
@@ -1341,7 +1415,18 @@ example : ((s0.record 0 100 true).record 1 110 true).ackElicitingSinceAck = 2 :=
 example : component.step s0 (.recvAck 9 0 []) = .error .protocolViolation := by rfl
 example : component.accepts s0 (.recvAck 9 0 []) (.ok s0 []) = true := by decide
 -- An ACK for packets we did send is simply processed.
-example : component.step s0 (.recvAck 3 0 []) = .ok s0 [] := by rfl
+example : component.step s0 (.recvAck 3 0 []) = .ok { s0 with largestAcked := some 3 } [] := by
+  rfl
+-- ... and one we tolerated although we sent no such packet is not counted.
+example : s0.afterAckRecv 9 = s0 := by rfl
+-- §17.1, line 6023: nothing acknowledged yet, so the number goes out whole.
+example : maySendPacketNumberSize s0 255 1 = true := by decide
+example : maySendPacketNumberSize s0 256 1 = false := by decide
+-- §17.1, line 6027: 3 acknowledged; one byte represents 256 > 2 * (130 - 3),
+-- and not 2 * (131 - 3).
+example : maySendPacketNumberSize { s0 with largestAcked := some 3 } 130 1 = true := by decide
+example : maySendPacketNumberSize { s0 with largestAcked := some 3 } 131 1 = false := by decide
+example : maySendPacketNumberSize { s0 with largestAcked := some 3 } 131 2 = true := by decide
 -- §19.3.1, line 7375: a negative computed packet number is FRAME_ENCODING_ERROR.
 example : component.step s0 (.recvAck 3 5 []) = .error .frameEncodingError := by rfl
 example : component.step s0 (.recvAck 3 0 [⟨5, 0⟩]) = .error .frameEncodingError := by rfl
@@ -1437,6 +1522,8 @@ of lines 4709–4713.  The rest of §12.3–§12.5 is covered in
 |---|---|---|
 | §12.3 (4685) | "Subsequent packets sent in the same packet number space MUST increase the packet number by at least one." | `maySendPacketNumber` |
 | §12.3 (4692) | "A QUIC endpoint MUST NOT reuse a packet number within the same packet number space in one connection." | `maySendPacketNumber` |
+| §17.1 (6023) | "Prior to receiving an acknowledgment for a packet number space, the full packet number MUST be included; it is not to be truncated as described below." | `maySendPacketNumberSize` (`largestAcked = none`); composed in `Endpoint.maySendNumbers` |
+| §17.1 (6027) | "After an acknowledgment is received for a packet number space, the sender MUST use a packet number size able to represent more than twice as large a range than the difference between the largest acknowledged packet and packet number being sent." | `maySendPacketNumberSize`, `State.afterAckRecv`; `Endpoint.decode_of_maySendNumber` shows a receiver's decoder then recovers the number |
 | §12.3 (4693) | "If the packet number for sending reaches 2^62 - 1, the sender MUST close the connection without sending a CONNECTION_CLOSE frame or any further packets" | `maySendPacketNumber` (rejects `maxPn` itself: `maySendPacketNumber_maxPn`), `pnExhausted` / `pnExhausted_iff`, `MaySendPacket` / `not_maySendPacket_of_exhausted`; the silent close is WP6 Termination |
 | §12.3 (4709) | "A receiver MUST discard a newly unprotected packet unless it is certain that it has not processed another packet with the same packet number from the same packet number space." | `Step.duplicate`, `Step.belowMinimum`, `processed_at_most_once` |
 | §12.3 (4717) | "The data required for detecting duplicates can be limited by maintaining a minimum packet number below which all packets are immediately dropped." | `State.minPn`, `Event.raiseMinimum` / `Step.raiseMin`, `Step.belowMinimum`, `minPn_mono` (NOTE 3) |

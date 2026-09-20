@@ -327,12 +327,19 @@ packet proves nothing (PLAN §4a, "send side is one-directional"). -/
 
 /-- Construct a number entry without exposing Lean's Nat/Prod ABI to C. -/
 @[export quic_endpoint_send_number]
-def sendNumberC (space : UInt8) (pn : UInt64) : PnSpace × Nat :=
-  (if space == 0 then .initial else if space == 1 then .handshake else .appData, pn.toNat)
+def sendNumberC (space : UInt8) (pn : UInt64) (len : UInt8) : SentNumber :=
+  (if space == 0 then .initial else if space == 1 then .handshake else .appData,
+    pn.toNat, len.toNat)
 
+/-- §12.3: conjunct `pnOk`. -/
 @[export quic_endpoint_may_send_numbers]
-def maySendNumbersC (s : State) (ns : List (PnSpace × Nat)) : UInt8 :=
+def maySendNumbersC (s : State) (ns : List SentNumber) : UInt8 :=
   if maySendNumbers s ns then 1 else 0
+
+/-- §17.1: conjunct `pnSizeOk`. -/
+@[export quic_endpoint_may_send_number_sizes]
+def maySendNumberSizesC (s : State) (ns : List SentNumber) : UInt8 :=
+  if maySendNumberSizes s ns then 1 else 0
 
 @[export quic_endpoint_may_send_datagram]
 def maySendDatagramC (s : State) (src dest : UInt64) (size : UInt64) (isPmtuProbe : UInt8)

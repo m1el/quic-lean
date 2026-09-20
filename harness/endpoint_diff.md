@@ -193,6 +193,18 @@ differentially.  Then, in this order:
    every candidate is a mismatch of kind `maysend`: *ngtcp2 sent what the spec
    forbids*.  The converse proves nothing — the absence of a datagram is
    pacing, a congestion window or an application that did not write (PLAN §4a);
+   The packets' numbers are a second question to the same candidate, because
+   `OutPacket` has none: `quic_endpoint_may_send_numbers` (§12.3: strictly
+   increasing per space, along the datagram; conjunct `pnOk`) and
+   `quic_endpoint_may_send_number_sizes` (§17.1: the encoding size against the
+   largest number the peer acknowledged; conjunct `pnSizeOk`) over
+   `(space, number, size)` in wire order.  The number is recovered with the
+   receiver's decoder, which presumes both rules; `decode_of_maySendNumber`
+   (`Endpoint/Send.lean`) is why that is not circular.  A refusal by either
+   under every candidate prefixes the signature with the conjunct's name.
+   `DIFF_SELFTEST=pn` offers every datagram a second time and aborts unless
+   `pnOk` refuses the repeat (and `pnSizeOk` a five-byte size): a check that
+   the wire is connected, since no script can make an engine misnumber;
 3. `sentFrameIn` per frame, then `sentPacket` per packet, then `sentDatagram`.
 
 `isPmtuProbe` is `false` because `conn_driver.h` sets `settings.no_pmtud = 1`;

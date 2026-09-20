@@ -152,8 +152,9 @@ extern lean_object *quic_endpoint_outcome_cbs(lean_object *o);
 extern lean_object *quic_endpoint_track_trace(lean_object *ss, lean_object *e,
                                               uint8_t is_error, uint64_t code,
                                               lean_object *cbs);
-extern lean_object *quic_endpoint_send_number(uint8_t space, uint64_t pn);
+extern lean_object *quic_endpoint_send_number(uint8_t space, uint64_t pn, uint8_t len);
 extern uint8_t quic_endpoint_may_send_numbers(lean_object *s, lean_object *numbers);
+extern uint8_t quic_endpoint_may_send_number_sizes(lean_object *s, lean_object *numbers);
 extern uint8_t quic_endpoint_may_send_datagram(lean_object *s, uint64_t src,
                                                uint64_t dest, uint64_t size,
                                                uint8_t is_pmtu_probe,
@@ -1307,6 +1308,7 @@ typedef struct {
   int ptype;           /* PT_* */
   int space;           /* 0 initial, 1 handshake, 2 app */
   int64_t pn;
+  size_t pnlen;        /* bytes the number was encoded in (section 17.1) */
   lean_object *frames; /* List Frame, owned */
   int payload_ok;      /* the payload parsed to its last byte */
   uint8_t dcid[NGTCP2_MAX_CIDLEN];
@@ -1371,6 +1373,7 @@ static int parse_out(mstate *m, size_t dcidlen, const uint8_t *pkt, size_t pktle
     ps[n].ptype = ptype;
     ps[n].space = space;
     ps[n].pn = pn;
+    ps[n].pnlen = pnlen;
     ps[n].payload_ok = quic_h_frames_decode_ok(
         model_bytes(p + pnoff + pnlen, pktend - pnoff - pnlen - TAGLEN));
     ps[n].frames = quic_h_frames_of_bytes(
@@ -1393,7 +1396,7 @@ static int parse_out(mstate *m, size_t dcidlen, const uint8_t *pkt, size_t pktle
 static void md_out(harness *h, const uint8_t *buf, size_t len) {
   mstate *m = M(h);
   outpkt ps[8];
-  int np, i, allowed = 0;
+  int np, i, allowed = 0, any_pn_ok = 0, any_size_ok = 0;
   lean_object *packets = l_nil(), *numbers = l_nil();
   lean_object *p;
 
@@ -1424,8 +1427,8 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
     lean_object *fs = ps[i].frames;
     lean_inc(fs);
     packets = l_cons(quic_h_out_packet((uint8_t)ps[i].ptype, fs), packets);
-    numbers = l_cons(quic_endpoint_send_number((uint8_t)ps[i].space,
-                                              (uint64_t)ps[i].pn), numbers);
+    numbers = l_cons(quic_endpoint_send_number((uint8_t)ps[i].space, (uint64_t)ps[i].pn,
+                                              (uint8_t)ps[i].pnlen), numbers);
   }
 
   /* TLS handing bytes to the transport is invisible here; it is read back off
@@ -1475,10 +1478,13 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   p = m->cands;
   while (!lean_is_scalar(p)) {
     lean_object *s = l_head(p);
-    int pn_ok, datagram_ok;
+    int pn_ok, size_ok, datagram_ok;
     lean_inc(s);
     lean_inc(numbers);
     pn_ok = quic_endpoint_may_send_numbers(s, numbers);
+    lean_inc(s);
+    lean_inc(numbers);
+    size_ok = quic_endpoint_may_send_number_sizes(s, numbers);
     lean_inc(s);
     lean_inc(packets);
     datagram_ok = quic_endpoint_may_send_datagram(
@@ -1489,7 +1495,9 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
       fprintf(stderr, "DIFF_SELFTEST=pn failed: pnOk accepted a repeated datagram\n");
       abort();
     }
-    if (pn_ok && datagram_ok) {
+    any_pn_ok |= pn_ok;
+    any_size_ok |= size_ok;
+    if (pn_ok && size_ok && datagram_ok) {
       allowed = 1;
       break;
     }
@@ -1497,7 +1505,16 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
   }
 
   if (g_pn_selftest_active) {
-    if (allowed || lean_is_scalar(m->cands)) abort();
+    /* and the size rule's wire: no size of 5 bytes exists (section 17.1) */
+    lean_object *bad = l_nil(), *s0 = lean_is_scalar(m->cands) ? NULL : l_head(m->cands);
+    for (i = np - 1; i >= 0; --i)
+      bad = l_cons(quic_endpoint_send_number((uint8_t)ps[i].space, (uint64_t)ps[i].pn, 5), bad);
+    if (allowed || !s0) abort();
+    lean_inc(s0);
+    if (quic_endpoint_may_send_number_sizes(s0, bad)) {
+      fprintf(stderr, "DIFF_SELFTEST=pn failed: pnSizeOk accepted a 5-byte number\n");
+      abort();
+    }
     ++g_pn_selftest_checks;
     lean_dec(numbers);
     lean_dec(packets);
@@ -1517,7 +1534,9 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
        differing only in offset are one entry in the triage list */
     {
       const char *q = dump;
-      sigkey[0] = 0;
+      /* a packet-number refusal under every candidate is a class of its own */
+      k = (size_t)snprintf(sigkey, sizeof(sigkey), "%s%s", any_pn_ok ? "" : "pnOk:",
+                           any_size_ok ? "" : "pnSizeOk:");
       while (*q && k + 32 < sizeof(sigkey)) {
         const char *w = q;
         while (*q && *q != ' ' && *q != ';') ++q;
@@ -1539,12 +1558,17 @@ static void md_out(harness *h, const uint8_t *buf, size_t len) {
         why = quic_endpoint_may_send_datagram_why(
             s, ADDR_SELF, ADDR_PEER, len, 0, 0, model_bytes(ps[0].dcid, ps[0].dcidlen),
             model_bytes(ps[0].scid, ps[0].scidlen), packets);
-        lean_inc(s);
-        lean_inc(numbers);
-        int pn_ok = quic_endpoint_may_send_numbers(s, numbers);
-        fprintf(stderr, "  candidate %d refused by: %s%s%s\n", ci,
-                pn_ok ? "" : "pnOk", !pn_ok && lean_string_cstr(why)[0] ? "," : "",
-                lean_string_cstr(why));
+        {
+          int pn_ok, size_ok;
+          lean_inc(s);
+          lean_inc(numbers);
+          pn_ok = quic_endpoint_may_send_numbers(s, numbers);
+          lean_inc(s);
+          lean_inc(numbers);
+          size_ok = quic_endpoint_may_send_number_sizes(s, numbers);
+          fprintf(stderr, "  candidate %d refused by: %s%s%s\n", ci, pn_ok ? "" : "pnOk,",
+                  size_ok ? "" : "pnSizeOk,", lean_string_cstr(why));
+        }
         lean_dec(why);
       }
     }
