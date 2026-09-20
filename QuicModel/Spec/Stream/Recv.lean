@@ -40,6 +40,11 @@ def beforeAllData : Phase → Bool
   | .recv | .sizeKnown => true
   | _ => false
 
+/-- A RESET_STREAM has been received ("Reset Recvd", "Reset Read"). -/
+def afterReset : Phase → Bool
+  | .resetRecvd | .resetRead => true
+  | _ => false
+
 /-- §3.3, line 1157: "receiver MAY send STOP_SENDING in any state where it has
     not received a RESET_STREAM frame; that is states other than "Reset Recvd"
     or "Reset Read"." -/
@@ -285,6 +290,19 @@ inductive Step : State → Event → Out → Prop
       Step s (.recvStream offset len fin)
         (.ok { accept s offset len fin with phase := .dataRecvd }
              (effectsOf s { accept s offset len fin with phase := .dataRecvd }))
+  /-- §3.2, line 1127: "An implementation MAY interrupt delivery of stream data,
+      discard any data that was not consumed, and signal the receipt of the
+      RESET_STREAM"; line 1111: "An implementation is free to manage this
+      situation as it chooses."  Once the stream was reset, a well-formed
+      STREAM frame may be discarded whole: nothing is buffered and the
+      application hears nothing (ngtcp2, quiche and Google QUICHE all do this).
+      The final size already fixed the flow-control credit (§4.5). -/
+  | streamAfterResetDiscarded {s offset len fin}
+      (h1 : decide (maxOffset < offset + len) = false)
+      (h2 : decide (s.maxData < offset + len) = false)
+      (h3 : finalSizeViolation s (offset + len) fin = false)
+      (h4 : s.phase.afterReset = true) :
+      Step s (.recvStream offset len fin) (.ok s [])
   /-- §19.8, line 7686 applied to RESET_STREAM's Final Size. -/
   | resetTooLarge₁ {s code fs} (h : decide (maxOffset < fs) = true) :
       Step s (.recvResetStream code fs) (.error .frameEncodingError)
@@ -419,7 +437,7 @@ def outcomes (s : State) : Event → List Out
           (if s.phase.isResetRecvd && (accept s offset len fin).complete then
             [.ok { accept s offset len fin with phase := .dataRecvd }
                  (effectsOf s { accept s offset len fin with phase := .dataRecvd })]
-           else [])
+           else []) ++ (if s.phase.afterReset then [.ok s []] else [])
   | .recvResetStream code fs =>
       if decide (maxOffset < fs) then
         if resetFinalSizeViolation s fs then
@@ -503,13 +521,19 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
             · exact .streamFinalSizeIgnored c1' c2' c3
           · rename_i c3
             have c3' : finalSizeViolation s (offset + len) fin = false := Bool.eq_false_iff.mpr c3
-            simp only [List.mem_cons] at h
-            rcases h with h | h
-            · subst h; exact .streamOk c1' c2' c3'
+            rcases List.mem_append.mp h with h | h
+            · simp only [List.mem_cons] at h
+              rcases h with h | h
+              · subst h; exact .streamOk c1' c2' c3'
+              · split at h
+                · rename_i c4
+                  simp only [List.mem_singleton] at h; subst h
+                  exact .streamResetComplete c1' c2' c3' c4
+                · simp at h
             · split at h
-              · rename_i c4
+              · rename_i c5
                 simp only [List.mem_singleton] at h; subst h
-                exact .streamResetComplete c1' c2' c3' c4
+                exact .streamAfterResetDiscarded c1' c2' c3' c5
               · simp at h
     | recvResetStream code fs =>
       simp only [outcomes] at h
@@ -634,6 +658,7 @@ theorem outcomes_iff (s : State) (e : Event) (o : Out) : o ∈ outcomes s e ↔ 
     | streamFinalSizeIgnored h1 h2 h3 => simp [outcomes, h1, h2, h3]
     | streamOk h1 h2 h3 => simp [outcomes, h1, h2, h3]
     | streamResetComplete h1 h2 h3 h4 => simp [outcomes, h1, h2, h3, h4]
+    | streamAfterResetDiscarded h1 h2 h3 h4 => simp [outcomes, h1, h2, h3, h4]
     | @resetTooLarge₁ code fs h =>
       by_cases c3 : resetFinalSizeViolation s fs = true
       · simp [outcomes, h, c3]
@@ -785,6 +810,7 @@ theorem step_inv (s : State) (e : Event) (s' : State) (fx : List Effect)
   obtain ⟨h1, h2, h3⟩ := hi
   cases h with
   | streamFinalSizeIgnored => exact ⟨h1, h2, h3⟩
+  | streamAfterResetDiscarded => exact ⟨h1, h2, h3⟩
   | resetFinalSizeIgnored => exact ⟨h1, h2, h3⟩
   | resetSuppressed => exact ⟨h1, h2, h3⟩
   | blocked => exact ⟨h1, h2, h3⟩
@@ -943,6 +969,7 @@ theorem error_permitted_of_not_recommended {s : State} {e : Event} {o : Out}
   | streamOk h1 h2 h3 => exact absurd h3 (by simpa [Recommended] using hr)
   | streamResetComplete h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
   | streamFinalSizeIgnored h1 h2 h3 => exact .streamFinalSize h3
+  | streamAfterResetDiscarded h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
   | resetOk h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
   | resetAfterData h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
   | resetSuppressed h1 h2 h3 _ => exact absurd h3 (by simpa [Recommended] using hr)
@@ -1039,6 +1066,7 @@ theorem finalSize_immutable {s s' : State} {e : Event} {fx : List Effect} {f : N
   | @resetAfterData code fs k1 k2 k3 k4 =>
     simp [eq_of_resetFinalSizeViolation_false hf k3]
   | streamFinalSizeIgnored => exact hf
+  | streamAfterResetDiscarded => exact hf
   | resetFinalSizeIgnored => exact hf
   | resetSuppressed => exact hf
   | blocked => exact hf
@@ -1065,6 +1093,7 @@ theorem accepted_within_credit {s s' : State} {offset len : Nat} {fin : Bool}
     offset + len ≤ s.maxData ∨ s' = s := by
   cases h with
   | streamFinalSizeIgnored => exact Or.inr rfl
+  | streamAfterResetDiscarded => exact Or.inr rfl
   | streamOk _ k2 _ => exact Or.inl (by simpa using k2)
   | streamResetComplete _ k2 _ _ => exact Or.inl (by simpa using k2)
 
@@ -1087,6 +1116,7 @@ theorem terminal_absorbing {s s' : State} {e : Event} {fx : List Effect}
     cases hp : s.phase <;> simp_all [Phase.terminal, Phase.beforeAllData]
   cases h with
   | streamFinalSizeIgnored => rfl
+  | streamAfterResetDiscarded => rfl
   | resetFinalSizeIgnored => rfl
   | resetSuppressed => rfl
   | blocked => rfl
@@ -1142,6 +1172,7 @@ theorem step_follows_diagram {s s' : State} {e : Event} {fx : List Effect}
     (h : Step s e (.ok s' fx)) : Reaches s.phase s'.phase = true := by
   cases h with
   | streamFinalSizeIgnored => cases hp : s.phase <;> simp [Reaches]
+  | streamAfterResetDiscarded => cases hp : s.phase <;> simp [Reaches]
   | resetFinalSizeIgnored => cases hp : s.phase <;> simp [Reaches]
   | resetSuppressed => cases hp : s.phase <;> simp [Reaches]
   | blocked => cases hp : s.phase <;> simp [Reaches]
@@ -1228,6 +1259,10 @@ private def rReset : State :=
 
 example : component.accepts rReset (.recvStream 0 5 false)
     (.ok { rReset with ranges := [(0, 10)] } [.dataAvailable 10]) = true := by decide
+-- §3.2, line 1127: …or the data is discarded and the application hears nothing,
+example : component.accepts rReset (.recvStream 0 5 false) (.ok rReset []) = true := by decide
+-- but not before a reset: in "Recv" the data is the application's.
+example : component.accepts r0 (.recvStream 0 5 false) (.ok r0 []) = false := by decide
 example : component.accepts rReset (.recvStream 0 5 false)
     (.ok { rReset with phase := .dataRecvd, ranges := [(0, 10)] }
          [.dataAvailable 10, .allDataReceived 10]) = true := by decide
@@ -1398,7 +1433,7 @@ Wave 1 review verified unchanged, follow the same rule.
 | §3.2 (1101) | delivered to the application → "Data Read", terminal | `Step.read`, `terminal_absorbing` |
 | §3.2 (1105) | RESET_STREAM in "Recv"/"Size Known" → "Reset Recvd" | `Step.resetOk` |
 | §3.2 (1109) | RESET_STREAM may arrive in "Data Recvd" | `Step.resetAfterData`, `Step.resetSuppressed` |
-| §3.2 (1111) | data may arrive in "Reset Recvd"; free to manage as it chooses | `Step.streamResetComplete` |
+| §3.2 (1111) | data may arrive in "Reset Recvd"; free to manage as it chooses | `Step.streamResetComplete`, `Step.streamAfterResetDiscarded` |
 | §3.2 (1127) | MAY interrupt delivery and signal the reset; MAY suppress it | `Step.resetAfterData` / `Step.resetSuppressed` (two outcomes) |
 | §3.2 (1129) | a suppressed RESET_STREAM leaves the part in "Data Recvd" | `Step.resetSuppressed` |
 | §3.2 (1135) | the application takes the reset signal → "Reset Read", terminal | `Step.readReset`, `terminal_absorbing` |
