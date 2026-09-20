@@ -4,6 +4,9 @@
     harness/scripts/spec_coverage.py out/cov_fn_init.json \\
         ngtcp2=out/cov_fn_ngtcp2.json cq=out/cov_fn_cq.json gq=out/cov_fn_gq.json
 
+Compare saved tables with:
+    harness/scripts/spec_coverage.py --diff old.tsv new.tsv
+
 Each JSON maps a C function name to [execution count, source file], made from
 `llvm-cov export -skip-expansions` of a harness built with the Lean-emitted C
 under -fprofile-instr-generate (PLAN.md section 4n).  The first file is the
@@ -163,7 +166,35 @@ def step_constructors(paths):
     return out
 
 
+def diff_rows(old_path, new_path):
+    """Compare requirement identities, ignoring Lean source line-number drift."""
+    def rows(path):
+        result = {}
+        with open(path) as f:
+            for line in f:
+                fields = line.rstrip('\n').split('\t')
+                if len(fields) != 7:
+                    raise ValueError(f'{path}: expected seven TSV fields')
+                component, source, _, ref, state, sentence, _ = fields
+                key = (component, source, ref, sentence)
+                if key in result:
+                    raise ValueError(f'{path}: duplicate requirement identity: {key}')
+                result[key] = state
+        return result
+    old, new = rows(old_path), rows(new_path)
+    changed = 0
+    for key in sorted(old.keys() | new.keys()):
+        before, after = old.get(key, 'absent'), new.get(key, 'absent')
+        if before != after:
+            changed += 1
+            print(f'{key[0]} {key[2]}: {before} -> {after}')
+    print(f'{changed} requirement coverage statuses changed')
+
+
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == '--diff':
+        diff_rows(sys.argv[2], sys.argv[3])
+        return
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     init = load(sys.argv[1])

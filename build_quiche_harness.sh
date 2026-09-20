@@ -10,6 +10,10 @@
 set -eu
 cd "$(dirname "$0")"
 NGTCP2=$(cd "${NGTCP2:-../ngtcp2}" && pwd)
+# ../quiche is often on an upstream-patch branch; a worktree of the mock-clock
+# branch next to it is preferred when there is one:
+#   git -C ../quiche worktree add ../quiche-fuzz-mock-clock fuzz-mock-clock
+[ -n "${QUICHE:-}" ] || { [ -d ../quiche-fuzz-mock-clock ] && QUICHE=../quiche-fuzz-mock-clock; }
 QUICHE=$(cd "${QUICHE:-../quiche}" && pwd)
 TRIPLE=${TRIPLE:-x86_64-unknown-linux-gnu}
 ( cd "$QUICHE" &&
