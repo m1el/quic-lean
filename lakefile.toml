@@ -7,3 +7,7 @@ name = "QuicModel"
 [[lean_exe]]
 name = "quicmodel"
 root = "Main"
+
+[[lean_exe]]
+name = "violations"
+root = "QuicModel.Violations.Run"
