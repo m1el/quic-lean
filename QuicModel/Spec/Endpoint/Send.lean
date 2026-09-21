@@ -663,7 +663,20 @@ own, which is never a mismatch and never narrows the candidate set. -/
   when at the limit) (`StreamTable.Recommended`);
 * `retransmitAcked`: §13.3 line 5461, "A sender SHOULD avoid retransmitting
   information from packets once they are acknowledged"
-  (`Retransmission.Recommended.notAlreadyAcked`). -/
+  (`Retransmission.Recommended.notAlreadyAcked`);
+* `twoAckEliciting`: §13.2.2 line 5163, an ACK after two ack-eliciting packets
+  (`Ack.State.ackElicitingSinceAck`). Checked once per packet, on every frame
+  of a packet that still owes that ACK. -/
+def frameIsAck : Frame → Bool
+  | .ack _ _ _ _ _ => true
+  | _ => false
+
+/-- §13.2.2, line 5163. Empty when the packet carries an ACK, or fewer than
+    two ack-eliciting packets are waiting. -/
+def ackFrequencyAdvice (s : State) (sp : PnSpace) (fs : List Frame) : List String :=
+  if decide (2 ≤ (s.ack sp).ackElicitingSinceAck) && !fs.any frameIsAck then ["twoAckEliciting"]
+  else []
+
 def recommendedWhy (s : State) (sp : PnSpace) (f : Frame) : List String :=
   (if s.st.streams.all (fun kv => Stream.recommendedSend kv.2 f) then [] else ["stream"]) ++
   (match f with

@@ -181,6 +181,23 @@ def localIssueCid (cid token : ByteArray) (rpt : UInt64) : LocalAction :=
 @[export quic_h_local_retire_cid]
 def localRetireCid (seq : UInt64) : LocalAction := .retireCid seq.toNat
 
+/-- §13.4.1: the ECN codepoint of one received QUIC packet. `cp` is 0 not-ECT,
+    1 ECT(0), 2 ECT(1), 3 CE. -/
+@[export quic_h_local_ecn_recv]
+def localEcnRecv (space cp processed : UInt8) : LocalAction :=
+  .ecnEvent (spaceOf space) (.recvPacket (cpOf cp) (processed != 0))
+where
+  cpOf : UInt8 → Ecn.Codepoint
+    | 1 => .ect0
+    | 2 => .ect1
+    | 3 => .ce
+    | _ => .notEct
+
+/-- §13.3: RFC 9002 declared this sent packet lost. -/
+@[export quic_h_local_rtx_lost]
+def localRtxLost (space : UInt8) (pn : UInt64) : LocalAction :=
+  .rtxEvent (.lost ⟨spaceOf space, pn.toNat⟩)
+
 /-! ### What a frame on the wire says the endpoint already decided
 
 ngtcp2 issues and retires connection IDs inside the writer; the only trace of

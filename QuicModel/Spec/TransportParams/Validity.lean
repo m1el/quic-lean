@@ -85,6 +85,7 @@ theorem validB_iff (sender : Role) (tp : TransportParams) :
     cases hsc : tp.initialSourceConnectionId <;>
     simp [validB, Valid, hpa, hsc, and_assoc]
 
+@[noinline]
 instance (sender : Role) (tp : TransportParams) : Decidable (Valid sender tp) :=
   decidable_of_iff _ (validB_iff sender tp)
 

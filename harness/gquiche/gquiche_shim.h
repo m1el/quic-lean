@@ -37,6 +37,10 @@ void gq_set_clock(gq_conn *g, uint64_t now);
 /* One UDP datagram from the peer. */
 void gq_recv(gq_conn *g, const uint8_t *buf, size_t len);
 
+/* As gq_recv. |ecn| is the model's numbering (0 not-ECT, 1 ECT(0), 2 ECT(1),
+   3 CE). |alt| reads the datagram from the peer's second port. */
+void gq_recv_meta(gq_conn *g, const uint8_t *buf, size_t len, int ecn, int alt);
+
 /* Fires every alarm whose deadline is not after the clock, earliest first. */
 void gq_fire_alarms(gq_conn *g);
 

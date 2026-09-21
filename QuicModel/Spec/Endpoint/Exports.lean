@@ -365,7 +365,7 @@ def maySendDatagramWhyC (s : State) (src dest : UInt64) (size : UInt64) (isPmtuP
 @[export quic_endpoint_recommended_why]
 def recommendedWhyC (s : State) (space : UInt8) (fs : List Frame) : String :=
   let sp : PnSpace := if space == 0 then .initial else if space == 1 then .handshake else .appData
-  ",".intercalate (fs.flatMap (fun f =>
+  ",".intercalate (ackFrequencyAdvice s sp fs ++ fs.flatMap (fun f =>
     (recommendedWhy s sp f).map (fun r => r ++ ":" ++ ((f.dump.splitOn " ").headD ""))))
 
 @[export quic_endpoint_may_send_packet]

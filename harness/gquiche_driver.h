@@ -157,7 +157,8 @@ static void step_recv(harness *h, int space, int64_t pn, const uint8_t *fb,
 
   MH_MARK(h);
   gq_set_clock(h->gq, h->ts);
-  gq_recv(h->gq, pkt, (size_t)pktlen);
+  h->recv_space = space;
+  gq_recv_meta(h->gq, pkt, (size_t)pktlen, h->recv_ecn, h->recv_alt);
   /* QUICHE defers part of a packet's processing to alarms set for "now"
      (retiring a connection ID the peer asked to retire, for one); an event
      loop runs them before it reads the next datagram. */

@@ -214,6 +214,10 @@ extern uint64_t quic_h_states_length(lean_object *ss);
 extern uint64_t quic_h_frames_max_stream_index(lean_object *fs);
 extern uint64_t quic_h_actions_length(lean_object *as);
 extern lean_object *quic_h_actions_get(lean_object *as, uint64_t i);
+extern uint64_t quic_h_exercise(lean_object *bytes);
+extern uint8_t quic_h_params_status(uint8_t sender_server, lean_object *bytes);
+extern lean_object *quic_h_local_ecn_recv(uint8_t space, uint8_t cp,
+                                          uint8_t processed);
 
 /* ====================================================================== */
 /* Lean list helpers                                                       */
@@ -325,6 +329,8 @@ static size_t g_inputlen;
 static int g_summary_registered;
 static int g_pn_selftest_active;
 static unsigned long g_pn_selftest_checks;
+static volatile uint64_t g_exercise_sink;
+static unsigned long g_params_checks, g_params_disagree;
 
 static int pn_selftest_enabled(void) {
   const char *mode = getenv("DIFF_SELFTEST");
@@ -356,10 +362,11 @@ static void mm_summary(void) {
           "subsequence rule)  steps not compared=%lu  send checks=%lu "
           "(%lu datagrams unparsable)  runs abandoned after the model closed=%lu\n"
           "distinct mismatches=%d  total mismatches=%lu\n"
-          "mismatches after candidate loss (not exhaustive)=%lu\n",
+          "mismatches after candidate loss (not exhaustive)=%lu\n"
+          "transport-parameter wire checks=%lu  disagreements with ngtcp2=%lu\n",
           g_runs, g_steps_compared, g_steps_loose, g_steps_subseq, g_steps_skipped,
           g_send_checks, g_send_unparsed, g_runs_closed, g_nmm, g_mm_total,
-          g_mm_after_loss);
+          g_mm_after_loss, g_params_checks, g_params_disagree);
   for (i = 0; i < g_nmm; ++i)
     fprintf(stderr, "  sig=%016" PRIx64 " x%lu\n", g_mm[i].sig, g_mm[i].count);
   fprintf(stderr, "advisory (a SHOULD about a sent frame not followed; %lu packets asked): %d kinds\n",
@@ -483,6 +490,7 @@ typedef struct {
   lean_object *arg; /* ByteArray | AppAction | TlsEvent | LocalAction, owned by
                        the caller for the whole lifetime of the evspec */
   uint64_t now;
+  uint64_t src;     /* datagram source address; 0 is this endpoint */
   const char *name; /* for reports */
 } evspec;
 
@@ -1102,6 +1110,7 @@ static void md_start(harness *h, int server) {
       d.kind = EV_DATAGRAM;
       d.arg = model_bytes(pkt, (size_t)n);
       d.now = 0;
+      d.src = ADDR_PEER;
       d.name = "handshake packet (synthesised)";
       synth_step(h, &d);
       lean_dec(d.arg);
@@ -1128,6 +1137,27 @@ static void md_start(harness *h, int server) {
       lean_dec(e.arg);
     }
   }
+  /* Decision procedures the post-handshake corpus never reaches, on this
+     input's own bytes, plus a wire-format check against ngtcp2's decoder.
+     Not a connection step: it does not touch the candidate set. */
+  {
+    uint8_t zeros[32] = {0};
+    const uint8_t *p = g_input && g_inputlen ? g_input : zeros;
+    size_t n = g_input && g_inputlen ? g_inputlen : sizeof(zeros);
+    ngtcp2_transport_params tp;
+    lean_object *b = model_bytes(p, n);
+    uint8_t st;
+    int rv;
+    /* Both calls free the byte array they are given. */
+    g_exercise_sink = quic_h_exercise(b);
+    b = model_bytes(p, n);
+    st = quic_h_params_status(1, b);
+    memset(&tp, 0, sizeof(tp));
+    ngtcp2_transport_params_default(&tp);
+    rv = ngtcp2_transport_params_decode(&tp, p, n);
+    ++g_params_checks;
+    if ((st != 0) != (rv == 0)) ++g_params_disagree;
+  }
 }
 
 /* A datagram that really arrived but whose outcome is not compared: it only
@@ -1139,6 +1169,7 @@ static void md_synth_recv(harness *h, const uint8_t *pkt, size_t len) {
   d.kind = EV_DATAGRAM;
   d.arg = model_bytes(pkt, len);
   d.now = model_now(h);
+  d.src = ADDR_PEER;
   d.name = "handshake-era 1-RTT datagram (replayed)";
   synth_step(h, &d);
   lean_dec(d.arg);
@@ -1228,6 +1259,7 @@ static void md_recv(harness *h, const uint8_t *pkt, size_t len, int rv) {
   e.kind = EV_DATAGRAM;
   e.arg = model_bytes(pkt, len);
   e.now = model_now(h);
+  e.src = h->recv_alt ? 2 : ADDR_PEER;
   e.name = "recv";
   sb_reserve(&cbtext, 64);
   cbtext.p[0] = 0;
@@ -1236,6 +1268,24 @@ static void md_recv(harness *h, const uint8_t *pkt, size_t len, int rv) {
   track_step(h, &e, is_err, code, cbs, cbtext.p, what);
   free(cbtext.p);
   lean_dec(e.arg);
+  /* Cloudflare quiche's recv has no ECN field; the other two engines are
+     given the same codepoint, and the model counts it before any ACK of this
+     packet is written. */
+#if !defined(DRIVER_QUICHE) || defined(DRIVER_GQUICHE)
+  if (h->recv_ecn && m->alive) {
+    evspec ec;
+    ec.kind = EV_LOCAL;
+    ec.arg = quic_h_local_ecn_recv((uint8_t)h->recv_space, (uint8_t)h->recv_ecn,
+                                   rv == 0 || is_err > 0);
+    ec.now = model_now(h);
+    ec.src = 0;
+    ec.name = "ecnRecv";
+    synth_step(h, &ec);
+    lean_dec(ec.arg);
+  }
+#else
+  (void)0;
+#endif
   if (is_err > 0) md_local_error(h, code);
 }
 
@@ -1797,6 +1847,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   g_inputlen = size;
   server = !(data[0] & 1);
   harness_start(&h, server);
+  h.extended = (data[0] & 0x80) != 0;
   if (setup_conn(&h, server) != 0) {
     md_finish(&h);
     free(h.tr.p);

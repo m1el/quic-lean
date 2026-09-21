@@ -70,7 +70,11 @@ typedef struct harness_s {
   ngtcp2_tstamp ts;
   ngtcp2_path_storage path;
   int server;
-  int fatal;      /* a fatal library error was seen; stop stepping */
+  int fatal;      /* a fatal library error was seen */
+  int extended;   /* byte 0 bit 7: a recv's spare bits carry ECN and a second path */
+  int recv_ecn;   /* 0 not-ECT, 1 ECT(0), 2 ECT(1), 3 CE; the model's numbering */
+  int recv_alt;   /* this recv arrives from the peer's second address */
+  int recv_space; /* packet number space of the recv currently in MH_RECV */
   int64_t last_stream;
   int64_t out_max_pn[3]; /* largest pn seen per space, for OUT pn recovery */
   size_t cb_mark; /* h->tr.len when the current step began (WP13) */
@@ -1214,9 +1218,18 @@ static void step_recv(harness *h, int space, int64_t pn, const uint8_t *fb,
   TR(h, "]\n");
 
   memset(&pi, 0, sizeof(pi));
+  pi.ecn = h->recv_ecn == 1 ? NGTCP2_ECN_ECT_0
+         : h->recv_ecn == 2 ? NGTCP2_ECN_ECT_1
+         : h->recv_ecn == 3 ? NGTCP2_ECN_CE
+                            : NGTCP2_ECN_NOT_ECT;
+  h->recv_space = space;
+  ngtcp2_path_storage ps;
+  init_path(&ps);
+  if (h->recv_alt)
+    ((struct sockaddr_in *)ps.path.remote.addr)->sin_port = htons(12346);
   MH_MARK(h);
-  rv = ngtcp2_conn_read_pkt(h->conn, &h->path.path, &pi, pkt, (size_t)pktlen,
-                            h->ts);
+  rv = ngtcp2_conn_read_pkt(h->conn, h->recv_alt ? &ps.path : &h->path.path,
+                            &pi, pkt, (size_t)pktlen, h->ts);
   TR(h, "RET read_pkt=%s\n", rc_name(rv));
   MH_RECV(h, pkt, (size_t)pktlen, rv);
   if (rv != 0) tr_fatal(h, rv);
@@ -1472,7 +1485,19 @@ static void run_binary(harness *h, const uint8_t *data, size_t size) {
     case 0:
     case 1:
     case 10: {
-      int space = cur_u8(&c) % 3;
+      uint8_t raw = cur_u8(&c);
+      int space = raw % 3;
+      /* The low bits keep the packet number space the corpus was built with.
+         The bits above them were ignored; an extended input uses them as the
+         ECN codepoint and a second source address. */
+      if (h->extended) {
+        int meta = raw / 3;
+        h->recv_ecn = meta % 4;
+        h->recv_alt = (meta / 4) & 1;
+      } else {
+        h->recv_ecn = 0;
+        h->recv_alt = 0;
+      }
       int64_t pn = (int64_t)cur_u16(&c);
       size_t n = cur_u8(&c);
       uint8_t fb[256];

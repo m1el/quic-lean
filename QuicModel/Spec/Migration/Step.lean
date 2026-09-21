@@ -54,6 +54,7 @@ inductive SuccCase where
   | gone | stay | mustSwitch | maySwitch
   deriving DecidableEq, Repr
 
+@[noinline]
 def succCase (s : State) (p : Path) : SuccCase :=
   if s.discarded then .gone
   else if !s.preferredSwitchReady p then .stay
@@ -64,6 +65,7 @@ inductive FailCase where
   | gone | revert | noPath | otherPath | otherPathNoneLeft
   deriving DecidableEq, Repr
 
+@[noinline]
 def failCase (s : State) (p : Path) : FailCase :=
   if s.discarded then .gone
   else if decide (p = s.active) && !s.isValidated p then
@@ -77,6 +79,7 @@ inductive MigCase where
   | gone | tooEarly | banned | validateFirst | already | fresh
   deriving DecidableEq, Repr
 
+@[noinline]
 def migCase (s : State) (p : Path) : MigCase :=
   if s.discarded then .gone
   else if !s.handshakeConfirmed then .tooEarly
@@ -89,6 +92,7 @@ inductive ProbeCase where
   | gone | banned | probe
   deriving DecidableEq, Repr
 
+@[noinline]
 def probeCase (s : State) (p : Path) : ProbeCase :=
   if s.discarded then .gone
   else if s.sendBanned p then .banned
@@ -98,6 +102,7 @@ inductive CidCase where
   | gone | zeroLen | localReuse | rebind | peerReuse | fresh
   deriving DecidableEq, Repr
 
+@[noinline]
 def cidCase (s : State) (p : Path) (n : Nat) : CidCase :=
   if s.discarded then .gone
   else if s.peerZeroLen then .zeroLen

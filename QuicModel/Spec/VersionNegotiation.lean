@@ -495,6 +495,7 @@ abbrev Out := Outcome State Effect
 /-- The state after acting on a Version Negotiation packet: the attempt is over,
     and the packet counts as "successfully processed" for the next one
     (§6.2, line 2100: "including an earlier Version Negotiation packet"). -/
+@[noinline]
 def State.afterVn (s : State) : State := { s with processedAny := true, abandoned := true }
 
 /-- §6.2.1, line 2136: "The new connection MUST use a new random Destination
@@ -513,6 +514,7 @@ def versionMatches (s : State) : Option Nat → Bool
 /-- The versions of a Version Negotiation packet that a client of this draft may
     pick under §6.2.1: not the Version Negotiation marker, and not a reserved
     version, since those "will never represent a real protocol" (§15). -/
+@[noinline]
 def usableVersions (vs : List Nat) : List Nat :=
   vs.filter (fun v => decide (v ≠ versionNegotiationVersion) && !isReservedVersion v)
 

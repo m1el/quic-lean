@@ -879,6 +879,7 @@ theorem ackFrameSendable_iff (s : State) (f : Frame) :
     which is handed the real `OutPacket.ptype`. -/
 def MaySend (_ : State) (_ : Frame) : Prop := True
 
+@[noinline]
 def maySend (_ : State) (_ : Frame) : Bool := true
 
 theorem maySend_iff (s : State) (f : Frame) : maySend s f = true ↔ MaySend s f := by

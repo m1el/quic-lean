@@ -466,6 +466,7 @@ inductive RecvCase where
   | migrate
   deriving DecidableEq, Repr
 
+@[noinline]
 def recvCase (s : State) (p : Path) (pn : Nat) (probingOnly : Bool) : RecvCase :=
   if s.discarded then .gone
   else if decide (s.role = .client) && !s.knownServerAddr p.peer then .unknownServer

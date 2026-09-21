@@ -639,9 +639,25 @@ void gq_free(gq_conn* g) {
 void gq_set_clock(gq_conn* g, uint64_t now) { g->helper.clock.Set(now); }
 
 void gq_recv(gq_conn* g, const uint8_t* buf, size_t len) {
+  gq_recv_meta(g, buf, len, 0, 0);
+}
+
+void gq_recv_meta(gq_conn* g, const uint8_t* buf, size_t len, int ecn, int alt) {
+  QuicEcnCodepoint cp = ECN_NOT_ECT;
+  switch (ecn) {
+    case 1: cp = ECN_ECT0; break;
+    case 2: cp = ECN_ECT1; break;
+    case 3: cp = ECN_CE; break;
+    default: break;
+  }
   QuicReceivedPacket packet(reinterpret_cast<const char*>(buf), len,
-                            g->helper.clock.Now());
-  g->connection->ProcessUdpPacket(g->self, g->peer, packet);
+                            g->helper.clock.Now(), /*owns_buffer=*/false,
+                            /*ttl=*/0, /*ttl_valid=*/false,
+                            /*packet_headers=*/nullptr, /*headers_length=*/0,
+                            /*owns_header_buffer=*/false, cp);
+  QuicSocketAddress peer = g->peer;
+  if (alt) peer = QuicSocketAddress(QuicIpAddress::Loopback4(), 12346);
+  g->connection->ProcessUdpPacket(g->self, peer, packet);
   if (getenv("GQ_DEBUG") != nullptr) {
     const QuicConnectionStats& st = g->connection->GetStats();
     fprintf(stderr,

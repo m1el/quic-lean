@@ -63,7 +63,7 @@ extern void quiche_fuzz_set_clock(uint64_t nanos);
 
 #define Q_MAX_FLIGHT 32
 
-static struct sockaddr_in g_q_local, g_q_remote;
+static struct sockaddr_in g_q_local, g_q_remote, g_q_remote_alt;
 
 /* Length of the connection ID the endpoint under test addresses its peer
    with.  It changes when the peer issues one of another length and retires the
@@ -86,6 +86,8 @@ static void q_addrs(void) {
   g_q_remote.sin_family = AF_INET;
   g_q_remote.sin_port = htons(12345);
   g_q_remote.sin_addr.s_addr = htonl(0x7f000001u);
+  g_q_remote_alt = g_q_remote;
+  g_q_remote_alt.sin_port = htons(12346);
 }
 
 /* -------------------------------------------------- the two crypto stubs */
@@ -493,8 +495,10 @@ static void step_recv(harness *h, int space, int64_t pn, const uint8_t *fb,
   dump_frames_joined(&h->tr, g_build_plain, g_build_plainlen);
   TR(h, "]\n");
 
-  ri.from = (struct sockaddr *)&g_q_remote; ri.from_len = sizeof(g_q_remote);
+  ri.from = (struct sockaddr *)(h->recv_alt ? &g_q_remote_alt : &g_q_remote);
+  ri.from_len = h->recv_alt ? sizeof(g_q_remote_alt) : sizeof(g_q_remote);
   ri.to = (struct sockaddr *)&g_q_local;    ri.to_len = sizeof(g_q_local);
+  h->recv_space = space;
   MH_MARK(h);
   quiche_fuzz_set_clock(h->ts);
   (void)quiche_conn_recv(h->q, qpkt, qlen, &ri);
