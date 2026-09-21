@@ -53,8 +53,8 @@ not occurrences and not bugs: one cause usually appears under several.
 | model limitations or suspected tracking issues | B1, B3, B4, B6 fixed; B2, B5, B7, B8 open (see individual qualifications) | the same |
 | API events the text does not govern | C1–C6, B6 | B6 (read results synthesized as callbacks) |
 | harness artefact | D1–D5, D10, D12 | D5–D12 |
-| corpus replay, 2026-09-21 (section F) | 29 signatures / 145 steps; 72 after candidate loss.  Three confirmed spec deviations (A2, A3, A5); A4 and B2 still unresolved | not re-run |
-| SHOULDs ignored on that corpus (section G) | 7 kinds, all still accepted.  Largest: ACK of an unsent number ×340, `RESET_STREAM` code ×97, final-size change ×58 | not re-run |
+| corpus replay, 2026-09-21 (section F) | 29 signatures / 145 steps; 72 after candidate loss.  Three confirmed spec deviations (A2, A3, A5); A4 and B2 still unresolved | 24 signatures / 324 steps; 233 after candidate loss (section H).  Same signature count as the fixes-pass replay |
+| SHOULDs ignored on that corpus (section G, section H) | 7 kinds, all still accepted.  Largest: ACK of an unsent number ×340, `RESET_STREAM` code ×97, final-size change ×58 | 6 kinds, all still accepted.  Largest: ACK of an unsent number ×266, missing ACK after two ack-eliciting packets ×237, `DATA_BLOCKED` ×148 |
 
 Both implementations produce B5 and B6 symptoms. B5 remains an untraced
 state-tracking discrepancy, not a proven model-rule defect. B6 is a reproduced
@@ -600,6 +600,34 @@ would have recorded the send.
 | 30 | Sent `NEW_CONNECTION_ID` again after that frame had been acknowledged | §13.3, line 5461: SHOULD avoid retransmitting information once it is acknowledged (`retransmitAcked:NEW_CONNECTION_ID`) |
 | 4 | Sent `STREAM` again after that frame had been acknowledged | the same sentence (`retransmitAcked:STREAM`) |
 | 2 | Sent a packet with no ACK while at least two ack-eliciting packets were outstanding | §13.2.2, line 5163: SHOULD send an ACK after two ack-eliciting packets (`twoAckEliciting`) |
+
+## H. Cloudflare quiche, corpus replay of 2026-09-21
+
+`out/quiche_diff` linked against `../quiche-fuzz-mock-clock` `d3e21813`
+(`fuzz-mock-clock`), the same model and the same `corpus/conn_trace` as
+section G.  The harness reported 2457 runs.  17686 steps compared (17647
+needed the `stream_close` / `acked_stream_data_offset` exclusion, 12 the
+subsequence rule), 142 not compared, 10765 send checks, 34 runs abandoned
+after the model closed.  **24 distinct signatures, 324 mismatching steps, 233
+of them after the candidate cap had already cut a state.**  That is the
+fixes-pass signature count (24 / 323) with one extra step.  No crash.
+
+The summary's transport-parameter line (2457 checks, 59 disagreements) still
+calls `ngtcp2_transport_params_decode`.  It is not a quiche comparison.
+
+Six SHOULDs were ignored on steps the checker still accepted.  10667 sends
+and 13842 receives were asked.  The same first-candidate caveat as section G
+applies to the two receive rows.  Quiche did not retransmit an acknowledged
+`NEW_CONNECTION_ID`; ngtcp2 did that 30 times (section G).
+
+| Count | What quiche did | Recommendation |
+|---:|---|---|
+| 266 | Accepted an ACK whose largest packet number is one this side has not sent | §13.1, line 5030 (`recv:ackUnsent`) |
+| 237 | Sent a packet with no ACK while at least two ack-eliciting packets were outstanding | §13.2.2, line 5163 (`twoAckEliciting`) |
+| 148 | Sent `DATA_BLOCKED` while not at the connection data limit | §4.1, line 1375 (`streamTable:DATA_BLOCKED`) |
+| 57 | Sent `RESET_STREAM` with an application error code other than the one from `STOP_SENDING` | §3.5, line 1263 (`stream:RESET_STREAM`) |
+| 39 | Accepted a `STREAM` or `RESET_STREAM` that changes a known final size | §4.5, lines 1517 and 1520 (`recv:finalSize`) |
+| 39 | Sent `STREAM` again after that frame had been acknowledged | §13.3, line 5461 (`retransmitAcked:STREAM`) |
 
 ## What is not covered
 
