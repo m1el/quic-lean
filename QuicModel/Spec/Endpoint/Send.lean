@@ -677,6 +677,37 @@ def ackFrequencyAdvice (s : State) (sp : PnSpace) (fs : List Frame) : List Strin
   if decide (2 ≤ (s.ack sp).ackElicitingSinceAck) && !fs.any frameIsAck then ["twoAckEliciting"]
   else []
 
+/-- A receive the checker accepts while a SHOULD asked for something else.
+    Empty when the frame does not trip a recommendation, or the endpoint did
+    what the SHOULD asks (including a generic error code, §11). This is not a
+    `MaySend` / `accepts` failure: those stay a mismatch. -/
+def againstRecommendation (s : State) (sp : PnSpace) (fs : List Frame)
+    (isError : Bool) (code : Nat) : List String :=
+  let generic := code = TransportError.protocolViolation.code
+      || code = TransportError.internalError.code
+  let followedAck := isError && (code = TransportError.protocolViolation.code || generic)
+  let followedFinal := isError && (code = TransportError.finalSizeError.code || generic)
+  (fs.flatMap fun f =>
+      match f with
+      | .ack largest _ _ _ _ =>
+        -- §13.1: SHOULD be PROTOCOL_VIOLATION when the largest acknowledges
+        -- a packet this space did not send. Tolerating it stays permitted.
+        if Ack.acksUnsent (s.ack sp) largest && !followedAck then ["ackUnsent"] else []
+      | .stream id off fin data =>
+        -- §4.5: SHOULD be FINAL_SIZE_ERROR. Carrying on stays permitted.
+        match (s.st.streams.get? ⟨id⟩).bind (·.recv) with
+        | some rs =>
+          if Stream.Recv.finalSizeViolation rs (off + data.size) fin && !followedFinal
+          then ["finalSize"] else []
+        | none => []
+      | .resetStream id _ fs =>
+        match (s.st.streams.get? ⟨id⟩).bind (·.recv) with
+        | some rs =>
+          if Stream.Recv.resetFinalSizeViolation rs fs && !followedFinal
+          then ["finalSize"] else []
+        | none => []
+      | _ => []) |>.eraseDups
+
 def recommendedWhy (s : State) (sp : PnSpace) (f : Frame) : List String :=
   (if s.st.streams.all (fun kv => Stream.recommendedSend kv.2 f) then [] else ["stream"]) ++
   (match f with

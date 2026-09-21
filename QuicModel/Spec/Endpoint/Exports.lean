@@ -368,6 +368,14 @@ def recommendedWhyC (s : State) (space : UInt8) (fs : List Frame) : String :=
   ",".intercalate (ackFrequencyAdvice s sp fs ++ fs.flatMap (fun f =>
     (recommendedWhy s sp f).map (fun r => r ++ ":" ++ ((f.dump.splitOn " ").headD ""))))
 
+/-- Recommendations a permitted receive goes against, comma-separated.
+    Empty when the receive follows them or none applies. Never a mismatch. -/
+@[export quic_endpoint_against_recommendation]
+def againstRecommendationC (s : State) (space : UInt8) (fs : List Frame)
+    (isError : UInt8) (code : UInt64) : String :=
+  let sp : PnSpace := if space == 0 then .initial else if space == 1 then .handshake else .appData
+  ",".intercalate (againstRecommendation s sp fs (isError != 0) code.toNat)
+
 @[export quic_endpoint_may_send_packet]
 def maySendPacketC (s : State) (p : OutPacket) : UInt8 := if maySendPacket s p then 1 else 0
 

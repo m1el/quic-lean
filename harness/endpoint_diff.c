@@ -157,6 +157,9 @@ extern uint8_t quic_endpoint_may_send_numbers(lean_object *s, lean_object *numbe
 extern uint8_t quic_endpoint_may_send_number_sizes(lean_object *s, lean_object *numbers);
 extern lean_object *quic_endpoint_recommended_why(lean_object *s, uint8_t space,
                                                  lean_object *fs);
+extern lean_object *quic_endpoint_against_recommendation(lean_object *s, uint8_t space,
+                                                         lean_object *fs, uint8_t is_error,
+                                                         uint64_t code);
 extern uint8_t quic_endpoint_may_send_datagram(lean_object *s, uint64_t src,
                                                uint64_t dest, uint64_t size,
                                                uint8_t is_pmtu_probe,
@@ -317,7 +320,7 @@ static int g_nsoft;
 /* advisory class, see advice_seen */
 static soft_entry g_advice[64];
 static int g_nadvice;
-static unsigned long g_advice_checks;
+static unsigned long g_advice_checks, g_recv_advice_checks;
 static int g_nmm;
 static unsigned long g_mm_after_loss; /* mismatches in runs where the cap had cut */
 static unsigned long g_mm_total;
@@ -369,8 +372,8 @@ static void mm_summary(void) {
           g_mm_after_loss, g_params_checks, g_params_disagree);
   for (i = 0; i < g_nmm; ++i)
     fprintf(stderr, "  sig=%016" PRIx64 " x%lu\n", g_mm[i].sig, g_mm[i].count);
-  fprintf(stderr, "advisory (a SHOULD about a sent frame not followed; %lu packets asked): %d kinds\n",
-          g_advice_checks, g_nadvice);
+  fprintf(stderr, "against recommendation (accepted, not what a SHOULD asks; %lu sends, %lu receives): %d kinds\n",
+          g_advice_checks, g_recv_advice_checks, g_nadvice);
   for (i = 0; i < g_nadvice; ++i)
     fprintf(stderr, "  x%-6lu %s\n", g_advice[i].count, g_advice[i].key);
   if (g_nsoft) {
@@ -912,6 +915,32 @@ static void digest_step(harness *h, const evspec *e, int is_error, uint64_t code
   fflush(g_digest);
 }
 
+/* A permitted receive that ignores a SHOULD.  Asked of the first candidate.
+   A MUST failure never reaches here: the candidate set is already empty. */
+static void note_against_recommendation(harness *h, const evspec *e, int is_error,
+                                        uint64_t code) {
+  mstate *m = M(h);
+  lean_object *s, *fs, *why;
+  const char *w;
+  if (!m || !m->alive || e->kind != EV_DATAGRAM || !g_build_plainlen) return;
+  if (lean_is_scalar(m->cands)) return;
+  s = l_head(m->cands);
+  lean_inc(s);
+  fs = quic_h_frames_of_bytes(model_bytes(g_build_plain, g_build_plainlen));
+  why = quic_endpoint_against_recommendation(
+      s, (uint8_t)h->recv_space, fs, (uint8_t)(is_error > 0), code);
+  ++g_recv_advice_checks;
+  for (w = lean_string_cstr(why); *w;) {
+    char key[96];
+    size_t n = strcspn(w, ",");
+    snprintf(key, sizeof(key), "recv:%.*s", (int)(n < 90 ? n : 90), w);
+    advice_seen(key);
+    w += n;
+    if (*w == ',') ++w;
+  }
+  lean_dec(why);
+}
+
 static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
                        lean_object *cbs, const char *cbtext, const char *what) {
   mstate *m = M(h);
@@ -946,6 +975,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
                                    cbs ? cbs : l_nil());
   if (!lean_is_scalar(next)) {
     digest_step(h, e, is_error, code, 1);
+    note_against_recommendation(h, e, is_error, code);
     set_cands(m, cap_cands(m, next));
     return;
   }
@@ -959,6 +989,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
   if (!lean_is_scalar(next)) {
     ++g_steps_loose;
     digest_step(h, e, is_error, code, 1);
+    note_against_recommendation(h, e, is_error, code);
     set_cands(m, next);
     return;
   }
@@ -979,6 +1010,7 @@ static void track_step(harness *h, const evspec *e, int is_error, uint64_t code,
     snprintf(softkey, sizeof(softkey), "%s|subsequence|%.300s", e->name, cbtext);
     soft_seen(fnv(softkey), softkey);
     digest_step(h, e, is_error, code, 1);
+    note_against_recommendation(h, e, is_error, code);
     set_cands(m, next);
     return;
   }
