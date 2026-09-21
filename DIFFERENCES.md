@@ -53,6 +53,8 @@ not occurrences and not bugs: one cause usually appears under several.
 | model limitations or suspected tracking issues | B1, B3, B4, B6 fixed; B2, B5, B7, B8 open (see individual qualifications) | the same |
 | API events the text does not govern | C1–C6, B6 | B6 (read results synthesized as callbacks) |
 | harness artefact | D1–D5, D10, D12 | D5–D12 |
+| corpus replay, 2026-09-21 (section F) | 29 signatures / 145 steps; 72 after candidate loss.  Three confirmed spec deviations (A2, A3, A5); A4 and B2 still unresolved | not re-run |
+| SHOULDs ignored on that corpus (section G) | 7 kinds, all still accepted.  Largest: ACK of an unsent number ×340, `RESET_STREAM` code ×97, final-size change ×58 | not re-run |
 
 Both implementations produce B5 and B6 symptoms. B5 remains an untraced
 state-tracking discrepancy, not a proven model-rule defect. B6 is a reproduced
@@ -490,6 +492,114 @@ mismatches on the engine that had one, the eight scripts stay at zero on both,
 and the corpus replay goes from 27 signatures / 138 steps to 26 / 137 (ngtcp2)
 and from 24 / 323 to 11 / 230 (quiche — A1 was 13 of its 19 `maysend`
 signatures).
+
+## F. ngtcp2 against the text, corpus replay of 2026-09-21
+
+Replay of `corpus/conn_trace` (2456 inputs) through `out/endpoint_diff_cov`,
+rebuilt the same day from the current tree (post-error stop restored).  Log:
+`out/spec-coverage-run/endpoint_diff.log`.  ngtcp2 `3c23148e`.  18512 steps
+compared (348 needed the `stream_close` / `acked_stream_data_offset`
+exclusion, 45 the subsequence rule), 86 not compared, 10109 send checks, 28
+runs abandoned after the model closed.  **29 distinct signatures, 145
+mismatching steps, 72 of them after the candidate cap had already cut a
+state.**  Transport-parameter wire checks: 2456, of which 59 disagree with
+`ngtcp2_transport_params_decode`; those are a separate counter and are not
+among the 29.  The 27 / 138 figure above is the 2026-09-19 fixes-pass replay,
+not this one.
+
+Three of these are departures from RFC 9000.  Two more are reproduced and
+still open.  The other 26 signatures are callback timing, model-state drift,
+or a harness check.
+
+### Confirmed
+
+**A2 — §19.15, Retire Prior To greater than Sequence Number.**  A
+`NEW_CONNECTION_ID` with Retire Prior To greater than Sequence Number must be
+`FRAME_ENCODING_ERROR` (draft-34 line 7993).  `conn_recv_new_connection_id`
+returns success at `ngtcp2_conn.c:8176` when that sequence is already in the
+gap tracker, before the comparison at line 8191.  A fresh sequence number is
+rejected; a repeat of sequence 0 is ignored.  This replay shows the
+consequence as one exhaustive step, `bebccdddc002175a`: the packet starts
+with `NEW_CONNECTION_ID seq=0 rpt=2` and also carries a `STREAM` on a
+send-only stream, and ngtcp2 closes with `STREAM_STATE_ERROR` (5).  Both
+candidates permit only error 7.  The illegal connection-ID frame was skipped,
+so the later frame determined the code.
+
+**A3 — §12.2, coalesced packets after one that cannot be decrypted.**  The
+receiver must try to process the remaining packets (draft-34 line 4619).
+`conn_recv_cpkt` leaves its loop on `NGTCP2_ERR_DISCARD_PKT` and returns 0
+(`ngtcp2_conn.c:10115`).  Discarding the undecryptable packet is allowed;
+stopping there is not.  The harness stub AEAD cannot fail, so this replay
+does not hit it.  The unit test on `fix/coalesced-pkt-after-discard` does
+(section "Patches" above).
+
+**A5 — Appendix A.3, packet-number reconstruction.**  The algorithm rejects a
+candidate that would land at or above 2^62.  `ngtcp2_pkt_adjust_pkt_num`
+asserts that case (`ngtcp2_pkt.c:2197`).  ngtcp2's CMake strips `-DNDEBUG`,
+so the assert is live in a normal build.  Reaching it takes a packet number
+within 2^31 of 2^62.  The corpus does not.  `FINDINGS.md` §1; the "release
+builds are fine" sentence there is wrong for the reason just given.
+
+### Reproduced, conformance not established
+
+**A4 — §4.5, `STREAM_DATA_BLOCKED` past a final size.**  `bebcccddc00215a7`,
+one exhaustive step: a `STREAM` with FIN (`id=0 off=0 data=656280`), then
+`STREAM_DATA_BLOCKED id=0 v=30`.  ngtcp2 closes with `FINAL_SIZE_ERROR` (6);
+both candidates accept the frame.  The sentences that name
+`FINAL_SIZE_ERROR` attach it to a `RESET_STREAM` or `STREAM` frame and to
+receipt of data (draft-34 lines 1517–1520).  §11 also allows an applicable
+error code.  That is not enough to call the close non-conformant.  No patch.
+
+**B2 — §4.1 / §4.6, a blocked-limit frame for a limit never granted.**
+ngtcp2 closes with `FLOW_CONTROL_ERROR` (3) or `STREAM_LIMIT_ERROR` (4);
+quiche accepts the same frames (section E).  `bebcc7ddc0020d28` (2 steps,
+observed error 3, candidates permit error 4) and `bebcceddc002190d` (14
+steps, observed error 4, candidates accept the packet).  Both printed
+samples are after candidate loss.  Whether reporting a blocked offset by
+itself is a violation is still open.
+
+### Not a transport-rule divergence
+
+The remaining signatures disagree with the model on observations the text
+does not fix, or on state the candidate cap has already lost.  Buckets are
+the first printed occurrence of each signature in the log above, read
+against sections B and C.
+
+| Class | What the step shows | Signatures | Steps |
+|---|---|---:|---:|
+| C4, callback shape | `recv_crypto_data` or `recv_stream_data` once per frame or per retransmission; the model reports one contiguous delivery | `4036bb62b857cb11` ×28, `3180074e24df84dd` ×8, `f565d890f7c3a6bc` ×2, `dd084b597791932d` ×1, `d4e745198464b820` ×1, `6c020a91973eb198` ×1 | 41 |
+| C5, connection-ID timing | `dcid_status` or `remove_connection_id` from the timer, or bundled with another callback the model splits differently | `6a152ea1fb98615d` ×39, `f34ae1952a62e561` ×10, `688262718687b159` ×4, `8babe7e8640c3a7b` ×3, `5689cb8a0c85a7b2` ×1, `2b43bbe00e8b520e` ×1 | 58 |
+| C3, implicit streams | `stream_open` where §2.1 already treats the stream as open, or the reverse | `91d69bb8e65b2f7a` ×3 | 3 |
+| C6, mixed callbacks | Combinations of C3–C5 | `69315488f82ff058` ×3, `3d7a7a79f8a563ef` ×2, `36892f23d7bf997e` ×1, `22f03ea22aa57841` ×1 | 7 |
+| B5, ACK the model refuses | An ACK whose packet number is absent from the candidates' received set.  The rule matches §13.1; the sets differ.  Every one is after candidate loss | `892de5bdb790c40d` ×7, `b75a6a4caf721c63` ×2, `d7a7c65f95fb7c6d` ×2, `f6e91f92cb3bcfcb` ×1, `b3c10263f238e80c` ×1 | 13 |
+| B7, send on an unseen stream | `STREAM id=4` (`2f54b591a2287416`).  The refusal is `StreamTable.streamMaySend`'s `s.has id` conjunct, not a sentence of the text.  After candidate loss | 1 | 1 |
+| ACK obligation | `bfd34bc6b6895906`.  Every candidate thinks an ACK is overdue at `now=3309000us`.  Model accounting, after candidate loss.  Not ngtcp2 being late (TRIAGE, the obligation note) | 1 | 3 |
+| Unclassified | `405f42ebc91f5bc1`.  One exhaustive step: ngtcp2 returns success with no callbacks on `DATA_BLOCKED v=2`, `STOP_SENDING id=61`, `RESET_STREAM id=63`, and both candidates permit only `STREAM_LIMIT_ERROR` (4).  The same signature was A2's "observed OK" bucket on 2026-09-19; this input is not that frame.  `conn_recv_stop_sending` and `conn_recv_reset_stream` do contain the §4.6 limit check, and the return here was 0, so this step is not a confirmed bypass | 1 | 1 |
+
+The 59 transport-parameter disagreements are the raw corpus bytes fed to
+`quic_h_params_status` and to `ngtcp2_transport_params_decode`, compared only
+on whether decoding succeeds.  They are not tied to a spec sentence.
+
+## G. SHOULDs ngtcp2 does not follow, corpus replay of 2026-09-21
+
+Same 2456 inputs, `out/endpoint_diff` after the receive-side recommendation
+check.  10086 sends and 14340 receives were asked.  None of these is a
+mismatch: every step was accepted.  A generic error code (§11) counts as
+following the SHOULD.
+
+Receive counts use the first candidate.  An ACK of a packet that candidate
+has not recorded as sent is counted under §13.1 even when a later candidate
+would have recorded the send.
+
+| Count | What ngtcp2 did | Recommendation |
+|---:|---|---|
+| 340 | Accepted an ACK whose largest packet number is one this side has not sent | §13.1, line 5030: that SHOULD be `PROTOCOL_VIOLATION` when it can be detected (`recv:ackUnsent`) |
+| 97 | Sent `RESET_STREAM` with an application error code other than the one from `STOP_SENDING` | §3.5, line 1263: the code SHOULD be copied; any application error code is still allowed (`stream:RESET_STREAM`) |
+| 58 | Accepted a `STREAM` or `RESET_STREAM` that changes a known final size | §4.5, lines 1517 and 1520: that SHOULD be `FINAL_SIZE_ERROR` (`recv:finalSize`) |
+| 45 | Sent `DATA_BLOCKED` while not at the connection data limit | §4.1, line 1375: send it when sent data has reached the peer's limit (`streamTable:DATA_BLOCKED`) |
+| 30 | Sent `NEW_CONNECTION_ID` again after that frame had been acknowledged | §13.3, line 5461: SHOULD avoid retransmitting information once it is acknowledged (`retransmitAcked:NEW_CONNECTION_ID`) |
+| 4 | Sent `STREAM` again after that frame had been acknowledged | the same sentence (`retransmitAcked:STREAM`) |
+| 2 | Sent a packet with no ACK while at least two ack-eliciting packets were outstanding | §13.2.2, line 5163: SHOULD send an ACK after two ack-eliciting packets (`twoAckEliciting`) |
 
 ## What is not covered
 

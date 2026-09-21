@@ -29,7 +29,9 @@ RFC 9000 A.3 only moves the candidate up a window `if candidate_pn <
 
 Found by reading the code while writing the model, confirmed with a standalone
 call. With `NDEBUG` the function returns a value above `NGTCP2_MAX_PKT_NUM`,
-which both callers in `ngtcp2_conn.c` reject, so release builds are fine.
+which both callers in `ngtcp2_conn.c` reject.  That does not make release
+builds safe: `CMakeLists.txt` strips `-DNDEBUG`, so the assert is live in a
+normal build (`DIFFERENCES.md` A5 and section F).
 Reaching it remotely needs `max_pkt_num` within half a window of 2^62, and a
 peer can raise that by at most 2^31 per authenticated packet, so this is a
 latent debug-build assert, not a practical attack. `pkt_diff` keeps the expected
